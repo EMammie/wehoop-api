@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint + types + unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+
+  integration:
+    name: migrations + integration
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Start local Supabase
+        run: pnpm supabase start -x studio,imgproxy,inbucket,logflare,vector,edge-runtime 2>&1 | tail -5
+      - name: Apply migrations from scratch
+        run: pnpm supabase db reset
+      - name: Export local keys
+        run: |
+          pnpm supabase status -o env | sed 's/^/export /' > /tmp/supabase.env
+          cat /tmp/supabase.env | sed 's/=.*/=***/'
+      - name: Integration tests
+        run: |
+          source /tmp/supabase.env
+          export DATABASE_URL="$DB_URL"
+          export DATABASE_SESSION_URL="$DB_URL"
+          export SUPABASE_URL="$API_URL"
+          export SUPABASE_ANON_KEY="$ANON_KEY"
+          export SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY"
+          pnpm test:int
+      - name: Invariants
+        run: |
+          source /tmp/supabase.env
+          export DATABASE_URL="$DB_URL"
+          pnpm invariants

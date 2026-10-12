@@ -1,0 +1,19 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+
+# Supabase local state
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+
+# Claude Code local settings (shared agents/skills ARE committed)
+.claude/settings.local.json
+
+# Large recorded replays (keep curated fixtures only)
+fixtures/**/*.raw.jsonl

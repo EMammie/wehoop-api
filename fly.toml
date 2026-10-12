@@ -1,0 +1,42 @@
+# Fly.io config. Two process groups from one image. Deployed in M4.
+app = "wehoop-api"
+primary_region = "ewr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  LOG_LEVEL = "info"
+  PORT = "3000"
+
+[processes]
+  api = "node src/bin/api.js"
+  worker = "node src/bin/worker.js"
+
+[http_service]
+  processes = ["api"]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+# Exactly one worker. It also holds a Postgres advisory lock so a second
+# instance exits immediately if one is ever started by mistake.
+[[vm]]
+  processes = ["worker"]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[[vm]]
+  processes = ["api"]
+  size = "shared-cpu-1x"
+  memory = "256mb"

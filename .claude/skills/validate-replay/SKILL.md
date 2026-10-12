@@ -1,0 +1,29 @@
+---
+name: validate-replay
+description: Replay one Sportradar simulation recording through the wehoop-api worker and prove the change-stream invariants (idempotence, no regression, gap-free seq, outbox parity, crash recovery). Usage: /validate-replay <league> <recordingId>. Produces a dated report under devlog/evidence/replays/.
+---
+
+# /validate-replay <league> <recordingId>
+
+Run the standard replay battery against a clean local database and write the results to `devlog/evidence/replays/<date>-<league>-<recordingId>.md`. Every section quotes the exact command and its captured output. Use the `validator` agent's rules of evidence.
+
+## Preconditions
+- `pnpm supabase status` running. Working tree clean. Note `git rev-parse HEAD`.
+- `pnpm sim list --league <league>` shows the recording and which feeds it offers.
+
+## Battery
+
+1. **Clean replay.** `pnpm supabase db reset`, then `pnpm dev:worker --mode sim --league <league> --recording <id> --until closed` while `pnpm subscribe --game <uuid> --record /tmp/sub-1.jsonl` runs. Capture: final score from `games`, `count(*)` of `play_events`, `max(seq)` of `game_changes`, and the subscriber's recorded seq range. Assert seq 1..N contiguous in the recording.
+
+2. **Idempotence.** Re-run the same replay without resetting. Capture `count(*) from game_changes` before and after; assert equal. Capture `count(*) from ingest.stale_observations`; assert > 0 (the restart from 0–0 was rejected as stale).
+
+3. **Equivalence.** `pnpm supabase db reset`, replay again into the clean DB, dump canonical state (`pnpm dump-game --game <uuid> > /tmp/run-b.json`) and diff against the dump from step 1. Assert empty diff.
+
+4. **Crash recovery.** `pnpm supabase db reset`, start the replay, and after ~40 s `kill -9` the worker PID (record time and PID). Restart it with the same arguments to completion. Run `pnpm invariants`. Assert 0 gaps, 0 duplicates, final score equals step 1, subscriber recovered via `/changes` (grep its log for `catch-up`).
+
+5. **Corrections.** `pnpm sim inject --game <uuid> --mutate-event <providerEventId>` then `--delete-event <providerEventId>`. Assert exactly one `event_update` and one `event_delete` appended with new seqs, and the play row updated / soft-deleted in place.
+
+6. **Invariants.** `pnpm invariants` full output.
+
+## Report
+Write the report file with environment header, one section per step (command, output, PASS/FAIL), and a summary table. Return the path and the summary.
