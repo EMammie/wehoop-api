@@ -36,7 +36,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Start local Supabase
-        run: pnpm supabase start -x studio,imgproxy,inbucket,logflare,vector,edge-runtime 2>&1 | tail -5
+        run: pnpm supabase start -x studio,imgproxy,mailpit,logflare,vector,edge-runtime
       - name: Apply migrations from scratch
         run: pnpm supabase db reset
       - name: Export local keys

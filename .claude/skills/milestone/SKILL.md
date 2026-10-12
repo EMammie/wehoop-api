@@ -30,6 +30,9 @@ Orchestrate milestone M<n> of `docs/PLAN.md` through the four agents in `.claude
    - Push the branch and open a PR with `gh pr create --fill --base main` whose body links the evidence file. Do **not** merge and do **not** tag; the user merges and runs `pnpm release:tag`.
    - Final report to the user: branch, PR URL, review verdict, evidence summary table, devlog path, open shoulds/nits, and anything the user must do (merge, tag, confirm Buffer account).
 
+## Bootstrap clause (M0, or any work that already landed on `main`)
+If the milestone's implementation is already on `main` (as M0's scaffold was), skip step 2, have the reviewer review the `HEAD` tree instead of a diff, point the validator at `HEAD`, have devlog use `git log -1` instead of `git log main..HEAD`, and commit evidence + devlog on a branch named `m<n>-evidence` so a PR still exists for the user to merge.
+
 ## Gates (never skip)
 - No commit to `main`.
 - No tag before the user merges.

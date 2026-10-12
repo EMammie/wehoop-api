@@ -55,6 +55,8 @@ Each milestone runs `/milestone <n>`: implementer → reviewer (≤2 blocker loo
 
 Agents: `.claude/agents/implementer.md`, `reviewer.md`, `validator.md`, `devlog.md`. Skills: `.claude/skills/milestone`, `.claude/skills/validate-replay`.
 
+Agent write boundaries ("validator writes only under `devlog/evidence/`", "implementer never touches `.github/`", "reviewer is read-only") are enforced by review, not by tooling: the `tools:` frontmatter cannot scope paths. The reviewer checks `git diff --stat` for out-of-bounds files on every milestone.
+
 ## Devlog conventions
 
 `devlog/NN-<slug>.md`: a post draft (hook, what shipped, what broke, what's next), a capture checklist (which terminal recordings / screenshots to take), and three alternative hooks. Numbers come from `devlog/evidence/` only. Buffer posting is gated by `DEVLOG_BUFFER=1`.

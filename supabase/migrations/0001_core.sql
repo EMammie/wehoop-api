@@ -22,7 +22,7 @@ alter default privileges in schema ingest grant all on sequences to service_role
 alter default privileges in schema ingest grant execute on functions to service_role;
 
 -- Clients may only read public tables. Remove the default write grants Supabase ships with.
-alter default privileges in schema public revoke insert, update, delete, truncate, references, trigger on tables from anon, authenticated;
+alter default privileges in schema public revoke insert, update, delete, truncate, references, trigger, maintain on tables from anon, authenticated;
 
 -------------------------------------------------------------------------------
 -- Types
@@ -40,6 +40,9 @@ create type public.change_type as enum (
   'status', 'period', 'stats_team', 'stats_player'
 );
 create type ingest.ingest_source as enum ('production', 'trial', 'simulation', 'fixture');
+-- Where a normalized batch came from (plan §4 Observation.source). Distinct from
+-- ingest_source, which classifies runs/calls for quota purposes.
+create type public.observation_source as enum ('push', 'rest', 'simulation', 'fixture');
 
 -------------------------------------------------------------------------------
 -- Helpers
@@ -54,6 +57,30 @@ begin
   return new;
 end;
 $$;
+revoke execute on function public.set_updated_at() from public, anon, authenticated;
+
+-- game_changes is append-only. Updates are never allowed; deletes only by the
+-- retention job for rows already below games.retained_from_seq.
+create or replace function public.game_changes_append_only()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+declare floor_seq bigint;
+begin
+  if tg_op = 'UPDATE' then
+    raise exception 'game_changes is append-only (game %, seq %)', old.game_id, old.seq
+      using errcode = 'restrict_violation';
+  end if;
+  select retained_from_seq into floor_seq from public.games where id = old.game_id;
+  if floor_seq is null or old.seq >= floor_seq then
+    raise exception 'game_changes rows at or above retained_from_seq cannot be deleted (game %, seq %, floor %)',
+      old.game_id, old.seq, floor_seq using errcode = 'restrict_violation';
+  end if;
+  return old;
+end;
+$$;
+revoke execute on function public.game_changes_append_only() from public, anon, authenticated;
 
 -------------------------------------------------------------------------------
 -- Reference data
@@ -238,7 +265,7 @@ create table public.games (
   clock_extra        jsonb,
   progress_key       jsonb,                         -- [statusRank, periodSequence, -clockSeconds, eventCount]
   observed_at        timestamptz,
-  observed_source    text,
+  observed_source    public.observation_source,
   provider_updated_at timestamptz,
   created_at         timestamptz not null default now(),
   updated_at         timestamptz not null default now(),
@@ -350,6 +377,9 @@ create table public.game_changes (
   check (seq >= 1)
 );
 create index game_changes_play_event_id_idx on public.game_changes (play_event_id) where play_event_id is not null;
+create trigger game_changes_append_only
+  before update or delete on public.game_changes
+  for each row execute function public.game_changes_append_only();
 
 create table public.standings (
   season_id    uuid not null references public.seasons(id),
@@ -425,8 +455,11 @@ create table ingest.product_quotas (
   qps         int not null default 1,
   reserve     int not null default 100,            -- QuotaGuard refuses below remaining - reserve
   note        text,
+  verified_at timestamptz,                         -- null until a human confirms the limit in the Sportradar console
+  created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
 );
+create trigger product_quotas_set_updated_at before update on ingest.product_quotas for each row execute function public.set_updated_at();
 
 create table ingest.provider_calls (
   id             bigint generated always as identity primary key,
@@ -440,8 +473,10 @@ create table ingest.provider_calls (
   duration_ms    int,
   bytes          int,
   quota_counted  boolean not null,
-  called_at      timestamptz not null default now()
+  called_at      timestamptz not null default now(),
+  check (not quota_counted or product is not null)
 );
+comment on column ingest.provider_calls.url is 'Request URL with any api_key / token query parameters stripped before insert.';
 create index provider_calls_quota_idx on ingest.provider_calls (product, called_at) where quota_counted;
 create index provider_calls_run_id_idx on ingest.provider_calls (run_id);
 
@@ -450,6 +485,7 @@ select
   q.product,
   q.limit_30d,
   q.reserve,
+  q.verified_at,                                        -- QuotaGuard must refuse while null
   coalesce(c.used, 0)::int                              as used_30d,
   (q.limit_30d - coalesce(c.used, 0))::int              as remaining,
   (q.limit_30d - coalesce(c.used, 0) - q.reserve)::int  as spendable
@@ -476,6 +512,8 @@ create index budget_reservations_game_id_idx on ingest.budget_reservations (game
 create index budget_reservations_product_idx on ingest.budget_reservations (product);
 
 -- Exactly one row per durable change: the PK *is* the change id.
+-- Outbox rows are for per-game channels only ('game:{uuid}'). Pulses and
+-- league:{code}:scores deltas are best-effort and go straight to the transport.
 create table ingest.broadcast_outbox (
   change_id        uuid primary key references public.game_changes(id) on delete cascade,
   channel          text not null,
@@ -487,7 +525,8 @@ create table ingest.broadcast_outbox (
   next_attempt_at  timestamptz not null default now(),
   last_error       text,
   dead_at          timestamptz,
-  unique (channel, seq)
+  unique (channel, seq),
+  check (channel like 'game:%')
 );
 create index broadcast_outbox_pending_idx on ingest.broadcast_outbox (channel, seq) where published_at is null and dead_at is null;
 
@@ -495,7 +534,7 @@ create index broadcast_outbox_pending_idx on ingest.broadcast_outbox (channel, s
 create table ingest.stale_observations (
   id                   bigint generated always as identity primary key,
   game_id              uuid not null references public.games(id) on delete cascade,
-  source               ingest.ingest_source not null,
+  source               public.observation_source not null,
   fetched_at           timestamptz not null,
   progress_key         jsonb not null,
   stored_progress_key  jsonb,
@@ -519,7 +558,8 @@ begin
     execute format('alter table public.%I enable row level security', t);
     execute format('create policy %I_read on public.%I for select to anon, authenticated using (true)', t, t);
     -- Belt and braces: strip write grants even though no write policy exists.
-    execute format('revoke insert, update, delete, truncate, references, trigger on public.%I from anon, authenticated', t);
+    execute format('revoke insert, update, delete, truncate, references, trigger, maintain on public.%I from anon, authenticated', t);
+    execute format('grant select on public.%I to anon, authenticated', t);
   end loop;
 end $$;
 
@@ -563,7 +603,9 @@ insert into public.leagues (code, name, provider_alias) values
 
 -- Default trial quotas. Replace with the real numbers from the Sportradar console
 -- before any production/trial run (ingest/product_quotas is read, never assumed).
+-- verified_at stays null here on purpose: QuotaGuard refuses to spend quota until
+-- an operator sets limit_30d from the console and stamps verified_at.
 insert into ingest.product_quotas (product, limit_30d, qps, reserve, note) values
-  ('wnba', 1000, 1, 100, 'default trial; verify in console'),
-  ('ncaawb', 1000, 1, 100, 'default trial; verify in console'),
-  ('unrivaled', 1000, 1, 100, 'default trial; verify in console');
+  ('wnba', 1000, 1, 100, 'placeholder; set from console and stamp verified_at'),
+  ('ncaawb', 1000, 1, 100, 'placeholder; set from console and stamp verified_at'),
+  ('unrivaled', 1000, 1, 100, 'placeholder; set from console and stamp verified_at');

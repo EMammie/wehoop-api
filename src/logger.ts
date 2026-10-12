@@ -8,7 +8,10 @@ const redactPaths = [
   'headers["x-api-key"]',
   'apiKey',
   'serviceRoleKey',
-  'url', // Sportradar URLs may carry api_key query params in older formats
+  // Sportradar URLs may carry api_key query params in older formats
+  'url',
+  '*.url',
+  'req.url',
 ];
 
 export function createLogger(opts: { level?: string; pretty?: boolean } = {}): Logger {
@@ -28,5 +31,3 @@ export function createLogger(opts: { level?: string; pretty?: boolean } = {}): L
       : {}),
   });
 }
-
-export const log = createLogger();

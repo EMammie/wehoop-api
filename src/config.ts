@@ -29,6 +29,16 @@ const EnvSchema = z.object({
 
 export type Env = z.infer<typeof EnvSchema>;
 
+/** Supabase's Supavisor transaction pooler listens on 6543; pgbouncer URLs carry a flag. */
+export function looksLikeTransactionPooler(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.port === '6543' || u.searchParams.get('pgbouncer') === 'true';
+  } catch {
+    return false;
+  }
+}
+
 export interface Config {
   mode: Mode;
   nodeEnv: Env['NODE_ENV'];
@@ -58,15 +68,35 @@ export function loadConfig(source: Record<string, string | undefined> = process.
   }
   const e = parsed.data;
 
-  if (e.MODE !== 'sim' && !e.SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error(`SUPABASE_SERVICE_ROLE_KEY is required when MODE=${e.MODE}`);
+  const problems: string[] = [];
+  if (e.MODE !== 'sim') {
+    if (!e.SUPABASE_SERVICE_ROLE_KEY)
+      problems.push(`SUPABASE_SERVICE_ROLE_KEY is required when MODE=${e.MODE}`);
+    if (!e.DATABASE_SESSION_URL) {
+      problems.push(
+        `DATABASE_SESSION_URL is required when MODE=${e.MODE} (advisory lock + LISTEN need a session-mode connection)`,
+      );
+    }
+    if (!e.SPORTRADAR_WNBA_KEY && !e.SPORTRADAR_NCAAWB_KEY && !e.SPORTRADAR_UNRIVALED_KEY) {
+      problems.push(`at least one SPORTRADAR_*_KEY is required when MODE=${e.MODE}`);
+    }
   }
+  if (e.MODE === 'production' && e.SPORTRADAR_ACCESS_LEVEL !== 'production') {
+    problems.push('SPORTRADAR_ACCESS_LEVEL must be "production" when MODE=production');
+  }
+  const sessionUrl = e.DATABASE_SESSION_URL ?? e.DATABASE_URL;
+  if (looksLikeTransactionPooler(sessionUrl)) {
+    problems.push(
+      'DATABASE_SESSION_URL points at a transaction-mode pooler (port 6543 / pgbouncer=true); advisory locks and LISTEN would silently not work',
+    );
+  }
+  if (problems.length > 0) throw new Error(`Invalid environment:\n  ${problems.join('\n  ')}`);
 
   return {
     mode: e.MODE,
     nodeEnv: e.NODE_ENV,
     logLevel: e.LOG_LEVEL,
-    db: { url: e.DATABASE_URL, sessionUrl: e.DATABASE_SESSION_URL ?? e.DATABASE_URL },
+    db: { url: e.DATABASE_URL, sessionUrl },
     supabase: {
       url: e.SUPABASE_URL,
       ...(e.SUPABASE_ANON_KEY ? { anonKey: e.SUPABASE_ANON_KEY } : {}),
