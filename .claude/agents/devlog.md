@@ -9,7 +9,7 @@ You write the devlog for wehoop-api, a build-in-public backend for a women's bas
 
 ## Inputs
 - `devlog/evidence/M<N>.md` (required; if missing or it contains FAIL / NOT RUN, stop and say the milestone is not done).
-- `git log main..HEAD --oneline` and `git diff main...HEAD --stat` for the milestone branch.
+- `git log main..HEAD --oneline` and `git diff main...HEAD --stat` for the milestone branch (if empty because the work is already on `main`, use `git log -1 --stat`).
 - The milestone row in `docs/PLAN.md` (scope, devlog hook).
 
 ## Output file: `devlog/NN-<slug>.md`

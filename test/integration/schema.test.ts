@@ -3,8 +3,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 /**
  * Access-control and schema invariants against the local Supabase stack.
- * Requires `pnpm supabase start` and DATABASE_URL (postgres superuser locally).
- * We switch roles with `set local role` to act as anon / authenticated.
+ * Requires `pnpm supabase start` and DATABASE_URL. The local `postgres` role is not a
+ * superuser but has BYPASSRLS and membership in anon/authenticated, so `set local role`
+ * lets us act as a client.
  */
 const url = process.env.DATABASE_URL;
 if (!url) throw new Error('DATABASE_URL is required for integration tests');
@@ -108,6 +109,74 @@ describe('change stream constraints', () => {
            values (${change.id}, ${`game:${game.id}`}, ${game.id}, 1)`,
         ).rejects.toThrow(/duplicate key/);
         // roll back by throwing
+        throw new Error('__rollback__');
+      })
+      .catch((e: Error) => {
+        if (e.message !== '__rollback__') throw e;
+      });
+  });
+
+  it('game_changes rejects updates and deletes above retained_from_seq, allows deletes below', async () => {
+    await sql
+      .begin(async (tx) => {
+        const [game] = await tx<{ id: string }[]>`
+          insert into public.games (league, provider_game_id, scheduled_at)
+          values ('wnba', 'test-append-only', now()) returning id
+        `;
+        if (!game) throw new Error('insert failed');
+        for (const seq of [1, 2, 3]) {
+          await tx`insert into public.game_changes (game_id, seq, change_type, body)
+                   values (${game.id}, ${seq}, 'status', '{}'::jsonb)`;
+        }
+        await tx`update public.games set last_seq = 3 where id = ${game.id}`;
+        // Each expected failure runs in its own savepoint so the outer tx stays usable.
+        await expect(
+          tx.savepoint(
+            (sp) =>
+              sp`update public.game_changes set body = '{"x":1}'::jsonb where game_id = ${game.id} and seq = 1`,
+          ),
+        ).rejects.toThrow(/append-only/);
+        await expect(
+          tx.savepoint(
+            (sp) => sp`delete from public.game_changes where game_id = ${game.id} and seq = 1`,
+          ),
+        ).rejects.toThrow(/cannot be deleted/);
+        // retention job moves the floor, then the old row may go
+        await tx`update public.games set retained_from_seq = 2 where id = ${game.id}`;
+        await tx`delete from public.game_changes where game_id = ${game.id} and seq = 1`;
+        const [left] = await tx<
+          { n: number }[]
+        >`select count(*)::int as n from public.game_changes where game_id = ${game.id}`;
+        expect(left?.n).toBe(2);
+        throw new Error('__rollback__');
+      })
+      .catch((e: Error) => {
+        if (e.message !== '__rollback__') throw e;
+      });
+  });
+
+  it('refuses a quota-counted provider call without a product', async () => {
+    await expect(
+      sql`insert into ingest.provider_calls (source, feed, url, quota_counted) values ('trial', 'pbp', 'https://x', true)`,
+    ).rejects.toThrow(/check constraint/);
+  });
+
+  it('refuses outbox rows for non-game channels', async () => {
+    await sql
+      .begin(async (tx) => {
+        const [game] = await tx<{ id: string }[]>`
+          insert into public.games (league, provider_game_id, scheduled_at)
+          values ('wnba', 'test-outbox-channel', now()) returning id`;
+        if (!game) throw new Error('insert failed');
+        const [change] = await tx<{ id: string }[]>`
+          insert into public.game_changes (game_id, seq, change_type, body)
+          values (${game.id}, 1, 'status', '{}'::jsonb) returning id`;
+        if (!change) throw new Error('insert failed');
+        await tx`update public.games set last_seq = 1 where id = ${game.id}`;
+        await expect(
+          tx`insert into ingest.broadcast_outbox (change_id, channel, game_id, seq)
+             values (${change.id}, 'league:wnba:scores', ${game.id}, 1)`,
+        ).rejects.toThrow(/check constraint/);
         throw new Error('__rollback__');
       })
       .catch((e: Error) => {

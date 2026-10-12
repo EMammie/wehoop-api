@@ -64,13 +64,49 @@ where t.schemaname = 'public'
     where n.nspname = t.schemaname and c.relname = t.tablename and c.relrowsecurity
   );
 
+-- check: retained_head_exists | expect: 0
+select count(*)
+from public.games g
+where g.last_seq >= g.retained_from_seq
+  and not exists (
+    select 1 from public.game_changes c
+    where c.game_id = g.id and c.seq = g.retained_from_seq
+  );
+
+-- check: anon_has_no_maintain_privilege_on_public | expect: 0
+select count(*)
+from pg_tables t
+where t.schemaname = 'public'
+  and (
+    has_table_privilege('anon', format('%I.%I', t.schemaname, t.tablename), 'MAINTAIN')
+    or has_table_privilege('authenticated', format('%I.%I', t.schemaname, t.tablename), 'MAINTAIN')
+  );
+
+-- check: anon_has_no_usage_on_ingest_schema | expect: 0
+select (has_schema_privilege('anon', 'ingest', 'USAGE')::int
+      + has_schema_privilege('authenticated', 'ingest', 'USAGE')::int);
+
+-- check: public_schema_has_no_client_write_policies | expect: 0
+select count(*)
+from pg_policies
+where schemaname = 'public'
+  and cmd in ('INSERT', 'UPDATE', 'DELETE', 'ALL')
+  and (roles::text[] && array['anon', 'authenticated', 'public']);
+
 -- check: realtime_has_no_client_insert_policy | expect: 0
 select count(*)
 from pg_policies
 where schemaname = 'realtime'
   and tablename = 'messages'
   and cmd in ('INSERT', 'ALL')
-  and (roles::text[] && array['anon', 'authenticated']);
+  and (roles::text[] && array['anon', 'authenticated', 'public']);
+
+-- check: game_changes_has_append_only_trigger | expect: 1
+select count(*)
+from pg_trigger
+where tgrelid = 'public.game_changes'::regclass
+  and tgname = 'game_changes_append_only'
+  and not tgisinternal;
 
 -- check: views_use_security_invoker | expect: 0
 select count(*)

@@ -4,6 +4,6 @@ One post draft per milestone, written by the `devlog` agent from `evidence/M<N>.
 
 | # | Milestone | File | Evidence |
 |---|---|---|---|
-| 00 | M0 Scaffold | pending | pending |
+| 00 | M0 Scaffold | [00-scaffold.md](00-scaffold.md) | [evidence/M0.md](evidence/M0.md) |
 
 `evidence/replays/` holds dated reports from `/validate-replay`.
