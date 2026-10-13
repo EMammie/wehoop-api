@@ -12,12 +12,11 @@ import type {
   Score,
 } from '../model/live-event.js';
 import { deriveClockRunning } from './clock.js';
+import { diffEvents } from './diff.js';
 import type { FaultInjector } from './fault.js';
 import {
   type BatchDecision,
   decideBatch,
-  decideEvent,
-  type EventAction,
   newestPosition,
   type StoredEventForFreshness,
 } from './freshness.js';
@@ -292,80 +291,28 @@ export async function applyChanges(
       await tx`update public.games set watch_run_id = ${observation.watchId} where id = ${gameId}`;
     }
 
-    // 4. Diff.
-    const changes: PendingChange[] = [];
-    const counts: ApplyCounts = {
-      inserted: 0,
-      updated: 0,
-      deleted: 0,
-      ignoredOlder: 0,
-      unchanged: 0,
-    };
-    const deletedSet = new Set(batch.deletedEventIds);
-    const eventWrites: Array<{ action: EventAction; ev: NormalizedEvent; hash: string }> = [];
-    const byId = new Map<string, NormalizedEvent>();
-    for (const ev of batch.events) byId.set(ev.providerEventId, ev); // last occurrence wins
-    for (const ev of byId.values()) {
-      if (deletedSet.has(ev.providerEventId)) continue;
-      const hash = contentHash(ev.body);
-      const s = stored.get(ev.providerEventId);
-      const action = decideEvent(
-        s
-          ? {
-              contentHash: s.contentHash,
-              providerUpdatedAt: iso(s.providerUpdatedAt),
-              deleted: s.deletedAt !== null,
-            }
-          : undefined,
-        { contentHash: hash, providerUpdatedAt: ev.providerUpdatedAt },
-        false,
-      );
-      switch (action) {
-        case 'insert':
-        case 'reinstate':
-          counts.inserted++;
-          eventWrites.push({ action, ev, hash });
-          changes.push({
-            type: 'event_insert',
-            providerEventId: ev.providerEventId,
-            body: ev.body,
-          });
-          break;
-        case 'update':
-          counts.updated++;
-          eventWrites.push({ action, ev, hash });
-          changes.push({
-            type: 'event_update',
-            providerEventId: ev.providerEventId,
-            body: ev.body,
-          });
-          break;
-        case 'ignore_older':
-          counts.ignoredOlder++;
-          break;
-        default:
-          counts.unchanged++;
-      }
-    }
+    // 4. Diff (pure, see diff.ts).
+    const diff = diffEvents(
+      new Map(
+        storedRows.map((r) => [
+          r.providerEventId,
+          {
+            contentHash: r.contentHash,
+            providerUpdatedAt: iso(r.providerUpdatedAt),
+            deleted: r.deletedAt !== null,
+          },
+        ]),
+      ),
+      batch.events,
+      batch.deletedEventIds,
+    );
+    const changes: PendingChange[] = [...diff.changes];
+    const counts: ApplyCounts = diff.counts;
+    const eventWrites = diff.writes.map((w) => ({ action: w.action, ev: w.event, hash: w.hash }));
     const deletions: StoredEventRow[] = [];
-    for (const id of deletedSet) {
+    for (const id of diff.deletions) {
       const s = stored.get(id);
-      const action = decideEvent(
-        s
-          ? {
-              contentHash: s.contentHash,
-              providerUpdatedAt: iso(s.providerUpdatedAt),
-              deleted: s.deletedAt !== null,
-            }
-          : undefined,
-        null,
-        true,
-      );
-      if (action === 'delete' && s) {
-        counts.deleted++;
-        deletions.push(s);
-        changes.push({ type: 'event_delete', providerEventId: id, body: { providerEventId: id } });
-      }
+      if (s) deletions.push(s);
     }
 
     // Game-level durable fields (status / score / period / line score).

@@ -16,7 +16,6 @@ export function createSessionDb(url: string, onClose: (err?: Error) => void): Se
     max_lifetime: null,
     connect_timeout: 10,
     prepare: false,
-    transform: postgres.camel,
     onclose: () => onClose(),
   });
 }

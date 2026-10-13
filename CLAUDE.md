@@ -12,12 +12,17 @@ pnpm supabase db reset       # drop + apply supabase/migrations + seed
 pnpm check                   # biome ci + tsc --noEmit + vitest run (unit)
 pnpm test                    # unit tests
 pnpm test:int                # integration tests; requires `supabase start`
-pnpm dev:worker              # ingestion worker (reads MODE=sim|trial|production)
-pnpm dev:api                 # Hono API on :3000
+pnpm dev:worker --mode sim --league wnba --recording <id> --until closed   # replay one recording (3 s pbp polls)
+pnpm dev:worker --mode sim --league wnba --replay-file <jsonl> --pace 0    # replay a recorded session from disk
+pnpm dev:api                 # Hono API on :3000 (snapshot, changes, health)
 pnpm sim list --league wnba  # list Sportradar simulation recordings (no API key)
-pnpm subscribe --game <uuid> # reference client: subscribe + reconnect contract
+pnpm sim inject --game <uuid> --mutate-event <id> | --delete-event <id>   # inject a correction / deletion
+pnpm subscribe --game <uuid> --record <jsonl> [--auth guest]   # reference client: subscribe + reconnect contract
+pnpm dump-game --game <uuid> # canonical JSON of play_events bodies, periods, score (for replay diffs)
 pnpm invariants              # run test/integration/invariants.sql against local DB
 ```
+
+`WEHOOP_FAULT=before_commit[:seq]|after_publish[:seq]` makes the worker SIGKILL itself at a crash point (M1 evidence only; refused in production).
 
 ## Non-negotiables
 

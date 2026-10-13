@@ -1,0 +1,190 @@
+[
+ {
+  "payload": {
+   "game": {
+    "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+    "title": "2026 Commissioner's Cup Final",
+    "status": "inprogress",
+    "coverage": "full",
+    "reference": "1052600001",
+    "scheduled": "2026-06-30T23:00:00+00:00",
+    "home": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "points": 0,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:3446"
+    },
+    "away": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "points": 0,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:35550"
+    }
+   },
+   "clocks": {
+    "game": "1000",
+    "running": false,
+    "shot": "24.00",
+    "game_decimal": "1000"
+   }
+  },
+  "locale": "en",
+  "metadata": {
+   "match": "sd:match:40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+   "league": "wnba",
+   "locale": "en",
+   "status": "inprogress",
+   "operation": "update",
+   "version": "v7"
+  }
+ },
+ {
+  "payload": {
+   "game": {
+    "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+    "title": "2026 Commissioner's Cup Final",
+    "status": "inprogress",
+    "coverage": "full",
+    "reference": "1052600001",
+    "scheduled": "2026-06-30T23:00:00+00:00",
+    "home": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:3446"
+    },
+    "away": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:35550"
+    }
+   },
+   "clocks": {
+    "game": "1000",
+    "running": false,
+    "shot": "24.00",
+    "game_decimal": "1000"
+   }
+  },
+  "locale": "en",
+  "metadata": {
+   "match": "sd:match:40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+   "league": "wnba",
+   "locale": "en",
+   "status": "inprogress",
+   "operation": "update",
+   "version": "v7"
+  }
+ },
+ {
+  "payload": {
+   "game": {
+    "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+    "title": "2026 Commissioner's Cup Final",
+    "status": "inprogress",
+    "coverage": "full",
+    "reference": "1052600001",
+    "scheduled": "2026-06-30T23:00:00+00:00",
+    "home": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:3446"
+    },
+    "away": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:35550"
+    }
+   },
+   "period": {
+    "sequence": 1,
+    "number": 1,
+    "type": "REG"
+   },
+   "clocks": {
+    "game": "1000",
+    "running": true,
+    "shot": "24.00",
+    "game_decimal": "1000"
+   }
+  },
+  "locale": "en",
+  "metadata": {
+   "match": "sd:match:40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+   "league": "wnba",
+   "locale": "en",
+   "status": "inprogress",
+   "operation": "update",
+   "version": "v7"
+  }
+ },
+ {
+  "payload": {
+   "game": {
+    "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+    "title": "2026 Commissioner's Cup Final",
+    "status": "inprogress",
+    "coverage": "full",
+    "reference": "1052600001",
+    "scheduled": "2026-06-30T23:00:00+00:00",
+    "home": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "points": 0,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:3446"
+    },
+    "away": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "points": 0,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:35550"
+    }
+   },
+   "clocks": {
+    "game": "1000",
+    "running": false,
+    "game_decimal": "1000"
+   }
+  },
+  "locale": "en",
+  "metadata": {
+   "match": "sd:match:40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+   "league": "wnba",
+   "locale": "en",
+   "status": "inprogress",
+   "operation": "update",
+   "version": "v7"
+  }
+ }
+]

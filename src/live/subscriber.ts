@@ -79,9 +79,13 @@ export class GameSubscriber {
         if (p.success) pulses.push(p.data);
       }
     }
-    changes.sort((a, b) => a.seq - b.seq);
+    // Step 3: only what the snapshot does not already contain, in order, once per id.
+    const seen = new Set<string>();
+    const pending = changes
+      .filter((c) => c.seq > snap.seq && !seen.has(c.id) && seen.add(c.id))
+      .sort((a, b) => a.seq - b.seq);
     await this.enqueue(async () => {
-      for (const c of changes) await this.applyIncoming(c, 'buffer');
+      for (const c of pending) await this.applyIncoming(c, 'buffer');
       for (const p of pulses) await this.applyPulse(p);
     });
   }
