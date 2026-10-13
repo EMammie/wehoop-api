@@ -258,16 +258,106 @@ describe('change stream constraints', () => {
     });
   });
 
-  it('games carries run-generation observation columns and no progress_key', async () => {
+  it('games carries watch-generation observation columns, no progress_key, no observed_run_id', async () => {
     const cols = await sql<{ column_name: string; data_type: string }[]>`
       select column_name, data_type from information_schema.columns
       where table_schema = 'public' and table_name = 'games'
-        and column_name in ('progress_key', 'observed_run_id', 'current_period_sequence')
+        and column_name in ('progress_key', 'observed_run_id', 'watch_run_id', 'current_period_sequence')
       order by column_name`;
     expect(cols).toEqual([
       { column_name: 'current_period_sequence', data_type: 'integer' },
-      { column_name: 'observed_run_id', data_type: 'bigint' },
+      { column_name: 'watch_run_id', data_type: 'bigint' },
     ]);
+  });
+
+  it('rejects re-routing an existing outbox row to another game (UPDATE path)', async () => {
+    await rolledBack(async (tx) => {
+      const a = await seedGameWithChange(tx, 'test-outbox-reroute-a');
+      const b = await seedGameWithChange(tx, 'test-outbox-reroute-b');
+      await tx`insert into ingest.broadcast_outbox (change_id, game_id, seq)
+               values (${a.changeId}, ${a.gameId}, 1)`;
+      // b's outbox row lives at seq 2 so that (b, 1) is free and the composite FK,
+      // not the unique (game_id, seq) tripwire, is what rejects the re-route.
+      const [b2] = await tx<{ id: string }[]>`
+        insert into public.game_changes (game_id, seq, change_type, body)
+        values (${b.gameId}, 2, 'status', '{}'::jsonb) returning id`;
+      if (!b2) throw new Error('change insert failed');
+      await tx`update public.games set last_seq = 2 where id = ${b.gameId}`;
+      await tx`insert into ingest.broadcast_outbox (change_id, game_id, seq)
+               values (${b2.id}, ${b.gameId}, 2)`;
+      await expect(
+        tx.savepoint(
+          (sp) => sp`update ingest.broadcast_outbox set game_id = ${b.gameId}
+                     where change_id = ${a.changeId}`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23503',
+        message: expect.stringMatching(/broadcast_outbox_routes_its_change/),
+      });
+      // When the target (game_id, seq) is already taken, the tripwire fires first.
+      await tx`insert into ingest.broadcast_outbox (change_id, game_id, seq)
+               values (${b.changeId}, ${b.gameId}, 1)`;
+      await expect(
+        tx.savepoint(
+          (sp) => sp`update ingest.broadcast_outbox set game_id = ${b.gameId}
+                     where change_id = ${a.changeId}`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23505',
+        message: expect.stringMatching(/broadcast_outbox_game_id_seq_key/),
+      });
+    });
+  });
+
+  it('games.watch_run_id must reference a real run, and that run cannot be deleted', async () => {
+    await rolledBack(async (tx) => {
+      const { gameId } = await seedGameWithChange(tx, 'test-watch-run');
+      await expect(
+        tx.savepoint(
+          (sp) => sp`update public.games set watch_run_id = 999999999 where id = ${gameId}`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23503',
+        message: expect.stringMatching(/games_watch_run_id_fkey/),
+      });
+      const [run] = await tx<{ id: string }[]>`
+        insert into ingest.ingestion_runs (kind, league, game_id, source)
+        values ('replay', 'wnba', ${gameId}, 'simulation') returning id`;
+      if (!run) throw new Error('run insert failed');
+      const [game] = await tx<{ watch_run_id: string }[]>`
+        update public.games set watch_run_id = ${run.id} where id = ${gameId}
+        returning watch_run_id::text`;
+      expect(game?.watch_run_id).toBe(String(run.id));
+      // The generation a game points at is never pruned (on delete restrict).
+      await expect(
+        tx.savepoint((sp) => sp`delete from ingest.ingestion_runs where id = ${run.id}`),
+      ).rejects.toMatchObject({
+        code: '23503',
+        message: expect.stringMatching(/games_watch_run_id_fkey/),
+      });
+    });
+  });
+
+  it('ingestion_runs.parent_run_id rejects self-reference and accepts another run', async () => {
+    await rolledBack(async (tx) => {
+      const [root] = await tx<{ id: string }[]>`
+        insert into ingest.ingestion_runs (kind, league, source)
+        values ('watch_game', 'wnba', 'simulation') returning id`;
+      if (!root) throw new Error('root run insert failed');
+      await expect(
+        tx.savepoint(
+          (sp) =>
+            sp`update ingest.ingestion_runs set parent_run_id = ${root.id} where id = ${root.id}`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23514',
+        message: expect.stringMatching(/ingestion_runs_not_own_parent/),
+      });
+      const [child] = await tx<{ parent_run_id: string }[]>`
+        insert into ingest.ingestion_runs (kind, league, source, parent_run_id)
+        values ('push_stream', 'wnba', 'simulation', ${root.id}) returning parent_run_id::text`;
+      expect(child?.parent_run_id).toBe(String(root.id));
+    });
   });
 
   it('rejects retained_from_seq beyond last_seq + 1', async () => {
