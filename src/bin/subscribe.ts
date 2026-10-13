@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import { loadConfig } from '../config.js';
 import { type ChangesApi, GameSubscriber } from '../live/subscriber.js';
 import { gameChannel } from '../live/transport.js';
+import { canonicalJson } from '../model/content-hash.js';
 import { canonicalState, stateFromSnapshot } from '../model/game-state.js';
 import { ChangesPageSchema, SnapshotSchema } from '../model/snapshot.js';
 
@@ -114,8 +115,25 @@ async function main() {
         derived !== null && fromSnapshot !== null ? derived === fromSnapshot : null,
     };
   };
+  /** Equal shapes: every change received via Broadcast must decode-equal the same seq from /changes. */
+  const equalsApi = async (): Promise<boolean | null> => {
+    const first = subscriber.applied[0]?.seq;
+    if (first === undefined) return null;
+    const fromApi = [];
+    let after = first - 1;
+    for (;;) {
+      const page = await api.changes(gameId, after, 500);
+      fromApi.push(...page.changes);
+      if (!page.hasMore) break;
+      after = page.nextAfter;
+    }
+    const mine = subscriber.applied.filter((c) => c.seq >= first && c.seq <= subscriber.lastSeq);
+    return (
+      canonicalJson(mine) === canonicalJson(fromApi.filter((c) => c.seq <= subscriber.lastSeq))
+    );
+  };
   const stop = async (code: number) => {
-    log('summary', summary());
+    log('summary', { ...summary(), receivedEqualsApi: await equalsApi().catch(() => null) });
     await client.removeAllChannels();
     process.exit(code);
   };

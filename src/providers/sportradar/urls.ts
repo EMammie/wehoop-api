@@ -34,7 +34,7 @@ export class SimulationUrlResolver implements UrlResolver {
     },
   ) {}
 
-  resolve(feed: Feed): ResolvedUrl {
+  resolve(feed: Feed, _params: { gameId?: string } = {}): ResolvedUrl {
     const feedName = feed === 'summary' ? 'game' : feed;
     const u = new URL(
       `/replay/${this.opts.league}/${encodeURIComponent(this.opts.recordingId)}`,
