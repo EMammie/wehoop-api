@@ -36,12 +36,16 @@
 -------------------------------------------------------------------------------
 alter table ingest.ingestion_runs
   add column parent_run_id bigint references ingest.ingestion_runs(id) on delete restrict,
-  add constraint ingestion_runs_not_own_parent check (parent_run_id is distinct from id);
+  add constraint ingestion_runs_not_own_parent check (parent_run_id is distinct from id),
+  -- Exactly the sub-run kinds carry a parent: a generation is coalesce(parent_run_id, id),
+  -- depth 1, and cannot be forged by giving a root a parent or a sub-run none.
+  add constraint ingestion_runs_sub_run_has_parent
+    check ((kind in ('push_stream', 'backfill')) = (parent_run_id is not null));
 
 create index ingestion_runs_parent_run_id_idx on ingest.ingestion_runs (parent_run_id);
 
 comment on column ingest.ingestion_runs.parent_run_id is
-  'Watch generation this run belongs to. Null for a root watch_game/replay run (the generation itself) and for generation-less runs (poll_schedule, changes, profile). push_stream, backfill and REST-reconciliation sub-runs point at their root run and inherit its id as the watch generation for freshness. On delete restrict: a generation with children is never pruned from under them.';
+  'Watch generation this run belongs to: watchId = coalesce(parent_run_id, id), depth 1. Null for a root watch_game/replay run (the generation itself) and for generation-less runs (poll_schedule, changes, profile). push_stream and backfill sub-runs (REST reconciliation after a stream drop is a backfill) point at their root run and inherit its id as the watch generation for freshness; ingestion_runs_sub_run_has_parent makes exactly those kinds carry a parent. On delete restrict: a generation with children is never pruned from under them.';
 
 -------------------------------------------------------------------------------
 -- 2. public.games: observation columns follow the watch-generation policy
