@@ -67,13 +67,12 @@ where table_schema = 'public'
   and table_name = 'games'
   and column_name = 'progress_key';
 
--- check: games_watch_run_fk_restricts_delete | expect: 1
+-- check: generation_fks_restrict_delete | expect: 2
 select count(*)
 from pg_constraint
-where conrelid = 'public.games'::regclass
-  and contype = 'f'
+where contype = 'f'
   and confdeltype = 'r'
-  and conname like '%watch_run_id%';
+  and conname in ('games_watch_run_id_fkey', 'ingestion_runs_parent_run_id_fkey');
 
 -- check: outbox_has_single_fk | expect: 1
 select count(*)
