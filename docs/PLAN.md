@@ -1,4 +1,4 @@
-# wehoop-api: women's basketball stats backend (rev 4)
+# wehoop-api: women's basketball stats backend (rev 4.2)
 
 ## Context
 
@@ -15,7 +15,7 @@ Decisions made with the user:
 
 Rev 2 incorporates the user's review: separate current plays from the change stream, allocate sequences only for real changes, fix the reconnect contract, private channels with receive-only authorization, budget-aware trial mode, outbox/worker recovery hardening, resilience moved into M1, hosted review out of M0, OOT season type, season-stat tables, `clock_running`, 120–150 h range.
 Rev 3 adds: an explicit freshness/reconciliation policy (hash alone cannot order updates), durable vs observation writes, a `pulse` message carrying `latestSeq` so a missing final change is detectable, paginated `/changes`, one canonical `GameChange` schema shared by Broadcast and REST, and stricter evidence (joins, guest-session auth test, crash points around commit/publish).
-Rev 4 (post-M0 review, 2026-10-12): replaces the monotonic basketball-progress key with a **run-generation freshness policy** (halftime no longer outranks the second half; clock corrections and explicit deletions are accepted; replay restarts and stale in-flight requests are rejected; game-level fields follow the newest observation), and makes outbox routing fields **derived from the change row by constraint** (composite FK + generated channel).
+Rev 4 → 4.2 (post-M0 review, 2026-10-12, two reviewer passes): replaces the monotonic basketball-progress key with a **run-generation freshness policy** (halftime no longer outranks the second half; clock corrections and explicit deletions are accepted; replay restarts and stale in-flight requests are rejected; game-level fields follow the newest observation), and makes outbox routing fields **derived from the change row by constraint** (composite FK + generated channel).
 
 Calendar (today 2026-10-12): WNBA season over; NCAAWB tips off early Nov 2026; Unrivaled starts Jan 2027 (1-on-1 tournament Feb 10–11, 14). First live validation = NCAAWB in November.
 
