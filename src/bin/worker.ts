@@ -127,6 +127,15 @@ async function main() {
   log.info('outbox drained on startup');
   const pulse = new PulseSender({ db, transport, log });
 
+  // This process holds the single-ingester lock, so any root run still marked running belongs
+  // to a worker that died (kill -9 never reaches endRun). Close them before opening ours.
+  const orphaned = await db<{ id: string }[]>`
+    update ingest.ingestion_runs set status = 'aborted', ended_at = now(),
+      error = coalesce(error, 'worker died; marked aborted by the next lock holder')
+    where status = 'running' and kind in ('replay', 'watch_game') returning id::text`;
+  const orphanedIds = orphaned.map((r) => Number(r.id));
+  if (orphanedIds.length > 0) log.warn({ runs: orphanedIds }, 'aborted orphaned runs');
+
   // Run + source.
   const untilClosed = args.until === 'closed';
   let runMeta: Record<string, unknown> = {};
@@ -142,20 +151,14 @@ async function main() {
     if (!sessionId && !args['new-session']) {
       const [prev] = await db<{ id: string; sessionId: string | null }[]>`
         select id::text, meta->>'sessionId' as "sessionId" from ingest.ingestion_runs
-        where kind = 'replay' and source = 'simulation' and status = 'running'
+        where kind = 'replay' and source = 'simulation' and id = any(${orphanedIds})
           and meta->>'recordingId' = ${args.recording}
         order by id desc limit 1`;
       if (prev?.sessionId) {
         sessionId = prev.sessionId;
-        await endRun(
-          db,
-          Number(prev.id),
-          'aborted',
-          'worker restarted; session resumed by a new generation',
-        );
         log.warn(
-          { previousRun: prev.id },
-          'resuming simulation session of a crashed run as a new generation',
+          { previousRun: Number(prev.id) },
+          'resuming the simulation session of the crashed run as a new generation',
         );
       }
     }

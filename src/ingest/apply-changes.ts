@@ -362,7 +362,7 @@ export async function applyChanges(
 
     // Stats: hash compare, always applied.
     const teamIds = await teamIdsFor(
-      tx as unknown as Db,
+      tx,
       g.league,
       batch.teamStats.map((t) => t.providerTeamId),
     );
@@ -450,9 +450,7 @@ export async function applyChanges(
       for (const w of eventWrites) {
         const teamId = w.ev.teamProviderId
           ? (teamIds.get(w.ev.teamProviderId) ??
-            (await teamIdsFor(tx as unknown as Db, g.league, [w.ev.teamProviderId])).get(
-              w.ev.teamProviderId,
-            ) ??
+            (await teamIdsFor(tx, g.league, [w.ev.teamProviderId])).get(w.ev.teamProviderId) ??
             null)
           : null;
         const [row] = await tx<{ id: string }[]>`

@@ -1,3 +1,4 @@
+import type { TransactionSql } from 'postgres';
 import type { Db } from '../db/client.js';
 import type { LeagueCode } from '../leagues/codes.js';
 
@@ -33,7 +34,7 @@ export async function ensureTeams(
 }
 
 export async function teamIdsFor(
-  db: Db,
+  db: Db | TransactionSql,
   league: LeagueCode,
   providerTeamIds: string[],
 ): Promise<Map<string, string>> {

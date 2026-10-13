@@ -37,6 +37,8 @@ export function createFaultInjector(
     maybeFire(kind, seq) {
       if (!spec || spec.kind !== kind || seq < spec.atSeq) return;
       log(`WEHOOP_FAULT ${kind} firing at seq ${seq}: SIGKILL self`);
+      // Plain stdout marker for crash-test evidence (pino output is pretty-printed locally).
+      process.stdout.write(`FAULT_FIRED=${kind}:${seq}\n`);
       kill(process.pid, 'SIGKILL');
     },
   };
