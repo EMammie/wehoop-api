@@ -2,7 +2,9 @@ import { Hono } from 'hono';
 import type { Config } from '../config.js';
 import type { Db } from '../db/client.js';
 import type { Logger } from '../logger.js';
+import { changesRoutes } from './routes/changes.js';
 import { healthRoutes } from './routes/health.js';
+import { snapshotRoutes } from './routes/snapshot.js';
 
 export interface AppDeps {
   db: Db;
@@ -31,6 +33,8 @@ export function createApp(deps: AppDeps) {
   });
 
   app.route('/', healthRoutes());
+  app.route('/', snapshotRoutes());
+  app.route('/', changesRoutes());
 
   app.notFound((c) => c.json({ error: 'not_found' }, 404));
   app.onError((err, c) => {

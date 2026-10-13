@@ -17,7 +17,8 @@
     "subscribe": "tsx src/bin/subscribe.ts",
     "build": "tsc -p tsconfig.json --outDir dist",
     "release:tag": "tsx src/bin/release-tag.ts",
-    "supabase": "supabase"
+    "supabase": "supabase",
+    "dump-game": "tsx src/bin/dump-game.ts"
   },
   "author": "EMammie",
   "license": "MIT",
