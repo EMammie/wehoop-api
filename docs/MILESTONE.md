@@ -1,6 +1,6 @@
 # Current milestone
 
-**M0 — Scaffold** (branch: `main` bootstrap, then `m1-first-replay` next)
+**M0 — Scaffold** (merged, tagged `m0`) → **pre-M1 fixes** on branch `m0-review-followups` (migration `0002`: run-generation freshness columns, outbox routing constraints), then `m1-first-replay`
 
 Scope: toolchain, Supabase local stack, `0001_core.sql`, CLAUDE.md, four agents, two skills, CI, first fixture.
 

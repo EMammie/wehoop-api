@@ -1,4 +1,4 @@
-import postgres from 'postgres';
+import postgres, { type TransactionSql } from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 /**
@@ -87,72 +87,81 @@ describe('access control: anon and authenticated are read-only on public, blind 
   });
 });
 
+type Tx = TransactionSql;
+
+/** Inserts a game with one durable change (seq 1) inside `tx`. Rolled back by the caller. */
+async function seedGameWithChange(tx: Tx, providerGameId: string) {
+  const [game] = await tx<{ id: string }[]>`
+    insert into public.games (league, provider_game_id, scheduled_at)
+    values ('wnba', ${providerGameId}, now()) returning id`;
+  if (!game) throw new Error('game insert failed');
+  const [change] = await tx<{ id: string }[]>`
+    insert into public.game_changes (game_id, seq, change_type, body)
+    values (${game.id}, 1, 'status', '{}'::jsonb) returning id`;
+  if (!change) throw new Error('change insert failed');
+  await tx`update public.games set last_seq = 1 where id = ${game.id}`;
+  return { gameId: game.id, changeId: change.id };
+}
+
+/** Runs `fn` in a transaction that is always rolled back, so fixtures never leak. */
+async function rolledBack(fn: (tx: Tx) => Promise<void>) {
+  await sql
+    .begin(async (tx) => {
+      await fn(tx);
+      throw new Error('__rollback__');
+    })
+    .catch((e: Error) => {
+      if (e.message !== '__rollback__') throw e;
+    });
+}
+
 describe('change stream constraints', () => {
   it('rejects a second outbox row for the same change (PK is the change id)', async () => {
-    await sql
-      .begin(async (tx) => {
-        const [game] = await tx<{ id: string }[]>`
-        insert into public.games (league, provider_game_id, scheduled_at)
-        values ('wnba', 'test-outbox-pk', now()) returning id
-      `;
-        if (!game) throw new Error('insert failed');
-        const [change] = await tx<{ id: string }[]>`
-        insert into public.game_changes (game_id, seq, change_type, body)
-        values (${game.id}, 1, 'status', '{}'::jsonb) returning id
-      `;
-        if (!change) throw new Error('insert failed');
-        await tx`update public.games set last_seq = 1 where id = ${game.id}`;
-        await tx`insert into ingest.broadcast_outbox (change_id, channel, game_id, seq)
-               values (${change.id}, ${`game:${game.id}`}, ${game.id}, 1)`;
-        await expect(
-          tx`insert into ingest.broadcast_outbox (change_id, channel, game_id, seq)
-           values (${change.id}, ${`game:${game.id}`}, ${game.id}, 1)`,
-        ).rejects.toThrow(/duplicate key/);
-        // roll back by throwing
-        throw new Error('__rollback__');
-      })
-      .catch((e: Error) => {
-        if (e.message !== '__rollback__') throw e;
-      });
+    await rolledBack(async (tx) => {
+      const { gameId, changeId } = await seedGameWithChange(tx, 'test-outbox-pk');
+      await tx`insert into ingest.broadcast_outbox (change_id, game_id, seq)
+               values (${changeId}, ${gameId}, 1)`;
+      await expect(
+        tx.savepoint(
+          (sp) => sp`insert into ingest.broadcast_outbox (change_id, game_id, seq)
+                     values (${changeId}, ${gameId}, 1)`,
+        ),
+      ).rejects.toMatchObject({ code: '23505', message: expect.stringMatching(/duplicate key/) });
+    });
   });
 
   it('game_changes rejects updates and deletes above retained_from_seq, allows deletes below', async () => {
-    await sql
-      .begin(async (tx) => {
-        const [game] = await tx<{ id: string }[]>`
-          insert into public.games (league, provider_game_id, scheduled_at)
-          values ('wnba', 'test-append-only', now()) returning id
-        `;
-        if (!game) throw new Error('insert failed');
-        for (const seq of [1, 2, 3]) {
-          await tx`insert into public.game_changes (game_id, seq, change_type, body)
-                   values (${game.id}, ${seq}, 'status', '{}'::jsonb)`;
-        }
-        await tx`update public.games set last_seq = 3 where id = ${game.id}`;
-        // Each expected failure runs in its own savepoint so the outer tx stays usable.
-        await expect(
-          tx.savepoint(
-            (sp) =>
-              sp`update public.game_changes set body = '{"x":1}'::jsonb where game_id = ${game.id} and seq = 1`,
-          ),
-        ).rejects.toThrow(/append-only/);
-        await expect(
-          tx.savepoint(
-            (sp) => sp`delete from public.game_changes where game_id = ${game.id} and seq = 1`,
-          ),
-        ).rejects.toThrow(/cannot be deleted/);
-        // retention job moves the floor, then the old row may go
-        await tx`update public.games set retained_from_seq = 2 where id = ${game.id}`;
-        await tx`delete from public.game_changes where game_id = ${game.id} and seq = 1`;
-        const [left] = await tx<
-          { n: number }[]
-        >`select count(*)::int as n from public.game_changes where game_id = ${game.id}`;
-        expect(left?.n).toBe(2);
-        throw new Error('__rollback__');
-      })
-      .catch((e: Error) => {
-        if (e.message !== '__rollback__') throw e;
-      });
+    await rolledBack(async (tx) => {
+      const [game] = await tx<{ id: string }[]>`
+        insert into public.games (league, provider_game_id, scheduled_at)
+        values ('wnba', 'test-append-only', now()) returning id
+      `;
+      if (!game) throw new Error('insert failed');
+      for (const seq of [1, 2, 3]) {
+        await tx`insert into public.game_changes (game_id, seq, change_type, body)
+                 values (${game.id}, ${seq}, 'status', '{}'::jsonb)`;
+      }
+      await tx`update public.games set last_seq = 3 where id = ${game.id}`;
+      // Each expected failure runs in its own savepoint so the outer tx stays usable.
+      await expect(
+        tx.savepoint(
+          (sp) =>
+            sp`update public.game_changes set body = '{"x":1}'::jsonb where game_id = ${game.id} and seq = 1`,
+        ),
+      ).rejects.toThrow(/append-only/);
+      await expect(
+        tx.savepoint(
+          (sp) => sp`delete from public.game_changes where game_id = ${game.id} and seq = 1`,
+        ),
+      ).rejects.toThrow(/cannot be deleted/);
+      // retention job moves the floor, then the old row may go
+      await tx`update public.games set retained_from_seq = 2 where id = ${game.id}`;
+      await tx`delete from public.game_changes where game_id = ${game.id} and seq = 1`;
+      const [left] = await tx<
+        { n: number }[]
+      >`select count(*)::int as n from public.game_changes where game_id = ${game.id}`;
+      expect(left?.n).toBe(2);
+    });
   });
 
   it('refuses a quota-counted provider call without a product', async () => {
@@ -161,27 +170,222 @@ describe('change stream constraints', () => {
     ).rejects.toThrow(/check constraint/);
   });
 
-  it('refuses outbox rows for non-game channels', async () => {
-    await sql
-      .begin(async (tx) => {
-        const [game] = await tx<{ id: string }[]>`
-          insert into public.games (league, provider_game_id, scheduled_at)
-          values ('wnba', 'test-outbox-channel', now()) returning id`;
-        if (!game) throw new Error('insert failed');
-        const [change] = await tx<{ id: string }[]>`
-          insert into public.game_changes (game_id, seq, change_type, body)
-          values (${game.id}, 1, 'status', '{}'::jsonb) returning id`;
-        if (!change) throw new Error('insert failed');
-        await tx`update public.games set last_seq = 1 where id = ${game.id}`;
-        await expect(
-          tx`insert into ingest.broadcast_outbox (change_id, channel, game_id, seq)
-             values (${change.id}, 'league:wnba:scores', ${game.id}, 1)`,
-        ).rejects.toThrow(/check constraint/);
-        throw new Error('__rollback__');
-      })
-      .catch((e: Error) => {
-        if (e.message !== '__rollback__') throw e;
+  it("rejects an outbox row whose game_id is not the referenced change's game", async () => {
+    await rolledBack(async (tx) => {
+      const a = await seedGameWithChange(tx, 'test-outbox-route-a');
+      const b = await seedGameWithChange(tx, 'test-outbox-route-b');
+      await expect(
+        tx.savepoint(
+          (sp) => sp`insert into ingest.broadcast_outbox (change_id, game_id, seq)
+                     values (${a.changeId}, ${b.gameId}, 1)`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23503',
+        message: expect.stringMatching(/broadcast_outbox_routes_its_change/),
       });
+    });
+  });
+
+  it("rejects an outbox row whose seq is not the referenced change's seq", async () => {
+    await rolledBack(async (tx) => {
+      const { gameId, changeId } = await seedGameWithChange(tx, 'test-outbox-route-seq');
+      await expect(
+        tx.savepoint(
+          (sp) => sp`insert into ingest.broadcast_outbox (change_id, game_id, seq)
+                     values (${changeId}, ${gameId}, 2)`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23503',
+        message: expect.stringMatching(/broadcast_outbox_routes_its_change/),
+      });
+    });
+  });
+
+  it('refuses an explicitly supplied outbox channel (channel is generated)', async () => {
+    await rolledBack(async (tx) => {
+      const { gameId, changeId } = await seedGameWithChange(tx, 'test-outbox-channel');
+      // Even the "correct" value is refused: the column can only be derived.
+      await expect(
+        tx.savepoint(
+          (sp) => sp`insert into ingest.broadcast_outbox (change_id, channel, game_id, seq)
+                     values (${changeId}, ${`game:${gameId}`}, ${gameId}, 1)`,
+        ),
+      ).rejects.toMatchObject({
+        code: '428C9',
+        message: expect.stringMatching(/cannot insert a non-DEFAULT value into column "channel"/),
+      });
+      await expect(
+        tx.savepoint(
+          (sp) => sp`insert into ingest.broadcast_outbox (change_id, channel, game_id, seq)
+                     values (${changeId}, 'league:wnba:scores', ${gameId}, 1)`,
+        ),
+      ).rejects.toMatchObject({ code: '428C9' });
+    });
+  });
+
+  it('derives channel = game:{game_id} for a correctly routed outbox row', async () => {
+    await rolledBack(async (tx) => {
+      const { gameId, changeId } = await seedGameWithChange(tx, 'test-outbox-derived');
+      const [row] = await tx<{ channel: string }[]>`
+        insert into ingest.broadcast_outbox (change_id, game_id, seq)
+        values (${changeId}, ${gameId}, 1) returning channel`;
+      expect(row?.channel).toBe(`game:${gameId}`);
+    });
+  });
+
+  it('stale_observations accepts the three freshness reasons and rejects any other', async () => {
+    await rolledBack(async (tx) => {
+      const { gameId } = await seedGameWithChange(tx, 'test-stale-reasons');
+      for (const reason of ['older_run', 'run_regresses_state', 'superseded_observation']) {
+        await tx`insert into ingest.stale_observations (game_id, source, observed_at, observation, reason)
+                 values (${gameId}, 'simulation', now(), '{}'::jsonb, ${reason})`;
+      }
+      const [n] = await tx<
+        { n: number }[]
+      >`select count(*)::int as n from ingest.stale_observations where game_id = ${gameId}`;
+      expect(n?.n).toBe(3);
+      await expect(
+        tx.savepoint(
+          (
+            sp,
+          ) => sp`insert into ingest.stale_observations (game_id, source, observed_at, observation, reason)
+                     values (${gameId}, 'simulation', now(), '{}'::jsonb, 'progress_key_lower')`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23514',
+        message: expect.stringMatching(/stale_observations_reason_check/),
+      });
+    });
+  });
+
+  it('games carries watch-generation observation columns, no progress_key, no observed_run_id', async () => {
+    const cols = await sql<{ column_name: string; data_type: string }[]>`
+      select column_name, data_type from information_schema.columns
+      where table_schema = 'public' and table_name = 'games'
+        and column_name in ('progress_key', 'observed_run_id', 'watch_run_id', 'current_period_sequence')
+      order by column_name`;
+    expect(cols).toEqual([
+      { column_name: 'current_period_sequence', data_type: 'integer' },
+      { column_name: 'watch_run_id', data_type: 'bigint' },
+    ]);
+  });
+
+  it('rejects re-routing an existing outbox row to another game (UPDATE path)', async () => {
+    await rolledBack(async (tx) => {
+      const a = await seedGameWithChange(tx, 'test-outbox-reroute-a');
+      const b = await seedGameWithChange(tx, 'test-outbox-reroute-b');
+      await tx`insert into ingest.broadcast_outbox (change_id, game_id, seq)
+               values (${a.changeId}, ${a.gameId}, 1)`;
+      // b's outbox row lives at seq 2 so that (b, 1) is free and the composite FK,
+      // not the unique (game_id, seq) tripwire, is what rejects the re-route.
+      const [b2] = await tx<{ id: string }[]>`
+        insert into public.game_changes (game_id, seq, change_type, body)
+        values (${b.gameId}, 2, 'status', '{}'::jsonb) returning id`;
+      if (!b2) throw new Error('change insert failed');
+      await tx`update public.games set last_seq = 2 where id = ${b.gameId}`;
+      await tx`insert into ingest.broadcast_outbox (change_id, game_id, seq)
+               values (${b2.id}, ${b.gameId}, 2)`;
+      await expect(
+        tx.savepoint(
+          (sp) => sp`update ingest.broadcast_outbox set game_id = ${b.gameId}
+                     where change_id = ${a.changeId}`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23503',
+        message: expect.stringMatching(/broadcast_outbox_routes_its_change/),
+      });
+      // When the target (game_id, seq) is already taken, the tripwire fires first.
+      await tx`insert into ingest.broadcast_outbox (change_id, game_id, seq)
+               values (${b.changeId}, ${b.gameId}, 1)`;
+      await expect(
+        tx.savepoint(
+          (sp) => sp`update ingest.broadcast_outbox set game_id = ${b.gameId}
+                     where change_id = ${a.changeId}`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23505',
+        message: expect.stringMatching(/broadcast_outbox_game_id_seq_key/),
+      });
+    });
+  });
+
+  it('games.watch_run_id must reference a real run, and that run cannot be deleted', async () => {
+    await rolledBack(async (tx) => {
+      const { gameId } = await seedGameWithChange(tx, 'test-watch-run');
+      await expect(
+        tx.savepoint(
+          (sp) => sp`update public.games set watch_run_id = 999999999 where id = ${gameId}`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23503',
+        message: expect.stringMatching(/games_watch_run_id_fkey/),
+      });
+      const [run] = await tx<{ id: string }[]>`
+        insert into ingest.ingestion_runs (kind, league, game_id, source)
+        values ('replay', 'wnba', ${gameId}, 'simulation') returning id`;
+      if (!run) throw new Error('run insert failed');
+      const [game] = await tx<{ watch_run_id: string }[]>`
+        update public.games set watch_run_id = ${run.id} where id = ${gameId}
+        returning watch_run_id::text`;
+      expect(game?.watch_run_id).toBe(String(run.id));
+      // The generation a game points at is never pruned (on delete restrict).
+      await expect(
+        tx.savepoint((sp) => sp`delete from ingest.ingestion_runs where id = ${run.id}`),
+      ).rejects.toMatchObject({
+        code: '23503',
+        message: expect.stringMatching(/games_watch_run_id_fkey/),
+      });
+    });
+  });
+
+  it('ingestion_runs.parent_run_id: sub-runs need a parent, roots cannot have one, no self-parent, restrict delete', async () => {
+    await rolledBack(async (tx) => {
+      const [root] = await tx<{ id: string }[]>`
+        insert into ingest.ingestion_runs (kind, league, source)
+        values ('watch_game', 'wnba', 'simulation') returning id`;
+      if (!root) throw new Error('root run insert failed');
+      // Exactly the sub-run kinds carry a parent (generation = coalesce(parent_run_id, id), depth 1).
+      await expect(
+        tx.savepoint(
+          (sp) => sp`insert into ingest.ingestion_runs (kind, league, source, parent_run_id)
+                     values ('watch_game', 'wnba', 'simulation', ${root.id})`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23514',
+        message: expect.stringMatching(/ingestion_runs_sub_run_has_parent/),
+      });
+      await expect(
+        tx.savepoint(
+          (sp) => sp`insert into ingest.ingestion_runs (kind, league, source)
+                     values ('backfill', 'wnba', 'simulation')`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23514',
+        message: expect.stringMatching(/ingestion_runs_sub_run_has_parent/),
+      });
+      const [child] = await tx<{ id: string; parent_run_id: string }[]>`
+        insert into ingest.ingestion_runs (kind, league, source, parent_run_id)
+        values ('push_stream', 'wnba', 'simulation', ${root.id}) returning id, parent_run_id::text`;
+      if (!child) throw new Error('child run insert failed');
+      expect(child.parent_run_id).toBe(String(root.id));
+      // A sub-run pointing at itself satisfies sub_run_has_parent, so only not_own_parent can fire.
+      await expect(
+        tx.savepoint(
+          (sp) =>
+            sp`update ingest.ingestion_runs set parent_run_id = ${child.id} where id = ${child.id}`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23514',
+        message: expect.stringMatching(/ingestion_runs_not_own_parent/),
+      });
+      // A generation with children is never pruned from under them (on delete restrict).
+      await expect(
+        tx.savepoint((sp) => sp`delete from ingest.ingestion_runs where id = ${root.id}`),
+      ).rejects.toMatchObject({
+        code: '23503',
+        message: expect.stringMatching(/ingestion_runs_parent_run_id_fkey/),
+      });
+    });
   });
 
   it('rejects retained_from_seq beyond last_seq + 1', async () => {

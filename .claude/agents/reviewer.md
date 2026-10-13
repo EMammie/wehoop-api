@@ -13,7 +13,7 @@ You are the reviewer for wehoop-api. You read a diff and report defects. You nev
 
 ## Checklist (in priority order)
 1. **Change-stream invariants.** Is every durable write inside one transaction that: locks the game row, runs the freshness check, allocates exactly `n` seqs for `n` real changes, appends `game_changes`, inserts `broadcast_outbox` with the change id as PK? Is anything writing game state outside `src/ingest/apply-changes.ts`? Is `game_changes` ever updated or deleted?
-2. **Freshness.** Can an older batch regress state? Does hash inequality alone ever trigger an update? Are observation writes (clock, `progress_key`, `observed_at`) separated from durable writes?
+2. **Freshness.** Can an older batch regress state? Does hash inequality alone ever trigger an update? Are observation writes (clock, `current_period_sequence`, `watch_run_id`, `observed_at`) separated from durable writes? Is a batch ever marked stale by anything other than watch generation (rules 1–2 of §4)?
 3. **Idempotency.** Will applying the same normalized batch twice produce zero changes? Replaying a recording from the start into a finished game?
 4. **Transactions and connections.** Advisory lock and `LISTEN` on the session-mode connection only. No HTTP calls inside a transaction. Short transactions.
 5. **Zod coverage.** Every provider payload, env var, and inbound HTTP param parsed before use. `.loose()` only at the top level.
