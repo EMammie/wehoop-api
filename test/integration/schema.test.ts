@@ -338,25 +338,53 @@ describe('change stream constraints', () => {
     });
   });
 
-  it('ingestion_runs.parent_run_id rejects self-reference and accepts another run', async () => {
+  it('ingestion_runs.parent_run_id: sub-runs need a parent, roots cannot have one, no self-parent, restrict delete', async () => {
     await rolledBack(async (tx) => {
       const [root] = await tx<{ id: string }[]>`
         insert into ingest.ingestion_runs (kind, league, source)
         values ('watch_game', 'wnba', 'simulation') returning id`;
       if (!root) throw new Error('root run insert failed');
+      // Exactly the sub-run kinds carry a parent (generation = coalesce(parent_run_id, id), depth 1).
+      await expect(
+        tx.savepoint(
+          (sp) => sp`insert into ingest.ingestion_runs (kind, league, source, parent_run_id)
+                     values ('watch_game', 'wnba', 'simulation', ${root.id})`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23514',
+        message: expect.stringMatching(/ingestion_runs_sub_run_has_parent/),
+      });
+      await expect(
+        tx.savepoint(
+          (sp) => sp`insert into ingest.ingestion_runs (kind, league, source)
+                     values ('backfill', 'wnba', 'simulation')`,
+        ),
+      ).rejects.toMatchObject({
+        code: '23514',
+        message: expect.stringMatching(/ingestion_runs_sub_run_has_parent/),
+      });
+      const [child] = await tx<{ id: string; parent_run_id: string }[]>`
+        insert into ingest.ingestion_runs (kind, league, source, parent_run_id)
+        values ('push_stream', 'wnba', 'simulation', ${root.id}) returning id, parent_run_id::text`;
+      if (!child) throw new Error('child run insert failed');
+      expect(child.parent_run_id).toBe(String(root.id));
+      // A sub-run pointing at itself satisfies sub_run_has_parent, so only not_own_parent can fire.
       await expect(
         tx.savepoint(
           (sp) =>
-            sp`update ingest.ingestion_runs set parent_run_id = ${root.id} where id = ${root.id}`,
+            sp`update ingest.ingestion_runs set parent_run_id = ${child.id} where id = ${child.id}`,
         ),
       ).rejects.toMatchObject({
         code: '23514',
         message: expect.stringMatching(/ingestion_runs_not_own_parent/),
       });
-      const [child] = await tx<{ parent_run_id: string }[]>`
-        insert into ingest.ingestion_runs (kind, league, source, parent_run_id)
-        values ('push_stream', 'wnba', 'simulation', ${root.id}) returning parent_run_id::text`;
-      expect(child?.parent_run_id).toBe(String(root.id));
+      // A generation with children is never pruned from under them (on delete restrict).
+      await expect(
+        tx.savepoint((sp) => sp`delete from ingest.ingestion_runs where id = ${root.id}`),
+      ).rejects.toMatchObject({
+        code: '23503',
+        message: expect.stringMatching(/ingestion_runs_parent_run_id_fkey/),
+      });
     });
   });
 
