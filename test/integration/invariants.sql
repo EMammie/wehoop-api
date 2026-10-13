@@ -32,15 +32,40 @@ where g.last_seq <> coalesce(m.max_seq, g.retained_from_seq - 1);
 select count(*)
 from public.game_changes c
 full outer join ingest.broadcast_outbox o on o.change_id = c.id
-where c.id is null or o.change_id is null;
+where c.id is null
+   or o.change_id is null
+   or o.game_id <> c.game_id
+   or o.seq <> c.seq
+   or o.channel <> 'game:' || c.game_id::text;
 
 -- check: outbox_no_dead_letters | expect: 0
 select count(*) from ingest.broadcast_outbox where dead_at is not null;
 
--- check: outbox_no_duplicate_channel_seq | expect: 0
+-- check: outbox_no_duplicate_game_seq | expect: 0
 select count(*) from (
-  select channel, seq from ingest.broadcast_outbox group by 1, 2 having count(*) > 1
+  select game_id, seq from ingest.broadcast_outbox group by 1, 2 having count(*) > 1
 ) d;
+
+-- check: outbox_channel_is_generated | expect: 1
+select count(*)
+from information_schema.columns
+where table_schema = 'ingest'
+  and table_name = 'broadcast_outbox'
+  and column_name = 'channel'
+  and is_generated = 'ALWAYS';
+
+-- check: outbox_has_composite_routing_fk | expect: 1
+select count(*)
+from pg_constraint
+where conname = 'broadcast_outbox_routes_its_change'
+  and contype = 'f';
+
+-- check: games_has_no_progress_key | expect: 0
+select count(*)
+from information_schema.columns
+where table_schema = 'public'
+  and table_name = 'games'
+  and column_name = 'progress_key';
 
 -- check: anon_cannot_select_ingest_tables | expect: 0
 select count(*)
