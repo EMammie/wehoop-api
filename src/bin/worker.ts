@@ -27,6 +27,7 @@ import { SimulationUrlResolver } from '../providers/sportradar/urls.js';
  *     [--session <id> | --new-session] [--poll-interval 3000] [--summary-every 10]
  *     [--max-polls N] [--record-to <file.jsonl>]
  *   pnpm dev:worker --mode sim --league wnba --replay-file <file.jsonl> [--pace 0]
+ *   [--lock-wait 60]  seconds to wait for the single-ingester lock (a killed worker's lock lingers briefly)
  *
  * Holds the single-ingester advisory lock on a session-mode connection, drains
  * the outbox on start and on NOTIFY/30 s, sends pulses, and exits when the
@@ -50,6 +51,7 @@ async function main() {
       'replay-file': { type: 'string' },
       pace: { type: 'string', default: '0' },
       'max-docs': { type: 'string' },
+      'lock-wait': { type: 'string', default: '60' },
     },
     strict: true,
   });
@@ -82,13 +84,29 @@ async function main() {
       void shutdown('session_connection_lost', 1);
     }
   });
-  if (!(await tryAcquireWorkerLock(session))) {
+  // After a kill -9 the previous worker's session lock lingers until Postgres notices the dead
+  // socket; wait for it (bounded) instead of failing the restart.
+  const lockWaitMs = Number(args['lock-wait']) * 1000;
+  const lockStarted = Date.now();
+  let locked = await tryAcquireWorkerLock(session);
+  while (!locked && Date.now() - lockStarted < lockWaitMs) {
+    log.warn(
+      { waitedMs: Date.now() - lockStarted },
+      'another worker holds the ingester lock; retrying',
+    );
+    await new Promise((r) => setTimeout(r, 1000));
+    locked = await tryAcquireWorkerLock(session);
+  }
+  if (!locked) {
     shuttingDown = true;
     log.error('another worker holds the ingester lock; exiting');
     await session.end({ timeout: 2 });
     process.exit(2);
   }
   log.info({ mode: config.mode, pid: process.pid, fault: config.fault }, 'worker lock acquired');
+  // `pnpm dev:worker` runs pnpm -> tsx -> node; signals sent to the wrappers do not reach this
+  // process. Crash tests must target this pid.
+  console.log(`WORKER_PID=${process.pid}`);
 
   let transport: LiveTransport;
   if (config.supabase.serviceRoleKey) {

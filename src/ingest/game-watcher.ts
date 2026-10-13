@@ -203,6 +203,10 @@ export class GameWatcher {
     });
     await this.deps
       .db`update ingest.ingestion_runs set game_id = ${id} where id = ${this.deps.run.id}`;
+    // A game with no durable history has nothing to regress: pregame documents may flow.
+    const [state] = await this.deps.db<{ lastSeq: string }[]>`
+      select last_seq::text as "lastSeq" from public.games where id = ${id}`;
+    if (Number(state?.lastSeq ?? 0) === 0) this.generationOpen = true;
     this.gameId = id;
     this.deps.log.info(
       { gameId: id, providerGameId: nd.providerGameId, created },
