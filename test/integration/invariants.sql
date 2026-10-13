@@ -67,6 +67,20 @@ where table_schema = 'public'
   and table_name = 'games'
   and column_name = 'progress_key';
 
+-- check: games_watch_run_fk_restricts_delete | expect: 1
+select count(*)
+from pg_constraint
+where conrelid = 'public.games'::regclass
+  and contype = 'f'
+  and confdeltype = 'r'
+  and conname like '%watch_run_id%';
+
+-- check: outbox_has_single_fk | expect: 1
+select count(*)
+from pg_constraint
+where conrelid = 'ingest.broadcast_outbox'::regclass
+  and contype = 'f';
+
 -- check: anon_cannot_select_ingest_tables | expect: 0
 select count(*)
 from information_schema.role_table_grants
