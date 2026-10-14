@@ -179,3 +179,6 @@ where published_at is not null and (dead_at is not null or last_error is not nul
 select count(*)
 from public.play_events
 where deleted_revision_at is not null and deleted_at is null;
+
+-- check: stats_observed_at_set | expect: 0
+select count(*) from public.game_team_stats where observed_at is null;

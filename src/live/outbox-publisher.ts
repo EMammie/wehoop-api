@@ -50,6 +50,13 @@ export class OutboxPublisher {
   private timer: NodeJS.Timeout | null = null;
   private draining: Promise<DrainResult> | null = null;
   private wanted = false;
+  /**
+   * Consecutive 429s per channel in this process, for the backoff when the server
+   * sends no Retry-After (1 s doubling, capped at 5 min). Kept in memory on
+   * purpose: `attempts` stays the count of REAL failures so "dead after 10
+   * attempts" (plan §4) keeps its meaning, and a restart simply starts at 1 s.
+   */
+  private readonly rateLimitStreak = new Map<string, number>();
 
   constructor(
     private readonly deps: {
@@ -181,17 +188,28 @@ export class OutboxPublisher {
           const ids = chunk.map((r) => r.changeId);
           const message = (err as Error).message.slice(0, 500);
           if (err instanceof TransportRateLimitError) {
-            // 429: retryable. Honour Retry-After, else 1 s doubling (capped at 5 min); never dead-letter.
+            // 429: retryable and NOT a failure: `attempts` is untouched (never dead-letters), only
+            // last_error and next_attempt_at move. Backoff = Retry-After when given, else
+            // 2^streak seconds (1, 2, 4, ... capped at 300) from the in-memory per-channel streak.
             result.rateLimited += chunk.length;
+            const streak = this.rateLimitStreak.get(gameId) ?? 0;
+            this.rateLimitStreak.set(gameId, streak + 1);
             const retrySecs =
-              err.retryAfterMs === null ? null : Math.max(0.05, err.retryAfterMs / 1000);
+              err.retryAfterMs === null
+                ? Math.min(300, 2 ** streak)
+                : Math.max(0.05, err.retryAfterMs / 1000);
             await db`update ingest.broadcast_outbox set
-                       attempts = attempts + 1,
                        last_error = ${message},
-                       next_attempt_at = now() + make_interval(secs => coalesce(${retrySecs}::float8, least(300, power(2, attempts))))
+                       next_attempt_at = now() + make_interval(secs => ${retrySecs}::float8)
                      where change_id = any(${ids})`;
             log.warn(
-              { gameId, retryAfterMs: err.retryAfterMs, count: chunk.length },
+              {
+                gameId,
+                retryAfterMs: err.retryAfterMs,
+                streak: streak + 1,
+                retrySecs,
+                count: chunk.length,
+              },
               'outbox publish rate limited (429); backing off',
             );
             break;
@@ -211,6 +229,7 @@ export class OutboxPublisher {
         this.deps.fault?.maybeFire('after_publish', lastSeq);
         await db`update ingest.broadcast_outbox set published_at = now(), attempts = attempts + 1, last_error = null
                  where change_id = any(${chunk.map((r) => r.changeId)})`;
+        this.rateLimitStreak.delete(gameId);
         result.published += chunk.length;
       }
     }
@@ -228,24 +247,38 @@ export class OutboxPublisher {
   }
 
   /**
-   * Shutdown drain: loop drain -> pendingSummary until nothing live is pending
-   * or `timeoutMs` elapses, sleeping until the earliest retry (max 1 s) between
-   * rounds. Returns immediately when nothing is pending.
+   * Shutdown drain: loop drain -> pendingSummary until nothing live is pending,
+   * `timeoutMs` elapses, or `opts.deadline()` (epoch ms, re-read every round, so
+   * a caller can shorten it) passes; sleeps until the earliest retry (max 1 s)
+   * between rounds. Returns immediately when nothing is pending. The waiting
+   * warning is logged at most once per second, or when the pending count changes.
    */
-  async drainUntilEmpty(timeoutMs: number): Promise<{ pending: number; dead: number }> {
+  async drainUntilEmpty(
+    timeoutMs: number,
+    opts: { deadline?: () => number } = {},
+  ): Promise<{ pending: number; dead: number }> {
     const started = Date.now();
+    let lastWarnAt = 0;
+    let lastWarnPending = -1;
     for (;;) {
       await this.drain();
       const p = await this.pendingSummary();
-      if (p.pending === 0 || Date.now() - started >= timeoutMs) return p;
+      const now = Date.now();
+      const until = Math.min(started + timeoutMs, opts.deadline?.() ?? Number.POSITIVE_INFINITY);
+      if (p.pending === 0 || now >= until) return p;
       const wait = Math.min(
         1000,
-        Math.max(50, (p.nextAttemptAt?.getTime() ?? Date.now()) - Date.now()),
+        until - now,
+        Math.max(50, (p.nextAttemptAt?.getTime() ?? now) - now),
       );
-      this.deps.log.warn(
-        { pending: p.pending, dead: p.dead, retryInMs: wait },
-        'outbox not fully published; waiting for backoff before exit',
-      );
+      if (p.pending !== lastWarnPending || now - lastWarnAt >= 1000) {
+        lastWarnAt = now;
+        lastWarnPending = p.pending;
+        this.deps.log.warn(
+          { pending: p.pending, dead: p.dead, retryInMs: wait, remainingMs: until - now },
+          'outbox not fully published; waiting for backoff before exit',
+        );
+      }
       await new Promise((r) => setTimeout(r, wait));
     }
   }

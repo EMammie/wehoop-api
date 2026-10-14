@@ -143,7 +143,7 @@ describe('outbox publisher', () => {
     expect(await pendingFor(ga.gameId)).toMatchObject({ pending: 0, dead: 0 });
   });
 
-  it('429 is retryable: two rate-limited attempts then success publishes every row, counts attempts, honours Retry-After, never dead-letters', async () => {
+  it('429 is retryable: two rate-limited rounds then success publishes every row, leaves attempts untouched, honours Retry-After, never dead-letters', async () => {
     const nd = pbpQ1();
     const { gameId } = await seedGame(db, nd);
     const run = await replayRun(db, gameId);
@@ -161,7 +161,7 @@ describe('outbox publisher', () => {
     expect(r1).toMatchObject({ published: 0, failed: 0 });
     expect(r1.rateLimited).toBeGreaterThan(0);
     let p = await pendingFor(gameId);
-    expect(p).toMatchObject({ published: 0, dead: 0, maxAttempts: 1 });
+    expect(p).toMatchObject({ published: 0, dead: 0, maxAttempts: 0 }); // 429 is not an attempt
     // not publishable until Retry-After elapses
     expect((await publisher.drainOnce()).published).toBe(0);
     await new Promise((r) => setTimeout(r, 90));
@@ -169,11 +169,16 @@ describe('outbox publisher', () => {
     expect(r2.published).toBe(0);
     expect(r2.rateLimited).toBeGreaterThan(0);
     p = await pendingFor(gameId);
-    expect(p).toMatchObject({ dead: 0, maxAttempts: 2 }); // attempts >= maxAttempts, yet NOT dead: 429 alone never dead-letters
+    expect(p).toMatchObject({ dead: 0, maxAttempts: 0 }); // two 429s: attempts still 0, nothing dead
     // the bounded shutdown drain waits out the backoff and finishes
     const left = await publisher.drainUntilEmpty(5_000);
     expect(left).toMatchObject({ pending: 0, dead: 0 });
-    expect(await pendingFor(gameId)).toMatchObject({ pending: 0, published: total, dead: 0 });
+    expect(await pendingFor(gameId)).toMatchObject({
+      pending: 0,
+      published: total,
+      dead: 0,
+      maxAttempts: 1, // the one real (successful) publish
+    });
     const seqs = transport.published
       .filter((x) => x.channel === gameChannel(gameId))
       .map((x) => (x.message.event === 'change' ? x.message.payload.seq : -1));
