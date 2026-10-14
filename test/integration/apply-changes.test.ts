@@ -84,6 +84,40 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     expect(after.events).toBe(nd.batch.events.length);
   });
 
+  it('clock correction 5:00 -> 5:30 inside one period is accepted AND observed: games.clock equals the corrected clock and observed_at advanced', async () => {
+    const nd0 = pbpQ1();
+    const nd = {
+      ...nd0,
+      gameView: nd0.gameView ? { ...nd0.gameView, clock: '5:00', clockDecimal: '5:00' } : null,
+    };
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    await apply(deps, gameId, nd, observation(run, nd, T0));
+    const game = async () =>
+      (
+        await db<{ clock: string | null; observedAt: Date; clockAsOf: Date; lastSeq: string }[]>`
+          select clock, observed_at as "observedAt", clock_as_of as "clockAsOf", last_seq::text as "lastSeq"
+          from public.games where id = ${gameId}`
+      )[0];
+    const before = await game();
+    expect(before).toMatchObject({ clock: '5:00', observedAt: T0 });
+    const corrected = {
+      ...nd,
+      gameView: nd.gameView ? { ...nd.gameView, clock: '5:30', clockDecimal: '5:30' } : null,
+    };
+    const r = await apply(deps, gameId, corrected, observation(run, corrected, later(10)));
+    expect(r).toMatchObject({ outcome: 'applied', gameLevel: 'write' });
+    expect(r.outcome === 'applied' && r.changes).toEqual([]); // clock is an observation, never a seq
+    const after = await game();
+    expect(after).toMatchObject({ clock: '5:30', observedAt: later(10), clockAsOf: later(10) });
+    expect(after?.lastSeq).toBe(before?.lastSeq);
+    // and the same correction arriving in a NEW generation is also accepted (the clock going up
+    // inside a period is never a regression signal when the score did not drop)
+    const gen2 = await replayRun(db, gameId);
+    const r2 = await apply(deps, gameId, corrected, observation(gen2, corrected, later(20)));
+    expect(r2).toMatchObject({ outcome: 'applied', generationAdvanced: true, gameLevel: 'write' });
+  });
+
   it('contiguity and outbox parity by join: one outbox row per change, 0 unmatched, 0 dead', async () => {
     const nd = pbpQ1();
     const { gameId } = await seedGame(db, nd);

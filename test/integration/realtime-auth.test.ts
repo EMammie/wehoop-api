@@ -119,8 +119,12 @@ describe.skipIf(!enabled)('Realtime: private game channel is receive-only for cl
       statuses.push(res.status);
       await res.text();
     }
-    // The REST endpoint acknowledges the request (202) and then drops it under RLS: nothing is delivered.
-    expect(statuses.every((s) => s < 500)).toBe(true);
+    // Supabase Realtime's REST broadcast endpoint answers 202 Accepted with an empty body for an
+    // anon-key and for a guest-JWT publish alike (recorded against the local stack, 2026-10-14):
+    // authorization is applied asynchronously under RLS on realtime.messages and the message is
+    // dropped silently. So the status code proves nothing about rejection; the real guarantee is
+    // the next two assertions: neither subscriber ever observes the forged payload.
+    expect(statuses).toEqual([202, 202]);
     await settle();
     expect(anon.received.filter((m) => (m.payload as { forged?: boolean }).forged)).toEqual([]);
     expect(guest.received.filter((m) => (m.payload as { forged?: boolean }).forged)).toEqual([]);
