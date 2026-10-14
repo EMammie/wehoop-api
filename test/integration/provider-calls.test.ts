@@ -13,6 +13,9 @@ beforeAll(async () => {
   await db`select 1`;
 });
 afterAll(async () => {
+  // The trial call below is quota-counted; left behind it would lower ingest.v_quota.remaining
+  // for schema.test.ts ("seeds a quota row per product") depending on file order.
+  await db`delete from ingest.provider_calls where quota_counted and run_id is null and url like '%/games/g1/summary.json'`;
   await db.end();
 });
 
