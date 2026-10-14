@@ -47,7 +47,11 @@ export function appendRecordedDocument(path: string, line: RecordedDocument): nu
 
 function openRecording(path: string): Readable {
   const file = createReadStream(path);
-  return path.endsWith('.gz') ? file.pipe(createGunzip()) : file;
+  if (!path.endsWith('.gz')) return file;
+  const gz = createGunzip();
+  // A file error (ENOENT, EACCES) must reject the reader, not surface as an unhandled stream error.
+  file.on('error', (err) => gz.destroy(err));
+  return file.pipe(gz);
 }
 
 /** Raw non-empty lines of a `.jsonl` / `.jsonl.gz` recording, in order. */
@@ -59,19 +63,57 @@ export async function* readRecordingLines(path: string): AsyncGenerator<string> 
   }
 }
 
-/** Parsed documents of a recording, in order. Every line is validated before use. */
-export async function* readRecording(path: string): AsyncGenerator<RecordedDocument> {
+export interface ReadRecordingOptions {
+  /** Receives a message when the file's LAST line is not valid JSON (a recorder killed mid-write). */
+  warn?: (message: string) => void;
+}
+
+/**
+ * Parsed documents of a recording, in order. Every line is validated before
+ * use. Invalid JSON in the middle of the file is an error; invalid JSON as the
+ * very last line is a truncated tail (the recorder was killed mid-append): it is
+ * reported through `warn` and the valid prefix is what the recording is.
+ */
+export async function* readRecording(
+  path: string,
+  opts: ReadRecordingOptions = {},
+): AsyncGenerator<RecordedDocument> {
   let n = 0;
-  for await (const line of readRecordingLines(path)) {
-    n++;
-    const parsed = RecordedDocumentSchema.safeParse(JSON.parse(line));
+  const parseLine = (line: string, isLast: boolean): RecordedDocument | null => {
+    let json: unknown;
+    try {
+      json = JSON.parse(line);
+    } catch (err) {
+      if (isLast) {
+        opts.warn?.(
+          `${path}: line ${n} (the last line) is not valid JSON; treating the file as truncated there`,
+        );
+        return null;
+      }
+      throw new Error(`${path}: line ${n}: invalid JSON (${(err as Error).message})`);
+    }
+    const parsed = RecordedDocumentSchema.safeParse(json);
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
       throw new Error(
         `${path}: line ${n} is not a recorded document (${issue?.path.join('.')}: ${issue?.message})`,
       );
     }
-    yield parsed.data;
+    return parsed.data;
+  };
+  let pending: string | null = null;
+  for await (const line of readRecordingLines(path)) {
+    if (pending !== null) {
+      n++;
+      const doc = parseLine(pending, false);
+      if (doc) yield doc;
+    }
+    pending = line;
+  }
+  if (pending !== null) {
+    n++;
+    const doc = parseLine(pending, true);
+    if (doc) yield doc;
   }
 }
 
@@ -203,10 +245,10 @@ export interface CompactResult {
 export async function compactRecording(
   inPath: string,
   outPath: string,
-  opts: CompactOptions,
+  opts: CompactOptions & ReadRecordingOptions,
 ): Promise<CompactResult> {
   const keys: CompactKey[] = [];
-  for await (const line of readRecording(inPath)) keys.push(compactKeyOf(line));
+  for await (const line of readRecording(inPath, opts)) keys.push(compactKeyOf(line));
   const keep = selectCompact(keys, opts);
   const perFeed: Record<string, { kept: number; total: number }> = {};
   keys.forEach((k, i) => {
@@ -218,6 +260,7 @@ export async function compactRecording(
   const writer = new GzipLineWriter(outPath);
   let i = 0;
   for await (const line of readRecordingLines(inPath)) {
+    if (i >= keys.length) break; // a truncated last line was excluded by readRecording
     if (keep[i]) await writer.write(line);
     i++;
   }

@@ -66,6 +66,46 @@ describe('recording files', () => {
     ]);
   });
 
+  it('a truncated LAST line (recorder killed mid-append) is a warning and the valid prefix is the recording', async () => {
+    const path = join(dir, 'truncated.jsonl');
+    const good = [doc('pbp', { quarter: 1 }, 0), doc('summary', { quarter: 1 }, 1)];
+    writeFileSync(path, `${good.map((l) => JSON.stringify(l)).join('\n')}\n{"feed":"pbp","sta`);
+    const warnings: string[] = [];
+    const read: RecordedDocument[] = [];
+    for await (const l of readRecording(path, { warn: (m) => warnings.push(m) })) read.push(l);
+    expect(read).toEqual(good);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/line 3 \(the last line\) is not valid JSON/);
+    // compaction excludes the truncated tail too
+    const out = join(dir, 'truncated.jsonl.gz');
+    const result = await compactRecording(path, out, { everyPbp: 1, everySummary: 1 });
+    expect(result.total).toBe(2);
+    const back: RecordedDocument[] = [];
+    for await (const l of readRecording(out)) back.push(l);
+    expect(back).toEqual(good);
+  });
+
+  it('invalid JSON in the MIDDLE of the file is an error naming the line', async () => {
+    const path = join(dir, 'corrupt.jsonl');
+    writeFileSync(
+      path,
+      `${JSON.stringify(doc('pbp', {}, 0))}\n{not json}\n${JSON.stringify(doc('pbp', {}, 1))}\n`,
+    );
+    await expect(async () => {
+      for await (const _ of readRecording(path)) {
+        /* consume */
+      }
+    }).rejects.toThrow(/corrupt\.jsonl: line 2: invalid JSON/);
+  });
+
+  it('a missing .gz path rejects the iterator instead of crashing the process', async () => {
+    await expect(async () => {
+      for await (const _ of readRecording(join(dir, 'does-not-exist.jsonl.gz'))) {
+        /* consume */
+      }
+    }).rejects.toThrow(/ENOENT/);
+  });
+
   it('rejects a line that is not a recorded document', async () => {
     const path = join(dir, 'bad.jsonl');
     writeFileSync(path, `${JSON.stringify({ feed: 'nope', body: {} })}\n`);
