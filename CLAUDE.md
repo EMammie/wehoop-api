@@ -17,6 +17,8 @@ pnpm dev:worker --mode sim --league wnba --replay-file <jsonl> --pace 0    # rep
 pnpm dev:api                 # Hono API on :3000 (snapshot, changes, health)
 pnpm sim list --league wnba  # list Sportradar simulation recordings (no API key)
 pnpm sim inject --game <uuid> --mutate-event <id> | --delete-event <id>   # inject a correction / deletion
+pnpm sim record --league wnba --recording <id> --out <file.jsonl>          # DB-free natural-pace recorder (replay fixture step 1)
+pnpm sim compact --in <full.jsonl> --out <file.jsonl.gz> [--target-mb 4]   # deterministic down-sample (replay fixture step 2)
 pnpm subscribe --game <uuid> --record <jsonl> [--auth guest]   # reference client: subscribe + reconnect contract
 pnpm dump-game --game <uuid> # canonical JSON of play_events bodies, periods, score (for replay diffs)
 pnpm invariants              # run test/integration/invariants.sql against local DB

@@ -28,3 +28,47 @@ Observations worth knowing (all from this recording):
   M1 leaves `games.season_id` null.
 - The pbp header `clock` is the clock of the latest event, not a live clock; `clock_running`
   is derived (see `src/ingest/clock.ts`). Push `clock` messages carry `running` directly.
+
+## Replay fixture
+
+Every replay evidence row in `devlog/evidence/M1.md` runs from a committed, reproducible
+recording of the whole game, not from a temporary file. It is produced in two steps:
+
+1. **Record** (natural pace, ~2.5-3 h, no database):
+   `pnpm sim record --league wnba --recording 93ee7c68-28d8-4ae8-b54a-974a551aa1f6 --out fixtures/wnba/sim-93ee7c68-replay.raw.jsonl`
+   creates a simulation session and polls the replay REST feeds exactly as the worker does in
+   sim mode: pbp every poll (`--poll-interval 3000`), summary (`game`) and boxscore on poll
+   1, 1+N, 1+2N, ... (`--summary-every 10`), then one final summary and boxscore after the
+   first `closed` pbp. It never opens Postgres. Each line is appended synchronously, so a
+   recorder killed with SIGINT/SIGTERM leaves a valid prefix. `*.raw.jsonl` is git-ignored
+   (~470 MB).
+2. **Compact** (deterministic, offline):
+   `pnpm sim compact --in fixtures/wnba/sim-93ee7c68-replay.raw.jsonl --out fixtures/wnba/sim-93ee7c68-replay.compact.jsonl.gz --every-pbp 50 --every-summary 10 --target-mb 4`
+   keeps a document when ANY of: it is the first or last of its feed; its `status` or `quarter`
+   differs from the previously kept document of the same feed; (pbp) its `deleted_events` id
+   set differs from the previously kept pbp; its index within its feed is a multiple of the
+   stride (`--every-pbp` for pbp, `--every-summary` for summary and boxscore); it is the last
+   document before, or the first after, a status or period change between consecutive
+   documents of its feed. So every period boundary, halftime, `closed`, every boxscore whose
+   status or period changed, and the final boxscore are all present. Kept lines are written
+   byte-identical, gzip level 9; the command prints kept/total per feed, the output size and
+   its sha256, and exits 3 if the output exceeds `--target-mb`. The rule is implemented once,
+   in `selectCompact` (`src/ingest/recording.ts`), and unit-tested.
+
+Replay it with `pnpm dev:worker --mode sim --league wnba --replay-file fixtures/wnba/sim-93ee7c68-replay.compact.jsonl.gz --pace 0 --until closed`
+(`--replay-file` accepts `.jsonl` and `.jsonl.gz`).
+
+**Line format** (`RecordedDocument`, `src/ingest/recording.ts`; one JSON object per line, also
+what the worker's `--record-to` writes):
+
+```json
+{"feed":"pbp","status":200,"requestedAt":"2026-10-13T07:34:11.948Z","receivedAt":"2026-10-13T07:34:12.100Z","body":{...}}
+```
+
+`feed` is `pbp` | `summary` | `boxscore`; `status` is the HTTP status (always 200: failed
+requests are not recorded); `requestedAt` is the request start time and becomes the
+observation's `observedAt` on replay; `body` is the provider document exactly as returned.
+
+| File | Source | Documents | sha256 |
+|---|---|---|---|
+| `sim-93ee7c68-replay.compact.jsonl.gz` | `pnpm sim record` + `pnpm sim compact` as above | <to be filled after pnpm sim compact> | sha256: <to be filled after pnpm sim compact> |
