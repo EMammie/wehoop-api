@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { parseArgs } from 'node:util';
+import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { applyChanges } from '../ingest/apply-changes.js';
@@ -74,6 +75,20 @@ async function main() {
     strict: true,
   });
   const cmd = positionals[0];
+  /** Numeric flags: positive integers only; anything else is a usage error (exit 64). */
+  const intArg = (
+    name: string,
+    value: string | undefined,
+    fallback: number | null,
+  ): number | null => {
+    if (value === undefined) return fallback;
+    const parsed = z.coerce.number().int().positive().safeParse(value);
+    if (!parsed.success) {
+      console.error(`--${name} must be a positive integer, got ${JSON.stringify(value)}`);
+      process.exit(64);
+    }
+    return parsed.data;
+  };
   const config = loadConfig();
   const sim = new SimulationClient({ playbackUrl: config.sportradar.playbackUrl });
 
@@ -82,6 +97,10 @@ async function main() {
     if (!args.out) throw new Error('--out <file.jsonl> is required');
     if (existsSync(args.out)) throw new Error(`${args.out} exists; refusing to append to it`);
     const league = LeagueCodeSchema.parse(args.league);
+    // Usage errors before any network call.
+    const pollIntervalMs = intArg('poll-interval', args['poll-interval'], 3000) ?? 3000;
+    const summaryEvery = intArg('summary-every', args['summary-every'], 10) ?? 10;
+    const maxPolls = intArg('max-polls', args['max-polls'], null);
     const log = createLogger({ level: config.logLevel });
     const rec = await sim.getRecording(args.recording);
     if (!rec) throw new Error(`recording ${args.recording} not found`);
@@ -105,9 +124,9 @@ async function main() {
     const docs = await recordSession(http, log, {
       league,
       out: args.out,
-      pollIntervalMs: Number(args['poll-interval']),
-      summaryEvery: Math.max(1, Number(args['summary-every'])),
-      maxPolls: args['max-polls'] ? Number(args['max-polls']) : null,
+      pollIntervalMs,
+      summaryEvery,
+      maxPolls,
     });
     console.log(`RECORDED ${docs} documents -> ${args.out}`);
     return;
@@ -115,10 +134,12 @@ async function main() {
   if (cmd === 'compact') {
     if (!args.in) throw new Error('--in <full.jsonl> is required');
     if (!args.out) throw new Error('--out <file.jsonl.gz> is required');
-    const targetBytes = Number(args['target-mb']) * 1024 * 1024;
+    const targetMb = intArg('target-mb', args['target-mb'], 4) ?? 4;
+    const targetBytes = targetMb * 1024 * 1024;
     const result = await compactRecording(args.in, args.out, {
-      everyPbp: Math.max(1, Number(args['every-pbp'])),
-      everySummary: Math.max(1, Number(args['every-summary'])),
+      everyPbp: intArg('every-pbp', args['every-pbp'], 50) ?? 50,
+      everySummary: intArg('every-summary', args['every-summary'], 10) ?? 10,
+      warn: (m) => console.error(`warning: ${m}`),
     });
     for (const [feed, c] of Object.entries(result.perFeed)) {
       console.log(`${feed.padEnd(9)} kept ${String(c.kept).padStart(5)} / ${c.total}`);
@@ -130,7 +151,7 @@ async function main() {
       `${args.out}: ${size} bytes (${(size / 1024 / 1024).toFixed(2)} MB), sha256 ${sha}`,
     );
     if (size > targetBytes) {
-      console.error(`output exceeds --target-mb ${args['target-mb']}; raise the strides`);
+      console.error(`output exceeds --target-mb ${targetMb}; raise the strides`);
       process.exit(3);
     }
     return;
