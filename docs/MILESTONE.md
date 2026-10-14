@@ -1,6 +1,8 @@
 # Current milestone
 
-**M1 — One recorded WNBA game, durable** on branch `m1-first-replay` (M0 merged and tagged `m0`; pre-M1 fixes from PR #2 merged: migration `0002` run-generation freshness columns, outbox routing constraints).
+**M1 corrective pass** on branch `m1-first-replay` (PR #3, unmerged). Rev 4.3 of `docs/PLAN.md` ratifies the three M1 contract questions and names five correctness holes; this pass implements them, adds a committed reproducible replay fixture, implements `pnpm release:tag`, and re-runs the affected M1 evidence before a fresh review.
+
+M1 proper (validated 14/14 at `fe529cf`, APPROVED-WITH-SHOULDS) is described below for context.
 
 Scope (from `docs/PLAN.md` §7): `bin/sim`, `SimulationUrlResolver`, Zod pbp/summary/boxscore from recording, normalizer, WNBA adapter, `content-hash`, `freshness`, `applyChanges` (observation + durable writes), `GameChange` schema, `game_changes`, outbox + publisher (ordering, at-least-once, startup drain), pulse sender, `SupabaseBroadcastTransport` (private), session-lock worker, snapshot + paginated `/changes`, `bin/subscribe --record` implementing the full reconnect contract, plus the CLIs `/validate-replay` depends on: `dev:worker --until closed`, `pnpm dump-game`, `pnpm sim inject --mutate-event|--delete-event`.
 
