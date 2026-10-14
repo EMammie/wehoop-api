@@ -112,7 +112,7 @@ export class OutboxPublisher {
         join ready r on r.game_id = o.game_id
         where o.published_at is null and o.dead_at is null and o.next_attempt_at <= now())
       select p.change_id as "changeId", p.game_id as "gameId", p.seq::text as seq, p.attempts,
-             c.change_type as "changeType", c.provider_event_id as "providerEventId", c.body,
+             c.change_type::text as "changeType", c.provider_event_id as "providerEventId", c.body,
              c.created_at as "createdAt"
       from pending p
       join public.game_changes c on c.id = p.change_id

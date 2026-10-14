@@ -62,7 +62,7 @@ export async function loadChanges(
         body: unknown;
         createdAt: Date;
       }[]
-    >`select id, seq::text as seq, change_type as "changeType", provider_event_id as "providerEventId", body,
+    >`select id, seq::text as seq, change_type::text as "changeType", provider_event_id as "providerEventId", body,
              created_at as "createdAt"
       from public.game_changes c where c.game_id = ${gameId} and c.seq > ${after}
       order by c.seq limit ${limit + 1}`;
