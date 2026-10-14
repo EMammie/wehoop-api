@@ -5,6 +5,7 @@ import {
   comparePositions,
   decideBatch,
   decideEvent,
+  decideStats,
   type EventPosition,
   newestPosition,
   phaseOf,
@@ -620,6 +621,43 @@ describe('freshness §4 acceptance cases (rev 4.3)', () => {
     expect((d2 as { detail: string }).detail).toMatch(/2b/);
     // and phaseOf never sees a null: a stored status is always a real GameStatus
     expect(phaseOf('inprogress')).toBe('live');
+  });
+});
+
+describe('freshness rule 3: stats observation precedence', () => {
+  const T1 = t('2026-06-30T23:30:00Z');
+  const T2 = t('2026-06-30T23:30:30Z');
+  it('a new row inserts; a newer observation with a differing hash updates; an identical hash touches; older or equal is ignored', () => {
+    expect(decideStats(undefined, { contentHash: 'h', observedAt: T1 })).toBe('insert');
+    const stored = { contentHash: 'h', observedAt: T1 };
+    expect(decideStats(stored, { contentHash: 'x', observedAt: T2 })).toBe('update');
+    expect(decideStats(stored, { contentHash: 'h', observedAt: T2 })).toBe('touch');
+    expect(decideStats(stored, { contentHash: 'x', observedAt: T1 })).toBe('ignore_older'); // equal: not newer
+    expect(decideStats(stored, { contentHash: 'x', observedAt: t('2026-06-30T23:29:00Z') })).toBe(
+      'ignore_older',
+    );
+    // a replay re-presenting an older stats document over a finished game never oscillates:
+    // doc 142 (older) against stored doc 146 -> ignored; doc 146 again -> touch, no change
+    expect(
+      decideStats({ contentHash: 'd146', observedAt: T2 }, { contentHash: 'd142', observedAt: T1 }),
+    ).toBe('ignore_older');
+    expect(
+      decideStats({ contentHash: 'd146', observedAt: T2 }, { contentHash: 'd146', observedAt: T2 }),
+    ).toBe('ignore_older');
+    // an official correction on a closed game arrives later: applied
+    expect(
+      decideStats(
+        { contentHash: 'd146', observedAt: T2 },
+        { contentHash: 'official', observedAt: t('2026-07-01T10:00:00Z') },
+      ),
+    ).toBe('update');
+    // a row predating 0004 has no observed_at: hash decides
+    expect(
+      decideStats({ contentHash: 'h', observedAt: null }, { contentHash: 'h', observedAt: T1 }),
+    ).toBe('touch');
+    expect(
+      decideStats({ contentHash: 'h', observedAt: null }, { contentHash: 'x', observedAt: T1 }),
+    ).toBe('update');
   });
 });
 

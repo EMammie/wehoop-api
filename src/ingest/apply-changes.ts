@@ -21,6 +21,7 @@ import {
   type BatchDecision,
   type BatchStaleReason,
   decideBatch,
+  decideStats,
   newestPosition,
   type StaleReason,
   type StoredEventForFreshness,
@@ -57,6 +58,10 @@ export interface ApplyCounts {
   /** Explicit deletion markers older than the stored event's revision. */
   ignoredOlderDeletions: number;
   unchanged: number;
+  /** Stats entities whose batch observedAt is not newer than the stored row's. */
+  ignoredOlderStats: number;
+  /** Stats entities confirmed by a newer observation with an identical hash (observed_at advanced). */
+  touchedStats: number;
 }
 
 export type ApplyResult =
@@ -397,7 +402,7 @@ export async function applyChanges(
       batch.deletedEvents,
     );
     const changes: PendingChange[] = [...diff.changes];
-    const counts: ApplyCounts = diff.counts;
+    const counts: ApplyCounts = { ...diff.counts, ignoredOlderStats: 0, touchedStats: 0 };
     const eventWrites = diff.writes.map((w) => ({ action: w.action, ev: w.event, hash: w.hash }));
     const deletions: Array<{ row: StoredEventRow; revision: string | null }> = [];
     for (const marker of diff.deletions) {
@@ -452,7 +457,9 @@ export async function applyChanges(
       deps.log.info({ gameId, detail: decision.detail }, 'game-level view superseded');
     }
 
-    // Stats: hash compare, always applied.
+    // Stats: observation precedence per entity (rule 3). Newer observedAt than the stored row:
+    // a differing hash is a stats_team change, an identical one only advances observed_at.
+    // Older or equal: ignored (counted). Closed games take later corrections like any other.
     const teamIds = await teamIdsFor(
       tx,
       g.league,
@@ -464,10 +471,14 @@ export async function applyChanges(
       stats: NormalizedBatch['teamStats'][number]['stats'];
       hash: string;
     }> = [];
+    const statsTouches: string[] = [];
     if (batch.teamStats.length > 0) {
-      const existing = await tx<{ teamId: string; contentHash: string | null }[]>`
-        select team_id as "teamId", content_hash as "contentHash" from public.game_team_stats where game_id = ${gameId}`;
-      const existingHash = new Map(existing.map((e) => [e.teamId, e.contentHash]));
+      const existing = await tx<
+        { teamId: string; contentHash: string | null; observedAt: Date | null }[]
+      >`
+        select team_id as "teamId", content_hash as "contentHash", observed_at as "observedAt"
+        from public.game_team_stats where game_id = ${gameId}`;
+      const existingByTeam = new Map(existing.map((e) => [e.teamId, e]));
       for (const ts of batch.teamStats) {
         const teamId = teamIds.get(ts.providerTeamId);
         if (!teamId) {
@@ -478,13 +489,35 @@ export async function applyChanges(
           continue;
         }
         const hash = contentHash(ts.stats);
-        if (existingHash.get(teamId) === hash) continue;
-        statsWrites.push({ teamId, isHome: ts.isHome, stats: ts.stats, hash });
-        changes.push({
-          type: 'stats_team',
-          body: { teamId, providerTeamId: ts.providerTeamId, isHome: ts.isHome, stats: ts.stats },
+        const action = decideStats(existingByTeam.get(teamId), {
+          contentHash: hash,
+          observedAt: observation.observedAt,
         });
+        switch (action) {
+          case 'ignore_older':
+            counts.ignoredOlderStats++;
+            break;
+          case 'touch':
+            counts.touchedStats++;
+            statsTouches.push(teamId);
+            break;
+          default:
+            statsWrites.push({ teamId, isHome: ts.isHome, stats: ts.stats, hash });
+            changes.push({
+              type: 'stats_team',
+              body: {
+                teamId,
+                providerTeamId: ts.providerTeamId,
+                isHome: ts.isHome,
+                stats: ts.stats,
+              },
+            });
+        }
       }
+    }
+    for (const teamId of statsTouches) {
+      await tx`update public.game_team_stats set observed_at = ${observation.observedAt}, updated_at = now()
+               where game_id = ${gameId} and team_id = ${teamId}`;
     }
 
     // 5. Observation write: clock + freshness metadata, never a seq. Omission is not change:
@@ -611,12 +644,13 @@ export async function applyChanges(
         const st = s.stats;
         await tx`insert into public.game_team_stats (game_id, team_id, is_home, points, fgm, fga, tpm, tpa, ftm, fta,
                    off_rebounds, def_rebounds, rebounds, assists, steals, blocks, turnovers, personal_fouls,
-                   fast_break_pts, paint_pts, second_chance_pts, bench_pts, biggest_lead, extra, content_hash)
+                   fast_break_pts, paint_pts, second_chance_pts, bench_pts, biggest_lead, extra, content_hash,
+                   observed_at)
                  values (${gameId}, ${s.teamId}, ${s.isHome}, ${st.points}, ${st.fgm}, ${st.fga}, ${st.tpm}, ${st.tpa},
                    ${st.ftm}, ${st.fta}, ${st.offRebounds}, ${st.defRebounds}, ${st.rebounds}, ${st.assists},
                    ${st.steals}, ${st.blocks}, ${st.turnovers}, ${st.personalFouls}, ${st.fastBreakPts},
                    ${st.paintPts}, ${st.secondChancePts}, ${st.benchPts}, ${st.biggestLead},
-                   ${tx.json(st.extra as never)}, ${s.hash})
+                   ${tx.json(st.extra as never)}, ${s.hash}, ${observation.observedAt})
                  on conflict (game_id, team_id) do update set is_home = excluded.is_home, points = excluded.points,
                    fgm = excluded.fgm, fga = excluded.fga, tpm = excluded.tpm, tpa = excluded.tpa, ftm = excluded.ftm,
                    fta = excluded.fta, off_rebounds = excluded.off_rebounds, def_rebounds = excluded.def_rebounds,
@@ -624,7 +658,8 @@ export async function applyChanges(
                    blocks = excluded.blocks, turnovers = excluded.turnovers, personal_fouls = excluded.personal_fouls,
                    fast_break_pts = excluded.fast_break_pts, paint_pts = excluded.paint_pts,
                    second_chance_pts = excluded.second_chance_pts, bench_pts = excluded.bench_pts,
-                   biggest_lead = excluded.biggest_lead, extra = excluded.extra, content_hash = excluded.content_hash`;
+                   biggest_lead = excluded.biggest_lead, extra = excluded.extra, content_hash = excluded.content_hash,
+                   observed_at = excluded.observed_at, updated_at = now()`;
       }
 
       let seq = firstSeq;

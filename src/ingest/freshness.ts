@@ -394,3 +394,35 @@ export function decideEvent(
   // Newer or equal/missing `updated` with a differing body: a correction.
   return 'update';
 }
+
+/* ------------------------------------------------------------------------- */
+/* Per-entity precedence (rule 3, stats)                                      */
+/* ------------------------------------------------------------------------- */
+
+export interface StoredStatsRevision {
+  contentHash: string | null;
+  /** game_team_stats / game_player_stats.observed_at; null only for rows predating 0004. */
+  observedAt: Date | null;
+}
+
+export type StatsAction = 'insert' | 'update' | 'touch' | 'ignore_older';
+
+/**
+ * Rule 3 for one stats entity: observation precedence, like game-level fields.
+ * Applied only when the batch's observedAt is newer than the stored row's (or
+ * the row is new); a change row only when the content hash differs (`update`),
+ * otherwise the row's observed_at advances (`touch`). An older or equal
+ * observation is ignored (counted, not logged): a replay restarted after the
+ * final whistle re-presents older stats documents and must not oscillate, while
+ * an official correction on a closed game arrives later and applies.
+ */
+export function decideStats(
+  stored: StoredStatsRevision | undefined,
+  incoming: { contentHash: string; observedAt: Date },
+): StatsAction {
+  if (!stored) return 'insert';
+  if (stored.observedAt !== null && incoming.observedAt.getTime() <= stored.observedAt.getTime()) {
+    return 'ignore_older';
+  }
+  return stored.contentHash === incoming.contentHash ? 'touch' : 'update';
+}
