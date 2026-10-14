@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { type FaultSpec, parseFault } from './ingest/fault.js';
 
 const Mode = z.enum(['sim', 'trial', 'production']);
 export type Mode = z.infer<typeof Mode>;
@@ -25,6 +26,8 @@ const EnvSchema = z.object({
 
   PORT: z.coerce.number().int().positive().default(3000),
   ADMIN_BEARER_TOKEN: z.preprocess(emptyToUndefined, z.string().optional()),
+  API_BASE_URL: z.preprocess(emptyToUndefined, z.url().optional()),
+  WEHOOP_FAULT: z.preprocess(emptyToUndefined, z.string().optional()),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -50,7 +53,9 @@ export interface Config {
     playbackUrl: string;
     keys: { wnba?: string; ncaawb?: string; unrivaled?: string };
   };
-  api: { port: number; adminBearerToken?: string };
+  api: { port: number; adminBearerToken?: string; baseUrl: string };
+  /** Crash-point fault injection (see src/ingest/fault.ts). Null unless WEHOOP_FAULT is set. */
+  fault: FaultSpec | null;
 }
 
 /**
@@ -80,6 +85,9 @@ export function loadConfig(source: Record<string, string | undefined> = process.
     if (!e.SPORTRADAR_WNBA_KEY && !e.SPORTRADAR_NCAAWB_KEY && !e.SPORTRADAR_UNRIVALED_KEY) {
       problems.push(`at least one SPORTRADAR_*_KEY is required when MODE=${e.MODE}`);
     }
+  }
+  if (e.MODE === 'production' && e.WEHOOP_FAULT) {
+    problems.push('WEHOOP_FAULT must not be set when MODE=production');
   }
   if (e.MODE === 'production' && e.SPORTRADAR_ACCESS_LEVEL !== 'production') {
     problems.push('SPORTRADAR_ACCESS_LEVEL must be "production" when MODE=production');
@@ -114,6 +122,8 @@ export function loadConfig(source: Record<string, string | undefined> = process.
     api: {
       port: e.PORT,
       ...(e.ADMIN_BEARER_TOKEN ? { adminBearerToken: e.ADMIN_BEARER_TOKEN } : {}),
+      baseUrl: e.API_BASE_URL ?? `http://127.0.0.1:${e.PORT}`,
     },
+    fault: parseFault(e.WEHOOP_FAULT),
   };
 }

@@ -1,0 +1,1030 @@
+[
+ {
+  "heartbeat": {
+   "interval": 5000
+  }
+ },
+ {
+  "payload": {
+   "game": {
+    "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+    "title": "2026 Commissioner's Cup Final",
+    "status": "inprogress",
+    "coverage": "full",
+    "reference": "1052600001",
+    "scheduled": "2026-06-30T23:00:00+00:00",
+    "home": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:3446"
+    },
+    "away": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:35550"
+    }
+   },
+   "event": {
+    "id": "aeaa8af3-ca64-45c5-ab47-0f19c11410dd",
+    "event_type": "lineupchange",
+    "number": 5002,
+    "sequence": 1782861392995,
+    "clock": "10:00",
+    "clock_decimal": "10:00",
+    "updated": "2026-06-30T23:16:33+00:00",
+    "wall_clock": "2026-06-30T23:16:33+00:00",
+    "created": "2026-06-30T23:16:33+00:00",
+    "home_points": 0,
+    "away_points": 0,
+    "description": "Liberty lineup change (Breanna Stewart, Jonquel Jones, Sabrina Ionescu, Pauline Astier, Leonie Fiebich)",
+    "attribution": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "sr_id": "sr:team:3446"
+    },
+    "period": {
+     "id": "0616c9cd-8b15-4eb8-b77d-d60741ad3bc1",
+     "number": 1,
+     "sequence": 1,
+     "type": "quarter"
+    },
+    "on_court": {
+     "home": {
+      "name": "Liberty",
+      "market": "New York",
+      "reference": "1611661313",
+      "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+      "players": [
+       {
+        "full_name": "Breanna Stewart",
+        "jersey_number": "30",
+        "reference": "1627668",
+        "id": "6fa763e6-846f-4f9d-a4ce-256d8b328424",
+        "sr_id": "sr:player:1156888"
+       },
+       {
+        "full_name": "Jonquel Jones",
+        "jersey_number": "35",
+        "reference": "1627673",
+        "id": "8a438358-fbe0-4797-921f-add82eddf789",
+        "sr_id": "sr:player:1156874"
+       },
+       {
+        "full_name": "Sabrina Ionescu",
+        "jersey_number": "20",
+        "reference": "1629477",
+        "id": "2199ae2c-7588-4610-9deb-a1b5e8025d43",
+        "sr_id": "sr:player:1150010"
+       },
+       {
+        "full_name": "Pauline Astier",
+        "jersey_number": "18",
+        "reference": "1631136",
+        "id": "98fff88c-a6ac-48fd-a586-46fa33c7c25e",
+        "sr_id": "sr:player:3181440"
+       },
+       {
+        "full_name": "Leonie Fiebich",
+        "jersey_number": "13",
+        "reference": "1630142",
+        "id": "fd9c6f75-0468-4b52-a3f7-6f70d1d658c6",
+        "sr_id": "sr:player:2091519"
+       }
+      ],
+      "sr_id": "sr:team:3446"
+     },
+     "away": {
+      "name": "Aces",
+      "market": "Las Vegas",
+      "reference": "1611661319",
+      "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+      "players": [
+       {
+        "full_name": "Stephanie Talbot",
+        "jersey_number": "7",
+        "reference": "203855",
+        "id": "779cd8d9-133e-4e68-8bfb-16a437a34686",
+        "sr_id": "sr:player:1156958"
+       },
+       {
+        "full_name": "Jackie Young",
+        "jersey_number": "0",
+        "reference": "1629498",
+        "id": "4fa92d21-9f96-4bab-a9f8-f530a69287ee",
+        "sr_id": "sr:player:1148506"
+       },
+       {
+        "full_name": "Jewell Loyd",
+        "jersey_number": "24",
+        "reference": "204319",
+        "id": "0825c65d-b903-4dd3-8206-e5f7d31bb2b8",
+        "sr_id": "sr:player:1156786"
+       },
+       {
+        "full_name": "Chelsea Gray",
+        "jersey_number": "12",
+        "reference": "203833",
+        "id": "ca6b54e3-612d-4523-9582-b88e675f58de",
+        "sr_id": "sr:player:1157052"
+       },
+       {
+        "full_name": "NaLyssa Smith",
+        "jersey_number": "3",
+        "reference": "1631019",
+        "id": "732bf79f-1bfa-450c-ad04-015f7624765a",
+        "sr_id": "sr:player:1618438"
+       }
+      ],
+      "sr_id": "sr:team:35550"
+     }
+    }
+   }
+  },
+  "locale": "en",
+  "metadata": {
+   "match": "sd:match:40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+   "team": "sd:team:08ed8274-e29f-4248-bc2e-83cc8ed18d75,sr:team:3446",
+   "league": "wnba",
+   "locale": "en",
+   "status": "inprogress",
+   "players": "sd:player:6fa763e6-846f-4f9d-a4ce-256d8b328424,sd:player:8a438358-fbe0-4797-921f-add82eddf789,sd:player:2199ae2c-7588-4610-9deb-a1b5e8025d43,sd:player:98fff88c-a6ac-48fd-a586-46fa33c7c25e,sd:player:fd9c6f75-0468-4b52-a3f7-6f70d1d658c6,sd:player:779cd8d9-133e-4e68-8bfb-16a437a34686,sd:player:4fa92d21-9f96-4bab-a9f8-f530a69287ee,sd:player:0825c65d-b903-4dd3-8206-e5f7d31bb2b8,sd:player:ca6b54e3-612d-4523-9582-b88e675f58de,sd:player:732bf79f-1bfa-450c-ad04-015f7624765a",
+   "event_type": "lineupchange",
+   "event_category": "lineupchange",
+   "operation": "update",
+   "version": "v7"
+  }
+ },
+ {
+  "payload": {
+   "game": {
+    "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+    "title": "2026 Commissioner's Cup Final",
+    "status": "inprogress",
+    "coverage": "full",
+    "reference": "1052600001",
+    "scheduled": "2026-06-30T23:00:00+00:00",
+    "home": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:3446"
+    },
+    "away": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:35550"
+    }
+   },
+   "event": {
+    "id": "3a15aab5-2afe-45e6-ba84-bc20ef30906c",
+    "event_type": "lineupchange",
+    "number": 5002,
+    "sequence": 1782861392993,
+    "clock": "10:00",
+    "clock_decimal": "10:00",
+    "updated": "2026-06-30T23:16:33+00:00",
+    "wall_clock": "2026-06-30T23:16:33+00:00",
+    "created": "2026-06-30T23:16:33+00:00",
+    "home_points": 0,
+    "away_points": 0,
+    "description": "Aces lineup change (Stephanie Talbot, Jackie Young, Jewell Loyd, Chelsea Gray, NaLyssa Smith)",
+    "attribution": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "sr_id": "sr:team:35550"
+    },
+    "period": {
+     "id": "0616c9cd-8b15-4eb8-b77d-d60741ad3bc1",
+     "number": 1,
+     "sequence": 1,
+     "type": "quarter"
+    },
+    "on_court": {
+     "home": {
+      "name": "Liberty",
+      "market": "New York",
+      "reference": "1611661313",
+      "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+      "players": [
+       {
+        "full_name": "Breanna Stewart",
+        "jersey_number": "30",
+        "reference": "1627668",
+        "id": "6fa763e6-846f-4f9d-a4ce-256d8b328424",
+        "sr_id": "sr:player:1156888"
+       },
+       {
+        "full_name": "Jonquel Jones",
+        "jersey_number": "35",
+        "reference": "1627673",
+        "id": "8a438358-fbe0-4797-921f-add82eddf789",
+        "sr_id": "sr:player:1156874"
+       },
+       {
+        "full_name": "Sabrina Ionescu",
+        "jersey_number": "20",
+        "reference": "1629477",
+        "id": "2199ae2c-7588-4610-9deb-a1b5e8025d43",
+        "sr_id": "sr:player:1150010"
+       },
+       {
+        "full_name": "Pauline Astier",
+        "jersey_number": "18",
+        "reference": "1631136",
+        "id": "98fff88c-a6ac-48fd-a586-46fa33c7c25e",
+        "sr_id": "sr:player:3181440"
+       },
+       {
+        "full_name": "Leonie Fiebich",
+        "jersey_number": "13",
+        "reference": "1630142",
+        "id": "fd9c6f75-0468-4b52-a3f7-6f70d1d658c6",
+        "sr_id": "sr:player:2091519"
+       }
+      ],
+      "sr_id": "sr:team:3446"
+     },
+     "away": {
+      "name": "Aces",
+      "market": "Las Vegas",
+      "reference": "1611661319",
+      "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+      "players": [
+       {
+        "full_name": "Stephanie Talbot",
+        "jersey_number": "7",
+        "reference": "203855",
+        "id": "779cd8d9-133e-4e68-8bfb-16a437a34686",
+        "sr_id": "sr:player:1156958"
+       },
+       {
+        "full_name": "Jackie Young",
+        "jersey_number": "0",
+        "reference": "1629498",
+        "id": "4fa92d21-9f96-4bab-a9f8-f530a69287ee",
+        "sr_id": "sr:player:1148506"
+       },
+       {
+        "full_name": "Jewell Loyd",
+        "jersey_number": "24",
+        "reference": "204319",
+        "id": "0825c65d-b903-4dd3-8206-e5f7d31bb2b8",
+        "sr_id": "sr:player:1156786"
+       },
+       {
+        "full_name": "Chelsea Gray",
+        "jersey_number": "12",
+        "reference": "203833",
+        "id": "ca6b54e3-612d-4523-9582-b88e675f58de",
+        "sr_id": "sr:player:1157052"
+       },
+       {
+        "full_name": "NaLyssa Smith",
+        "jersey_number": "3",
+        "reference": "1631019",
+        "id": "732bf79f-1bfa-450c-ad04-015f7624765a",
+        "sr_id": "sr:player:1618438"
+       }
+      ],
+      "sr_id": "sr:team:35550"
+     }
+    }
+   }
+  },
+  "locale": "en",
+  "metadata": {
+   "match": "sd:match:40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+   "team": "sd:team:171b097d-01db-4ae8-9d56-035689402ec6,sr:team:35550",
+   "league": "wnba",
+   "locale": "en",
+   "status": "inprogress",
+   "players": "sd:player:6fa763e6-846f-4f9d-a4ce-256d8b328424,sd:player:8a438358-fbe0-4797-921f-add82eddf789,sd:player:2199ae2c-7588-4610-9deb-a1b5e8025d43,sd:player:98fff88c-a6ac-48fd-a586-46fa33c7c25e,sd:player:fd9c6f75-0468-4b52-a3f7-6f70d1d658c6,sd:player:779cd8d9-133e-4e68-8bfb-16a437a34686,sd:player:4fa92d21-9f96-4bab-a9f8-f530a69287ee,sd:player:0825c65d-b903-4dd3-8206-e5f7d31bb2b8,sd:player:ca6b54e3-612d-4523-9582-b88e675f58de,sd:player:732bf79f-1bfa-450c-ad04-015f7624765a",
+   "event_type": "lineupchange",
+   "event_category": "lineupchange",
+   "operation": "update",
+   "version": "v7"
+  }
+ },
+ {
+  "payload": {
+   "game": {
+    "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+    "title": "2026 Commissioner's Cup Final",
+    "status": "inprogress",
+    "coverage": "full",
+    "reference": "1052600001",
+    "scheduled": "2026-06-30T23:00:00+00:00",
+    "home": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:3446"
+    },
+    "away": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:35550"
+    }
+   },
+   "event": {
+    "id": "b0943368-03e3-40a9-a75b-50a073526a3d",
+    "event_type": "opentip",
+    "number": 4,
+    "sequence": 1782861394900,
+    "clock": "10:00",
+    "clock_decimal": "10:00",
+    "updated": "2026-06-30T23:16:35+00:00",
+    "wall_clock": "2026-06-30T23:16:34+00:00",
+    "created": "2026-06-30T23:16:35+00:00",
+    "home_points": 0,
+    "away_points": 0,
+    "description": "(Pauline Astier gains possession)",
+    "attribution": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "sr_id": "sr:team:3446"
+    },
+    "possession": {
+     "name": "Liberty",
+     "market": "New York",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "sr_id": "sr:team:3446"
+    },
+    "period": {
+     "id": "0616c9cd-8b15-4eb8-b77d-d60741ad3bc1",
+     "number": 1,
+     "sequence": 1,
+     "type": "quarter"
+    },
+    "on_court": {
+     "home": {
+      "name": "Liberty",
+      "market": "New York",
+      "reference": "1611661313",
+      "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+      "players": [
+       {
+        "full_name": "Breanna Stewart",
+        "jersey_number": "30",
+        "reference": "1627668",
+        "id": "6fa763e6-846f-4f9d-a4ce-256d8b328424",
+        "sr_id": "sr:player:1156888"
+       },
+       {
+        "full_name": "Jonquel Jones",
+        "jersey_number": "35",
+        "reference": "1627673",
+        "id": "8a438358-fbe0-4797-921f-add82eddf789",
+        "sr_id": "sr:player:1156874"
+       },
+       {
+        "full_name": "Sabrina Ionescu",
+        "jersey_number": "20",
+        "reference": "1629477",
+        "id": "2199ae2c-7588-4610-9deb-a1b5e8025d43",
+        "sr_id": "sr:player:1150010"
+       },
+       {
+        "full_name": "Pauline Astier",
+        "jersey_number": "18",
+        "reference": "1631136",
+        "id": "98fff88c-a6ac-48fd-a586-46fa33c7c25e",
+        "sr_id": "sr:player:3181440"
+       },
+       {
+        "full_name": "Leonie Fiebich",
+        "jersey_number": "13",
+        "reference": "1630142",
+        "id": "fd9c6f75-0468-4b52-a3f7-6f70d1d658c6",
+        "sr_id": "sr:player:2091519"
+       }
+      ],
+      "sr_id": "sr:team:3446"
+     },
+     "away": {
+      "name": "Aces",
+      "market": "Las Vegas",
+      "reference": "1611661319",
+      "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+      "players": [
+       {
+        "full_name": "Stephanie Talbot",
+        "jersey_number": "7",
+        "reference": "203855",
+        "id": "779cd8d9-133e-4e68-8bfb-16a437a34686",
+        "sr_id": "sr:player:1156958"
+       },
+       {
+        "full_name": "Jackie Young",
+        "jersey_number": "0",
+        "reference": "1629498",
+        "id": "4fa92d21-9f96-4bab-a9f8-f530a69287ee",
+        "sr_id": "sr:player:1148506"
+       },
+       {
+        "full_name": "Jewell Loyd",
+        "jersey_number": "24",
+        "reference": "204319",
+        "id": "0825c65d-b903-4dd3-8206-e5f7d31bb2b8",
+        "sr_id": "sr:player:1156786"
+       },
+       {
+        "full_name": "Chelsea Gray",
+        "jersey_number": "12",
+        "reference": "203833",
+        "id": "ca6b54e3-612d-4523-9582-b88e675f58de",
+        "sr_id": "sr:player:1157052"
+       },
+       {
+        "full_name": "NaLyssa Smith",
+        "jersey_number": "3",
+        "reference": "1631019",
+        "id": "732bf79f-1bfa-450c-ad04-015f7624765a",
+        "sr_id": "sr:player:1618438"
+       }
+      ],
+      "sr_id": "sr:team:35550"
+     }
+    }
+   }
+  },
+  "locale": "en",
+  "metadata": {
+   "match": "sd:match:40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+   "team": "sd:team:08ed8274-e29f-4248-bc2e-83cc8ed18d75,sr:team:3446",
+   "league": "wnba",
+   "locale": "en",
+   "status": "inprogress",
+   "players": "sd:player:6fa763e6-846f-4f9d-a4ce-256d8b328424,sd:player:8a438358-fbe0-4797-921f-add82eddf789,sd:player:2199ae2c-7588-4610-9deb-a1b5e8025d43,sd:player:98fff88c-a6ac-48fd-a586-46fa33c7c25e,sd:player:fd9c6f75-0468-4b52-a3f7-6f70d1d658c6,sd:player:779cd8d9-133e-4e68-8bfb-16a437a34686,sd:player:4fa92d21-9f96-4bab-a9f8-f530a69287ee,sd:player:0825c65d-b903-4dd3-8206-e5f7d31bb2b8,sd:player:ca6b54e3-612d-4523-9582-b88e675f58de,sd:player:732bf79f-1bfa-450c-ad04-015f7624765a",
+   "event_type": "opentip",
+   "event_category": "period,stoppage,possession",
+   "operation": "update",
+   "version": "v7"
+  }
+ },
+ {
+  "payload": {
+   "game": {
+    "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+    "title": "2026 Commissioner's Cup Final",
+    "status": "inprogress",
+    "coverage": "full",
+    "reference": "1052600001",
+    "scheduled": "2026-06-30T23:00:00+00:00",
+    "home": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:3446"
+    },
+    "away": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:35550"
+    }
+   },
+   "event": {
+    "id": "b0943368-03e3-40a9-a75b-50a073526a3d",
+    "event_type": "opentip",
+    "number": 4,
+    "sequence": 1782861394900,
+    "clock": "10:00",
+    "clock_decimal": "10:00",
+    "updated": "2026-06-30T23:16:35+00:00",
+    "wall_clock": "2026-06-30T23:16:34+00:00",
+    "created": "2026-06-30T23:16:35+00:00",
+    "home_points": 0,
+    "away_points": 0,
+    "description": "Jonquel Jones (Pauline Astier gains possession)",
+    "attribution": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "sr_id": "sr:team:3446"
+    },
+    "possession": {
+     "name": "Liberty",
+     "market": "New York",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "sr_id": "sr:team:3446"
+    },
+    "period": {
+     "id": "0616c9cd-8b15-4eb8-b77d-d60741ad3bc1",
+     "number": 1,
+     "sequence": 1,
+     "type": "quarter"
+    },
+    "on_court": {
+     "home": {
+      "name": "Liberty",
+      "market": "New York",
+      "reference": "1611661313",
+      "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+      "players": [
+       {
+        "full_name": "Breanna Stewart",
+        "jersey_number": "30",
+        "reference": "1627668",
+        "id": "6fa763e6-846f-4f9d-a4ce-256d8b328424",
+        "sr_id": "sr:player:1156888"
+       },
+       {
+        "full_name": "Jonquel Jones",
+        "jersey_number": "35",
+        "reference": "1627673",
+        "id": "8a438358-fbe0-4797-921f-add82eddf789",
+        "sr_id": "sr:player:1156874"
+       },
+       {
+        "full_name": "Sabrina Ionescu",
+        "jersey_number": "20",
+        "reference": "1629477",
+        "id": "2199ae2c-7588-4610-9deb-a1b5e8025d43",
+        "sr_id": "sr:player:1150010"
+       },
+       {
+        "full_name": "Pauline Astier",
+        "jersey_number": "18",
+        "reference": "1631136",
+        "id": "98fff88c-a6ac-48fd-a586-46fa33c7c25e",
+        "sr_id": "sr:player:3181440"
+       },
+       {
+        "full_name": "Leonie Fiebich",
+        "jersey_number": "13",
+        "reference": "1630142",
+        "id": "fd9c6f75-0468-4b52-a3f7-6f70d1d658c6",
+        "sr_id": "sr:player:2091519"
+       }
+      ],
+      "sr_id": "sr:team:3446"
+     },
+     "away": {
+      "name": "Aces",
+      "market": "Las Vegas",
+      "reference": "1611661319",
+      "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+      "players": [
+       {
+        "full_name": "Stephanie Talbot",
+        "jersey_number": "7",
+        "reference": "203855",
+        "id": "779cd8d9-133e-4e68-8bfb-16a437a34686",
+        "sr_id": "sr:player:1156958"
+       },
+       {
+        "full_name": "Jackie Young",
+        "jersey_number": "0",
+        "reference": "1629498",
+        "id": "4fa92d21-9f96-4bab-a9f8-f530a69287ee",
+        "sr_id": "sr:player:1148506"
+       },
+       {
+        "full_name": "Jewell Loyd",
+        "jersey_number": "24",
+        "reference": "204319",
+        "id": "0825c65d-b903-4dd3-8206-e5f7d31bb2b8",
+        "sr_id": "sr:player:1156786"
+       },
+       {
+        "full_name": "Chelsea Gray",
+        "jersey_number": "12",
+        "reference": "203833",
+        "id": "ca6b54e3-612d-4523-9582-b88e675f58de",
+        "sr_id": "sr:player:1157052"
+       },
+       {
+        "full_name": "NaLyssa Smith",
+        "jersey_number": "3",
+        "reference": "1631019",
+        "id": "732bf79f-1bfa-450c-ad04-015f7624765a",
+        "sr_id": "sr:player:1618438"
+       }
+      ],
+      "sr_id": "sr:team:35550"
+     }
+    }
+   }
+  },
+  "locale": "en",
+  "metadata": {
+   "match": "sd:match:40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+   "team": "sd:team:08ed8274-e29f-4248-bc2e-83cc8ed18d75,sr:team:3446",
+   "league": "wnba",
+   "locale": "en",
+   "status": "inprogress",
+   "players": "sd:player:6fa763e6-846f-4f9d-a4ce-256d8b328424,sd:player:8a438358-fbe0-4797-921f-add82eddf789,sd:player:2199ae2c-7588-4610-9deb-a1b5e8025d43,sd:player:98fff88c-a6ac-48fd-a586-46fa33c7c25e,sd:player:fd9c6f75-0468-4b52-a3f7-6f70d1d658c6,sd:player:779cd8d9-133e-4e68-8bfb-16a437a34686,sd:player:4fa92d21-9f96-4bab-a9f8-f530a69287ee,sd:player:0825c65d-b903-4dd3-8206-e5f7d31bb2b8,sd:player:ca6b54e3-612d-4523-9582-b88e675f58de,sd:player:732bf79f-1bfa-450c-ad04-015f7624765a",
+   "event_type": "opentip",
+   "event_category": "period,stoppage,possession",
+   "operation": "update",
+   "version": "v7"
+  }
+ },
+ {
+  "payload": {
+   "game": {
+    "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+    "title": "2026 Commissioner's Cup Final",
+    "status": "inprogress",
+    "coverage": "full",
+    "reference": "1052600001",
+    "scheduled": "2026-06-30T23:00:00+00:00",
+    "home": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:3446"
+    },
+    "away": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:35550"
+    }
+   },
+   "event": {
+    "id": "b0943368-03e3-40a9-a75b-50a073526a3d",
+    "event_type": "opentip",
+    "number": 4,
+    "sequence": 1782861394900,
+    "clock": "10:00",
+    "clock_decimal": "10:00",
+    "updated": "2026-06-30T23:16:37+00:00",
+    "wall_clock": "2026-06-30T23:16:34+00:00",
+    "created": "2026-06-30T23:16:35+00:00",
+    "home_points": 0,
+    "away_points": 0,
+    "description": "NaLyssa Smith vs. Jonquel Jones (Pauline Astier gains possession)",
+    "attribution": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "sr_id": "sr:team:3446"
+    },
+    "possession": {
+     "name": "Liberty",
+     "market": "New York",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "sr_id": "sr:team:3446"
+    },
+    "period": {
+     "id": "0616c9cd-8b15-4eb8-b77d-d60741ad3bc1",
+     "number": 1,
+     "sequence": 1,
+     "type": "quarter"
+    },
+    "on_court": {
+     "home": {
+      "name": "Liberty",
+      "market": "New York",
+      "reference": "1611661313",
+      "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+      "players": [
+       {
+        "full_name": "Breanna Stewart",
+        "jersey_number": "30",
+        "reference": "1627668",
+        "id": "6fa763e6-846f-4f9d-a4ce-256d8b328424",
+        "sr_id": "sr:player:1156888"
+       },
+       {
+        "full_name": "Jonquel Jones",
+        "jersey_number": "35",
+        "reference": "1627673",
+        "id": "8a438358-fbe0-4797-921f-add82eddf789",
+        "sr_id": "sr:player:1156874"
+       },
+       {
+        "full_name": "Sabrina Ionescu",
+        "jersey_number": "20",
+        "reference": "1629477",
+        "id": "2199ae2c-7588-4610-9deb-a1b5e8025d43",
+        "sr_id": "sr:player:1150010"
+       },
+       {
+        "full_name": "Pauline Astier",
+        "jersey_number": "18",
+        "reference": "1631136",
+        "id": "98fff88c-a6ac-48fd-a586-46fa33c7c25e",
+        "sr_id": "sr:player:3181440"
+       },
+       {
+        "full_name": "Leonie Fiebich",
+        "jersey_number": "13",
+        "reference": "1630142",
+        "id": "fd9c6f75-0468-4b52-a3f7-6f70d1d658c6",
+        "sr_id": "sr:player:2091519"
+       }
+      ],
+      "sr_id": "sr:team:3446"
+     },
+     "away": {
+      "name": "Aces",
+      "market": "Las Vegas",
+      "reference": "1611661319",
+      "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+      "players": [
+       {
+        "full_name": "Stephanie Talbot",
+        "jersey_number": "7",
+        "reference": "203855",
+        "id": "779cd8d9-133e-4e68-8bfb-16a437a34686",
+        "sr_id": "sr:player:1156958"
+       },
+       {
+        "full_name": "Jackie Young",
+        "jersey_number": "0",
+        "reference": "1629498",
+        "id": "4fa92d21-9f96-4bab-a9f8-f530a69287ee",
+        "sr_id": "sr:player:1148506"
+       },
+       {
+        "full_name": "Jewell Loyd",
+        "jersey_number": "24",
+        "reference": "204319",
+        "id": "0825c65d-b903-4dd3-8206-e5f7d31bb2b8",
+        "sr_id": "sr:player:1156786"
+       },
+       {
+        "full_name": "Chelsea Gray",
+        "jersey_number": "12",
+        "reference": "203833",
+        "id": "ca6b54e3-612d-4523-9582-b88e675f58de",
+        "sr_id": "sr:player:1157052"
+       },
+       {
+        "full_name": "NaLyssa Smith",
+        "jersey_number": "3",
+        "reference": "1631019",
+        "id": "732bf79f-1bfa-450c-ad04-015f7624765a",
+        "sr_id": "sr:player:1618438"
+       }
+      ],
+      "sr_id": "sr:team:35550"
+     }
+    }
+   }
+  },
+  "locale": "en",
+  "metadata": {
+   "match": "sd:match:40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+   "team": "sd:team:08ed8274-e29f-4248-bc2e-83cc8ed18d75,sr:team:3446",
+   "league": "wnba",
+   "locale": "en",
+   "status": "inprogress",
+   "players": "sd:player:6fa763e6-846f-4f9d-a4ce-256d8b328424,sd:player:8a438358-fbe0-4797-921f-add82eddf789,sd:player:2199ae2c-7588-4610-9deb-a1b5e8025d43,sd:player:98fff88c-a6ac-48fd-a586-46fa33c7c25e,sd:player:fd9c6f75-0468-4b52-a3f7-6f70d1d658c6,sd:player:779cd8d9-133e-4e68-8bfb-16a437a34686,sd:player:4fa92d21-9f96-4bab-a9f8-f530a69287ee,sd:player:0825c65d-b903-4dd3-8206-e5f7d31bb2b8,sd:player:ca6b54e3-612d-4523-9582-b88e675f58de,sd:player:732bf79f-1bfa-450c-ad04-015f7624765a",
+   "event_type": "opentip",
+   "event_category": "period,stoppage,possession",
+   "operation": "update",
+   "version": "v7"
+  }
+ },
+ {
+  "payload": {
+   "game": {
+    "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+    "title": "2026 Commissioner's Cup Final",
+    "status": "inprogress",
+    "coverage": "full",
+    "reference": "1052600001",
+    "scheduled": "2026-06-30T23:00:00+00:00",
+    "home": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "points": 2,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:3446"
+    },
+    "away": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "reference": "1611661319",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "points": 0,
+     "bonus": false,
+     "remaining_timeouts": 5,
+     "sr_id": "sr:team:35550"
+    }
+   },
+   "event": {
+    "id": "82b16535-6a1e-445d-b1a7-0e5c9fda227f",
+    "event_type": "twopointmade",
+    "number": 7,
+    "sequence": 1782861416500,
+    "clock": "9:35",
+    "clock_decimal": "9:35",
+    "updated": "2026-06-30T23:16:57+00:00",
+    "wall_clock": "2026-06-30T23:16:56+00:00",
+    "created": "2026-06-30T23:16:57+00:00",
+    "home_points": 2,
+    "away_points": 0,
+    "description": "Liberty makes two point jump shot",
+    "qualifiers": [
+     {
+      "qualifier": "pointsinthepaint"
+     }
+    ],
+    "attribution": {
+     "name": "Liberty",
+     "market": "New York",
+     "reference": "1611661313",
+     "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+     "team_basket": "right",
+     "sr_id": "sr:team:3446"
+    },
+    "location": {
+     "coord_x": 1017,
+     "coord_y": 250,
+     "action_area": "inthepaint"
+    },
+    "possession": {
+     "name": "Aces",
+     "market": "Las Vegas",
+     "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+     "sr_id": "sr:team:35550"
+    },
+    "period": {
+     "id": "0616c9cd-8b15-4eb8-b77d-d60741ad3bc1",
+     "number": 1,
+     "sequence": 1,
+     "type": "quarter"
+    },
+    "on_court": {
+     "home": {
+      "name": "Liberty",
+      "market": "New York",
+      "reference": "1611661313",
+      "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+      "players": [
+       {
+        "full_name": "Breanna Stewart",
+        "jersey_number": "30",
+        "reference": "1627668",
+        "id": "6fa763e6-846f-4f9d-a4ce-256d8b328424",
+        "sr_id": "sr:player:1156888"
+       },
+       {
+        "full_name": "Jonquel Jones",
+        "jersey_number": "35",
+        "reference": "1627673",
+        "id": "8a438358-fbe0-4797-921f-add82eddf789",
+        "sr_id": "sr:player:1156874"
+       },
+       {
+        "full_name": "Sabrina Ionescu",
+        "jersey_number": "20",
+        "reference": "1629477",
+        "id": "2199ae2c-7588-4610-9deb-a1b5e8025d43",
+        "sr_id": "sr:player:1150010"
+       },
+       {
+        "full_name": "Pauline Astier",
+        "jersey_number": "18",
+        "reference": "1631136",
+        "id": "98fff88c-a6ac-48fd-a586-46fa33c7c25e",
+        "sr_id": "sr:player:3181440"
+       },
+       {
+        "full_name": "Leonie Fiebich",
+        "jersey_number": "13",
+        "reference": "1630142",
+        "id": "fd9c6f75-0468-4b52-a3f7-6f70d1d658c6",
+        "sr_id": "sr:player:2091519"
+       }
+      ],
+      "sr_id": "sr:team:3446"
+     },
+     "away": {
+      "name": "Aces",
+      "market": "Las Vegas",
+      "reference": "1611661319",
+      "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+      "players": [
+       {
+        "full_name": "Stephanie Talbot",
+        "jersey_number": "7",
+        "reference": "203855",
+        "id": "779cd8d9-133e-4e68-8bfb-16a437a34686",
+        "sr_id": "sr:player:1156958"
+       },
+       {
+        "full_name": "Jackie Young",
+        "jersey_number": "0",
+        "reference": "1629498",
+        "id": "4fa92d21-9f96-4bab-a9f8-f530a69287ee",
+        "sr_id": "sr:player:1148506"
+       },
+       {
+        "full_name": "Jewell Loyd",
+        "jersey_number": "24",
+        "reference": "204319",
+        "id": "0825c65d-b903-4dd3-8206-e5f7d31bb2b8",
+        "sr_id": "sr:player:1156786"
+       },
+       {
+        "full_name": "Chelsea Gray",
+        "jersey_number": "12",
+        "reference": "203833",
+        "id": "ca6b54e3-612d-4523-9582-b88e675f58de",
+        "sr_id": "sr:player:1157052"
+       },
+       {
+        "full_name": "NaLyssa Smith",
+        "jersey_number": "3",
+        "reference": "1631019",
+        "id": "732bf79f-1bfa-450c-ad04-015f7624765a",
+        "sr_id": "sr:player:1618438"
+       }
+      ],
+      "sr_id": "sr:team:35550"
+     }
+    },
+    "statistics": [
+     {
+      "type": "fieldgoal",
+      "made": true,
+      "shot_type": "jump shot",
+      "shot_distance": 5.78,
+      "points": 2,
+      "team": {
+       "name": "Liberty",
+       "market": "New York",
+       "reference": "1611661313",
+       "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+       "sr_id": "sr:team:3446"
+      }
+     }
+    ]
+   }
+  },
+  "locale": "en",
+  "metadata": {
+   "match": "sd:match:40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+   "team": "sd:team:08ed8274-e29f-4248-bc2e-83cc8ed18d75,sr:team:3446",
+   "league": "wnba",
+   "locale": "en",
+   "status": "inprogress",
+   "players": "sd:player:6fa763e6-846f-4f9d-a4ce-256d8b328424,sd:player:8a438358-fbe0-4797-921f-add82eddf789,sd:player:2199ae2c-7588-4610-9deb-a1b5e8025d43,sd:player:98fff88c-a6ac-48fd-a586-46fa33c7c25e,sd:player:fd9c6f75-0468-4b52-a3f7-6f70d1d658c6,sd:player:779cd8d9-133e-4e68-8bfb-16a437a34686,sd:player:4fa92d21-9f96-4bab-a9f8-f530a69287ee,sd:player:0825c65d-b903-4dd3-8206-e5f7d31bb2b8,sd:player:ca6b54e3-612d-4523-9582-b88e675f58de,sd:player:732bf79f-1bfa-450c-ad04-015f7624765a",
+   "event_type": "twopointmade",
+   "event_category": "shot,score",
+   "operation": "update",
+   "version": "v7"
+  }
+ }
+]

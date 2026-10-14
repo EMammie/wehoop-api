@@ -13,6 +13,8 @@ export function createDb(url: string, opts: { max?: number } = {}): Db {
     idle_timeout: 20,
     connect_timeout: 10,
     prepare: false, // required for transaction-mode poolers
-    transform: postgres.camel,
+    // No key transform: postgres.camel also rewrites keys inside jsonb values (play_events.payload,
+    // play_event_raw.raw, game_changes.body), which must round-trip byte-for-byte. Queries alias
+    // columns explicitly instead.
   });
 }

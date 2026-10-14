@@ -1,13 +1,11 @@
 # Current milestone
 
-**M0 — Scaffold** (merged, tagged `m0`) → **pre-M1 fixes** on branch `m0-review-followups` (migration `0002`: run-generation freshness columns, outbox routing constraints), then `m1-first-replay`
+**M1 corrective pass** on branch `m1-first-replay` (PR #3, unmerged). Rev 4.3 of `docs/PLAN.md` ratifies the three M1 contract questions and names five correctness holes; this pass implements them, adds a committed reproducible replay fixture, implements `pnpm release:tag`, and re-runs the affected M1 evidence before a fresh review.
 
-Scope: toolchain, Supabase local stack, `0001_core.sql`, CLAUDE.md, four agents, two skills, CI, first fixture.
+M1 proper (validated 14/14 at `fe529cf`, APPROVED-WITH-SHOULDS) is described below for context.
 
-Acceptance (from `docs/PLAN.md` §7):
-- `pnpm supabase db reset` applies cleanly.
-- `pnpm check` green locally and in CI.
-- `anon` cannot read `ingest.*` (query evidence).
-- `/milestone 0` ran all four local agents.
+Scope (from `docs/PLAN.md` §7): `bin/sim`, `SimulationUrlResolver`, Zod pbp/summary/boxscore from recording, normalizer, WNBA adapter, `content-hash`, `freshness`, `applyChanges` (observation + durable writes), `GameChange` schema, `game_changes`, outbox + publisher (ordering, at-least-once, startup drain), pulse sender, `SupabaseBroadcastTransport` (private), session-lock worker, snapshot + paginated `/changes`, `bin/subscribe --record` implementing the full reconnect contract, plus the CLIs `/validate-replay` depends on: `dev:worker --until closed`, `pnpm dump-game`, `pnpm sim inject --mutate-event|--delete-event`.
 
-Next: **M1 — One recorded WNBA game, durable.**
+Acceptance: see the M1 row of `docs/PLAN.md` §7 (idempotence, equivalence, no regression, freshness cases vs §4, correction, contiguity, outbox parity by join, crash points, missing final change, auth, equal shapes, final score matches boxscore). Evidence goes to `devlog/evidence/M1.md`.
+
+Next: **M2 — Three leagues + identity.**

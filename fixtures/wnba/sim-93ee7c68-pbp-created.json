@@ -1,0 +1,53 @@
+{
+ "id": "40bea3f6-68c0-4f3b-96fa-336dfb7a9034",
+ "parent_id": "0a41e801-8179-4e66-b202-7daf10449241",
+ "title": "2026 Commissioner's Cup Final",
+ "status": "created",
+ "coverage": "full",
+ "scheduled": "2026-06-30T23:00:00+00:00",
+ "lead_changes": 0,
+ "times_tied": 0,
+ "track_on_court": true,
+ "reference": "1052600001",
+ "entry_mode": "WEBSOCKET",
+ "broadcasts": [
+  {
+   "type": "Internet",
+   "locale": "National",
+   "network": "Amazon Prime Video"
+  }
+ ],
+ "time_zones": {
+  "venue": "US/Eastern",
+  "home": "US/Eastern",
+  "away": "US/Pacific"
+ },
+ "season": {
+  "id": "9cfb544e-7b6a-4f11-a5b6-4fe594ef4ead",
+  "year": 2026,
+  "type": "CC",
+  "name": "Commissioner's Cup"
+ },
+ "home": {
+  "name": "Liberty",
+  "alias": "NYL",
+  "market": "New York",
+  "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+  "points": 0,
+  "sr_id": "sr:team:3446",
+  "remaining_timeouts": 0,
+  "reference": "1611661313"
+ },
+ "away": {
+  "name": "Aces",
+  "alias": "LVA",
+  "market": "Las Vegas",
+  "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+  "points": 0,
+  "sr_id": "sr:team:35550",
+  "remaining_timeouts": 0,
+  "reference": "1611661319"
+ },
+ "periods": [],
+ "time": 1782861375967
+}

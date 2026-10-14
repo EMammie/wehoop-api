@@ -158,3 +158,27 @@ where c.relkind = 'v'
      where option_name = 'security_invoker'),
     false
   );
+
+-- check: event_changes_reference_their_play_row | expect: 0
+select count(*)
+from public.game_changes c
+where c.change_type in ('event_insert', 'event_update', 'event_delete')
+  and (c.play_event_id is null
+       or c.provider_event_id is null
+       or not exists (
+         select 1 from public.play_events p
+         where p.id = c.play_event_id and p.game_id = c.game_id and p.provider_event_id = c.provider_event_id
+       ));
+
+-- check: outbox_published_rows_have_no_error | expect: 0
+select count(*)
+from ingest.broadcast_outbox
+where published_at is not null and (dead_at is not null or last_error is not null);
+
+-- check: deleted_revision_only_on_deleted_events | expect: 0
+select count(*)
+from public.play_events
+where deleted_revision_at is not null and deleted_at is null;
+
+-- check: stats_observed_at_set | expect: 0
+select count(*) from public.game_team_stats where observed_at is null;
