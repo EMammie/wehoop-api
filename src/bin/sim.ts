@@ -1,16 +1,27 @@
+import { createHash } from 'node:crypto';
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { applyChanges } from '../ingest/apply-changes.js';
+import {
+  appendRecordedDocument,
+  compactRecording,
+  toRecordedDocument,
+} from '../ingest/recording.js';
 import { endRun, startRun } from '../ingest/runs.js';
 import type { NormalizedBatch } from '../ingest/types.js';
-import { LeagueCodeSchema } from '../leagues/codes.js';
+import { type LeagueCode, LeagueCodeSchema } from '../leagues/codes.js';
 import { normalizeEvent } from '../leagues/sportradar-basketball/normalize.js';
 import { adapterFor } from '../leagues/wnba/adapter.js';
-import { createLogger } from '../logger.js';
+import { createLogger, type Logger } from '../logger.js';
 import type { PeriodType } from '../model/live-event.js';
-import { PbpEventSchema } from '../providers/sportradar/schemas/pbp.js';
+import { SportradarHttp } from '../providers/sportradar/http.js';
+import { BoxscoreDocumentSchema } from '../providers/sportradar/schemas/boxscore.js';
+import { PbpDocumentSchema, PbpEventSchema } from '../providers/sportradar/schemas/pbp.js';
+import { SummaryDocumentSchema } from '../providers/sportradar/schemas/summary.js';
 import { SimulationClient } from '../providers/sportradar/simulation.js';
+import { type Feed, SimulationUrlResolver } from '../providers/sportradar/urls.js';
 
 /**
  * pnpm sim list --league wnba                 recordings and their feeds (no API key)
@@ -20,6 +31,26 @@ import { SimulationClient } from '../providers/sportradar/simulation.js';
  * pnpm sim inject --game <uuid> --delete-event <providerEventId>
  *   Corrections injected as a `fixture` batch inside the game's current watch
  *   generation (a backfill sub-run), through applyChanges like any other batch.
+ * pnpm sim record --league wnba --recording <id> --out <file.jsonl>
+ *     [--poll-interval 3000] [--summary-every 10] [--max-polls N]
+ *   DB-free natural-pace recorder: creates a simulation session and polls the
+ *   replay REST feeds the way the worker does in sim mode (pbp every poll,
+ *   summary + boxscore every Nth poll), appending one `RecordedDocument` line per
+ *   document (the `--record-to` / `--replay-file` format). Stops after the first
+ *   `closed` pbp plus one final summary and boxscore. Never opens Postgres.
+ * pnpm sim compact --in <full.jsonl> --out <file.jsonl.gz>
+ *     [--every-pbp 50] [--every-summary 10] [--target-mb 4]
+ *   Deterministic down-sampler producing the committed replay fixture. A
+ *   document is kept when ANY of: (1) it is the first or last of its feed;
+ *   (2) its `status` or `quarter` differs from the previously KEPT document of
+ *   the same feed; (3) (pbp) its `deleted_events` id set differs from the
+ *   previously kept pbp; (4) its index within its feed is a multiple of the
+ *   stride (`--every-pbp` for pbp, `--every-summary` for summary and boxscore);
+ *   (5) it is the last document before, or the first after, a status or period
+ *   change between consecutive documents of its feed. Hence every boxscore
+ *   whose status or period changed, plus the final one, is kept. Kept lines are
+ *   written byte-identical, gzip level 9. Exits 3 if the output exceeds
+ *   `--target-mb`. The rule lives in `selectCompact` (src/ingest/recording.ts).
  */
 async function main() {
   const { values: args, positionals } = parseArgs({
@@ -30,6 +61,14 @@ async function main() {
       'mutate-event': { type: 'string' },
       'delete-event': { type: 'string' },
       json: { type: 'boolean', default: false },
+      out: { type: 'string' },
+      in: { type: 'string' },
+      'poll-interval': { type: 'string', default: '3000' },
+      'summary-every': { type: 'string', default: '10' },
+      'max-polls': { type: 'string' },
+      'every-pbp': { type: 'string', default: '50' },
+      'every-summary': { type: 'string', default: '10' },
+      'target-mb': { type: 'string', default: '4' },
     },
     allowPositionals: true,
     strict: true,
@@ -37,6 +76,65 @@ async function main() {
   const cmd = positionals[0];
   const config = loadConfig();
   const sim = new SimulationClient({ playbackUrl: config.sportradar.playbackUrl });
+
+  if (cmd === 'record') {
+    if (!args.recording) throw new Error('--recording is required');
+    if (!args.out) throw new Error('--out <file.jsonl> is required');
+    if (existsSync(args.out)) throw new Error(`${args.out} exists; refusing to append to it`);
+    const league = LeagueCodeSchema.parse(args.league);
+    const log = createLogger({ level: config.logLevel });
+    const rec = await sim.getRecording(args.recording);
+    if (!rec) throw new Error(`recording ${args.recording} not found`);
+    const sessionId = await sim.createSession(args.recording);
+    log.info(
+      { recording: rec.id, title: rec.title, sessionId, out: args.out },
+      'simulation session created; recording at natural pace',
+    );
+    const http = new SportradarHttp({
+      db: null,
+      log,
+      league,
+      runId: null,
+      resolver: new SimulationUrlResolver({
+        playbackUrl: config.sportradar.playbackUrl,
+        league,
+        recordingId: args.recording,
+        sessionId,
+      }),
+    });
+    const docs = await recordSession(http, log, {
+      league,
+      out: args.out,
+      pollIntervalMs: Number(args['poll-interval']),
+      summaryEvery: Math.max(1, Number(args['summary-every'])),
+      maxPolls: args['max-polls'] ? Number(args['max-polls']) : null,
+    });
+    console.log(`RECORDED ${docs} documents -> ${args.out}`);
+    return;
+  }
+  if (cmd === 'compact') {
+    if (!args.in) throw new Error('--in <full.jsonl> is required');
+    if (!args.out) throw new Error('--out <file.jsonl.gz> is required');
+    const targetBytes = Number(args['target-mb']) * 1024 * 1024;
+    const result = await compactRecording(args.in, args.out, {
+      everyPbp: Math.max(1, Number(args['every-pbp'])),
+      everySummary: Math.max(1, Number(args['every-summary'])),
+    });
+    for (const [feed, c] of Object.entries(result.perFeed)) {
+      console.log(`${feed.padEnd(9)} kept ${String(c.kept).padStart(5)} / ${c.total}`);
+    }
+    const size = statSync(args.out).size;
+    const sha = await sha256File(args.out);
+    console.log(`total     kept ${String(result.kept).padStart(5)} / ${result.total}`);
+    console.log(
+      `${args.out}: ${size} bytes (${(size / 1024 / 1024).toFixed(2)} MB), sha256 ${sha}`,
+    );
+    if (size > targetBytes) {
+      console.error(`output exceeds --target-mb ${args['target-mb']}; raise the strides`);
+      process.exit(3);
+    }
+    return;
+  }
 
   if (cmd === 'list') {
     const league = LeagueCodeSchema.parse(args.league);
@@ -164,8 +262,108 @@ async function main() {
     );
     return;
   }
-  console.error('usage: pnpm sim <list|show|session|inject> [options]');
+  console.error('usage: pnpm sim <list|show|session|inject|record|compact> [options]');
   process.exit(64);
+}
+
+interface RecordOptions {
+  league: LeagueCode;
+  out: string;
+  pollIntervalMs: number;
+  summaryEvery: number;
+  maxPolls: number | null;
+}
+
+/**
+ * Natural-pace polling loop of the recorder. Mirrors the worker's `pollLoop`
+ * cadence (pbp every poll; summary and boxscore on poll 1, 1+N, 1+2N, ...),
+ * then one final summary + boxscore after the first `closed` pbp. SIGINT /
+ * SIGTERM stop the loop after the in-flight poll; every line is already on
+ * disk (synchronous append), so the file is a valid prefix at any moment.
+ */
+async function recordSession(http: SportradarHttp, log: Logger, opts: RecordOptions) {
+  let docs = 0;
+  let bytes = 0;
+  let polls = 0;
+  let failures = 0;
+  let stop: string | null = null;
+  let wake: (() => void) | null = null;
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      stop = signal;
+      log.warn({ signal, docs }, 'stopping after the in-flight poll; file is a valid prefix');
+      wake?.();
+    });
+  }
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      wake = resolve;
+      setTimeout(resolve, ms);
+    });
+  const record = async <T>(
+    feed: Feed,
+    schema: Parameters<typeof http.getJson<T>>[1],
+  ): Promise<T> => {
+    const doc = await http.getJson(feed, schema);
+    bytes += appendRecordedDocument(opts.out, toRecordedDocument(feed, doc));
+    docs++;
+    return doc.data;
+  };
+  const sideFeeds = async () => {
+    await record('summary', SummaryDocumentSchema);
+    await record('boxscore', BoxscoreDocumentSchema);
+  };
+
+  while (stop === null) {
+    const started = Date.now();
+    polls++;
+    try {
+      const pbp = await record('pbp', PbpDocumentSchema);
+      if ((polls - 1) % opts.summaryEvery === 0) await sideFeeds();
+      failures = 0;
+      if (polls % 20 === 0 || pbp.status === 'closed') {
+        log.info(
+          {
+            polls,
+            docs,
+            status: pbp.status,
+            period: pbp.quarter ?? null,
+            clock: pbp.clock ?? null,
+            score: `${pbp.away.points ?? 0}-${pbp.home.points ?? 0}`,
+            bytes,
+          },
+          'recording',
+        );
+      }
+      if (pbp.status === 'closed') {
+        await sideFeeds();
+        log.info({ polls, docs, bytes }, 'game closed; final summary and boxscore recorded');
+        break;
+      }
+    } catch (err) {
+      failures++;
+      log.error({ err, polls, failures }, 'poll failed; retrying');
+      if (failures >= 20) throw new Error('20 consecutive poll failures; giving up');
+    }
+    if (opts.maxPolls !== null && polls >= opts.maxPolls) {
+      log.info({ polls, docs }, 'max polls reached');
+      break;
+    }
+    if (stop !== null) break;
+    await sleep(Math.max(0, opts.pollIntervalMs - (Date.now() - started)));
+  }
+  log.info({ docs, bytes, polls, stoppedBy: stop ?? 'completion', out: opts.out }, 'recorder done');
+  return docs;
+}
+
+function sha256File(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const h = createHash('sha256');
+    createReadStream(path)
+      .on('data', (chunk) => h.update(chunk))
+      .on('error', reject)
+      .on('end', () => resolve(h.digest('hex')));
+  });
 }
 
 main().catch((err) => {
