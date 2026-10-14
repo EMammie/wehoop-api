@@ -1,0 +1,629 @@
+> Superseded by M1.md at 631ff1c (2026-10-14): replay source was a deleted scratchpad file
+
+# M1 — One recorded WNBA game, durable — validation evidence
+
+## Environment
+
+| Field | Value |
+|---|---|
+| Date | 2026-10-13 11:40–12:05 EDT (15:40–16:05 UTC) |
+| Commit | `fe529cf86c8503023f553ba417fd405f85540ede` (`m1-first-replay`), `git status --porcelain` empty at start and at end (this file is the only addition) |
+| `node --version` | v25.9.0 |
+| `pnpm supabase --version` | 2.120.0 |
+| Supabase stack | running (`pnpm supabase status` exit 0); `db reset` run 7 times, once before each step that needs a clean database (numbered `#1`..`#7` below) |
+| SQL access | `psql` is not on the host PATH. Every `SQL>` line below was run as `docker exec -i supabase_db_wehoop-api psql -U postgres -d postgres -At -c "<sql>"` (the implementer's `$P -c "..."`) |
+| Env loading | `.env` has an unquoted value with a space (`DEVLOG_BUFFER_GROUP=To Do`), so `source .env` fails. Each command exported `KEY=value` lines with `while IFS= read -r l; do case "$l" in [A-Z_]*=*) export "$l";; esac; done < .env`. No value was ever printed. `SUPABASE_SERVICE_ROLE_KEY` is set (length 164), so the worker used the real `SupabaseBroadcastTransport` (the `MemoryTransport` warning "SUPABASE_SERVICE_ROLE_KEY not set" appears in no worker log; `published_at` counts below prove HTTP publishes happened) |
+| Replay source | **File-based.** `/private/tmp/claude-501/-Users-emammie-Projects-wehoop-api/052b5bba-d7ae-4b34-828c-dd459813e362/scratchpad/replay-full.jsonl` (470,299,576 bytes, 1,342 documents: 1,000 `pbp`, 171 `summary`, 171 `boxscore`; `requestedAt` 2026-10-13T07:34:11.948Z → 10:34:24.826Z), a session of recording `93ee7c68-28d8-4ae8-b54a-974a551aa1f6` recorded at natural pace by the implementer (`--record-to`). Replayed with `--pace 0 --until closed` (9 s per full replay; the worker stops at document 1,316, the first `closed`). The file's first document is already `inprogress` (Q1, 10:00, 0–0, 4 events) |
+| Vitest filter note | `pnpm test -- <file>` forwards the literal `--` to vitest and runs every file; the commands below use `pnpm test <file>` which filters correctly |
+| Full log | every command's output was appended to `<scratchpad>/m1/validator-M1.log` |
+
+Recording exists on the simulation service (no API key):
+
+Command:
+`pnpm sim list --league wnba`
+Output:
+```
+62 wnba recordings, 54 with feeds
+recording id                           scheduled              rest                   push                       title
+...
+93ee7c68-28d8-4ae8-b54a-974a551aa1f6   2026-06-30T23:00:00.   boxscore,game,pbp      events,statistics,clock    Las Vegas Aces AT New York Liberty
+exit=0
+```
+
+Acceptance table (`docs/PLAN.md` §7, M1 row) is quoted item by item below. Order actually run: DB-free unit tests → `db reset #1` → full `pnpm test:int` → `db reset #2` → Replay A (baseline) → no-regression re-run → corrections → `db reset #3` → Replay B → diff → `db reset #4` → Run C (seq-0 seed + two subscribers + REST probe) → `db reset #5` → crash (a) → `db reset #6` → crash (b) → `db reset #7` → crash (c) → final `pnpm invariants`.
+
+Game ids per run: Replay A `3c5dd84e-022c-4495-9ff3-6f4e41ee89b8`, Replay B `2c23895e-91bd-4fa7-b949-cd4ee1a12fca`, Run C `cb42c275-1dd0-4211-aad3-2e834308e812`, crash (a) `8922d2ec-80af-4338-8375-fdd601366e98`, crash (b) `ef0c9d34-9e42-488e-a15b-7fef5c3f75b1`, crash (c) `a55b9041-b9a9-4d2d-90d7-e5e7208cc896`.
+
+---
+
+## Baseline: Replay A (clean DB, uninterrupted)
+
+Used by several items below.
+
+Command:
+`pnpm supabase db reset` (#2) then `pnpm dev:worker --mode sim --league wnba --replay-file <scratchpad>/replay-full.jsonl --pace 0 --until closed`
+Output (worker log, ANSI stripped; 1,342 INFO lines, 0 WARN, 0 ERROR):
+```
+START 2026-10-13T15:46:49Z
+[15:46:49.847] INFO (61600): worker lock acquired
+    mode: "sim"
+    fault: null
+WORKER_PID=61600
+GAME_ID=3c5dd84e-022c-4495-9ff3-6f4e41ee89b8
+[15:46:58.160] INFO: recording replay finished
+    docs: 1316
+    status: "closed"
+[15:46:58.165] INFO: replay finished
+    runId: 1
+    finalStatus: "closed"
+    batches: 1316
+    changes: 1194
+    stale: 0
+    drained: { "published": 1, "failed": 0, "skippedChannels": 0 }
+exit=0
+END 2026-10-13T15:46:58Z
+```
+Database after Replay A:
+```
+SQL> select id, status, away_points, home_points, last_seq, watch_run_id, current_period, clock, retained_from_seq from games
+3c5dd84e-022c-4495-9ff3-6f4e41ee89b8|closed|85|93|1194|1|4|00:00|1
+SQL> select (select count(*) from game_changes) changes, (select count(*) from play_events where deleted_at is null) live_events, (select count(*) from play_events where deleted_at is not null) deleted_events, (select count(*) from game_periods) periods, (select count(*) from ingest.broadcast_outbox) outbox, (select count(*) from ingest.broadcast_outbox where published_at is not null) outbox_published, (select count(*) from ingest.stale_observations) stale, (select count(*) from ingest.ingestion_runs) runs
+1194|408|4|4|1194|1194|20|1
+SQL> select change_type, count(*) from game_changes group by 1 order by 1
+event_insert|412
+event_update|403
+event_delete|4
+status|91
+period|87
+stats_team|197
+SQL> select reason, source, count(*) from ingest.stale_observations group by 1,2 order by 1,2
+superseded_observation|fixture|20
+```
+The 20 `superseded_observation` rows in a single-generation run are summary/boxscore documents whose `observedAt` equals the already-stored pbp observation (sample: `observation.observedAt = stored.observedAt = 2026-10-13T07:34:11.989Z`), so no game-level write; not a regression, recorded here for completeness.
+
+---
+
+### "Idempotence: same normalized batch applied twice → 0 new changes"
+
+Command:
+`pnpm test:int --reporter=verbose` (full suite on `db reset #1`; the named test is the targeted evidence)
+Output:
+```
+ ✓ test/integration/apply-changes.test.ts > applyChanges: durable + observation writes in one transaction > idempotence: the same normalized batch applied twice yields 0 new changes 94ms
+ Test Files  6 passed (6)
+      Tests  48 passed (48)
+exit=0
+```
+CLI form (whole recording applied twice against the same DB; the second pass is also the "No regression" run below):
+```
+--- BEFORE (after Replay A)
+SQL> select (select count(*) from game_changes) changes, (select count(*) from play_events) events, last_seq, away_points, home_points, watch_run_id, status from games
+1194|412|1194|85|93|1|closed
+--- RUN (same file, new run) start 2026-10-13T15:48:40Z  pnpm dev:worker --mode sim --league wnba --replay-file <scratchpad>/replay-full.jsonl --pace 0 --until closed
+exit=0  end 2026-10-13T15:48:45Z
+    runId: 2
+    batches: 988
+    changes: 0
+    stale: 974
+--- AFTER
+1194|412|1194|85|93|2|closed
+```
+`game_changes` 1194 → 1194: 0 new changes.
+Result: PASS
+
+---
+
+### "Equivalence: replay into two clean DBs → identical `play_events` bodies, `game_periods`, final score (diff of canonical dumps)"
+
+Command:
+`pnpm dump-game --game 3c5dd84e-022c-4495-9ff3-6f4e41ee89b8 > a.json` (Replay A, before any correction), then `pnpm supabase db reset` (#3), `pnpm dev:worker --mode sim --league wnba --replay-file <scratchpad>/replay-full.jsonl --pace 0 --until closed` (Replay B), `pnpm dump-game --game 2c23895e-91bd-4fa7-b949-cd4ee1a12fca > b.json`, `wc -c a.json b.json`, `shasum -a 256 a.json b.json`, `diff a.json b.json`
+Output:
+```
+### Replay B start 2026-10-13T15:53:52Z ... exit=0 Replay B end 2026-10-13T15:54:01Z
+GAME_ID=2c23895e-91bd-4fa7-b949-cd4ee1a12fca
+    runId: 1  finalStatus: "closed"  batches: 1316  changes: 1194  stale: 0
+SQL> select id, status, away_points, home_points, last_seq, watch_run_id from games
+2c23895e-91bd-4fa7-b949-cd4ee1a12fca|closed|85|93|1194|1
+  294858 .../m1/a.json
+  294858 .../m1/b.json
+29175b1fbcd1a5d599ff717fa6e17d395cd0a5f3a19f34f68b642b09eb96d769  .../m1/a.json
+29175b1fbcd1a5d599ff717fa6e17d395cd0a5f3a19f34f68b642b09eb96d769  .../m1/b.json
+--- diff a.json b.json
+diff exit=0
+```
+`a.json` head: `{"game":{"currentPeriod":4,"currentPeriodSequence":4,"lastSeq":1194,"providerGameId":"40bea3f6-68c0-4f3b-96fa-336dfb7a9034","score":{"away":85,"home":93},"status":"closed"},"eventCount":408,"periods":[{"away":21,"home":27,"number":1,...},{"away":16,"home":24,"number":2,...},{"away":25,"home":14,"number":3,...},{"away":23,"home":28,"number":4,...}]}`. The diff is empty; both dumps are 294,858 bytes with the same SHA-256. (The crash-point restarts below also diff empty against `a.json`.)
+Result: PASS
+
+---
+
+### "No regression: after full replay, re-run the recording from its start as a new run → 0 new changes, N `stale_observations` rows with `reason=run_regresses_state`, final score unchanged"
+
+Command:
+after Replay A: `pnpm dev:worker --mode sim --league wnba --replay-file <scratchpad>/replay-full.jsonl --pace 0 --until closed` (run 2), then the SQL below
+Output:
+```
+--- BEFORE
+SQL> select (select count(*) from game_changes) changes, (select count(*) from play_events) events, last_seq, away_points, home_points, watch_run_id, status from games
+1194|412|1194|85|93|1|closed
+SQL> select reason, count(*) from ingest.stale_observations group by 1 order by 1
+superseded_observation|20
+--- RUN start 2026-10-13T15:48:40Z  WORKER_PID=62038  GAME_ID=3c5dd84e-022c-4495-9ff3-6f4e41ee89b8
+[15:48:40.763] WARN: stale batch
+[15:48:40.764] WARN: stale
+    runId: 2  finalStatus: "closed"  batches: 988  changes: 0  stale: 974
+exit=0  end 2026-10-13T15:48:45Z
+--- AFTER
+1194|412|1194|85|93|2|closed
+SQL> select reason, count(*) from ingest.stale_observations group by 1 order by 1
+run_regresses_state|974
+superseded_observation|34
+SQL> select run_id, reason, count(*) from ingest.stale_observations group by 1,2 order by 1,2
+1|superseded_observation|20
+2|run_regresses_state|974
+2|superseded_observation|14
+SQL> select id, kind, status, parent_run_id, stale_batches from ingest.ingestion_runs order by id
+1|replay|ok||0
+2|replay|ok||974
+```
+0 new changes (1194 → 1194), N = 974 `run_regresses_state` rows, score 85–93 unchanged.
+
+`watch_run_id` note (§8 says "watch_run_id did not advance"): it reads 1 before and 2 after. The `stored` snapshot in each stale row shows it stayed 1 through every regressing batch and advanced only when the re-run reached the stored (closed) state with zero changes, which is what §4 specifies ("On acceptance `watch_run_id` advances regardless of whether the game-level observation is written") and what the integration test's third step asserts (`generationAdvanced: true`):
+```
+SQL> select run_id, reason, stored->>'watchRunId' as stored_watch_run_id, count(*), min(id), max(id) from ingest.stale_observations group by 1,2,3 order by 1,2,3
+1|superseded_observation|1|20|1|20
+2|run_regresses_state|1|974|21|994
+2|superseded_observation|1|1|995|995
+2|superseded_observation|2|13|996|1008
+```
+All 974 `run_regresses_state` rows saw `watch_run_id = 1`.
+
+**Delayed REST summary → no game-level write, one `superseded_observation`; in-flight batch with older `watchId` → `older_run`:**
+Command:
+`pnpm test:int --reporter=verbose`
+Output:
+```
+ ✓ test/integration/apply-changes.test.ts > ... > no regression: a new generation replaying from the start is stale (run_regresses_state), score and watch_run_id unchanged 53ms
+ ✓ test/integration/apply-changes.test.ts > ... > delayed REST summary whose observedAt precedes the stored observation -> no game-level write, one superseded_observation 56ms
+ ✓ test/integration/apply-changes.test.ts > ... > in-flight batch tagged with an older watchId -> older_run, nothing written 43ms
+```
+Result: PASS
+
+---
+
+### "Freshness cases: every acceptance case enumerated at the end of §4 'Freshness policy' has a passing unit test on `freshness.ts`"
+
+Mapping of the 13 §4 cases (in plan order) to tests:
+
+| § 4 case | test |
+|---|---|
+| 1 halftime → period 3 inprogress accepted | `case 1: halftime -> period 3 inprogress accepted` |
+| 2 clock correction 5:00 → 5:30 accepted and observed | `case 2: clock correction 5:00 -> 5:30 inside one period accepted and observed` |
+| 3 explicit deletion lowering the event count → one event_delete | `case 3: explicit deletion lowering the event count accepted as exactly one event_delete` |
+| 4 absence of events without a marker never deletes | `case 4: absence of events without a marker never deletes` |
+| 5 delayed REST → superseded_observation, no game-level write | `case 5: delayed REST (observedAt earlier than the stored push observation) -> superseded_observation, no game-level write; events still reconciled per entity` |
+| 6 replay restart from 0–0 as a new generation → run_regresses_state | `case 6: replay restart from 0-0 as a new generation -> run_regresses_state` |
+| 7 in-flight batch from an older generation → older_run | `case 7: in-flight batch from an older generation -> older_run` |
+| 8 worker restart mid-game as a new generation → accepted | `case 8: worker restart mid-game as a new generation -> accepted` |
+| 9 push sub-run and backfill sub-run of one generation interleave | `case 9: a push sub-run and a backfill sub-run of the same generation interleave without either being marked stale` |
+| 10 generation-less schedule poll never advances watch_run_id / clock | `case 10: a generation-less schedule poll during a live game never advances watch_run_id and never overwrites a newer clock` |
+| 11 complete document missing one old event is not stale | `case 11: a complete document missing one old event (not the newest) is not stale` |
+| 12 generation-less poll with lagging score → superseded_observation | `case 12: a generation-less poll with a lagging score during a live game writes nothing game-level and logs superseded_observation` |
+| 13 new generation's first document deleting the stored newest event → one event_delete | `case 13: a new generation's first document that explicitly deletes the stored newest event is accepted and yields one event_delete` |
+
+Command:
+`pnpm test test/unit/ingest/freshness.test.ts --reporter=verbose`
+Output:
+```
+ ✓ test/unit/ingest/freshness.test.ts > freshness §4 acceptance cases > case 1: halftime -> period 3 inprogress accepted 2ms
+ ✓ ... > case 2: clock correction 5:00 -> 5:30 inside one period accepted and observed 0ms
+ ✓ ... > case 3: explicit deletion lowering the event count accepted as exactly one event_delete 1ms
+ ✓ ... > case 4: absence of events without a marker never deletes 0ms
+ ✓ ... > case 5: delayed REST (observedAt earlier than the stored push observation) -> superseded_observation, no game-level write; events still reconciled per entity 0ms
+ ✓ ... > case 6: replay restart from 0-0 as a new generation -> run_regresses_state 0ms
+ ✓ ... > case 7: in-flight batch from an older generation -> older_run 0ms
+ ✓ ... > case 8: worker restart mid-game as a new generation -> accepted 0ms
+ ✓ ... > case 9: a push sub-run and a backfill sub-run of the same generation interleave without either being marked stale 0ms
+ ✓ ... > case 10: a generation-less schedule poll during a live game never advances watch_run_id and never overwrites a newer clock 0ms
+ ✓ ... > case 11: a complete document missing one old event (not the newest) is not stale 0ms
+ ✓ ... > case 12: a generation-less poll with a lagging score during a live game writes nothing game-level and logs superseded_observation 0ms
+ ✓ ... > case 13: a new generation's first document that explicitly deletes the stored newest event is accepted and yields one event_delete 0ms
+ ✓ test/unit/ingest/freshness.test.ts > freshness rules: details > phase ordering and post -> pre only when nothing live was recorded 0ms
+ ✓ ... > 2b: same phase, earlier game-level period is a regression; an earlier individual event is not 0ms
+ ✓ ... > 2c: a complete document whose events carry no position fields is not gated; an empty one against stored live events is 0ms
+ ✓ ... > first ever write (watch_run_id null, last_seq 0) is accepted without the gate; durable state from an unknown generation is gated 0ms
+ ✓ ... > positions: (period_sequence, provider_sequence), nulls broken by provider_number then wall_clock 0ms
+ ✓ ... > decideEvent: revision then hash; deletion only by marker; reinstate only by a newer revision 0ms
+ ✓ ... > diffEvents: the same batch twice is empty; last duplicate in a batch wins; a marker overrides a body in the same batch 0ms
+ Test Files  1 passed (1)
+      Tests  20 passed (20)
+exit=0
+```
+Count: **13/13** §4 cases present and passing (plus 7 detail tests). None missing.
+Result: PASS
+
+---
+
+### "Correction: mutate one event's body and bump its `updated` → exactly one `event_update` with new seq, play row updated in place; inject `operation=delete` → one `event_delete`"
+
+Command:
+on the Replay A database (game `3c5dd84e…`, `watch_run_id` 2 after the re-run): `pnpm sim inject --game 3c5dd84e-022c-4495-9ff3-6f4e41ee89b8 --mutate-event 3a15aab5-2afe-45e6-ba84-bc20ef30906c`, then `pnpm sim inject --game 3c5dd84e-022c-4495-9ff3-6f4e41ee89b8 --delete-event aeaa8af3-ca64-45c5-ab47-0f19c11410dd`, with the SQL below before and after each
+Output:
+```
+--- BEFORE mutate
+SQL> select count(*) as changes, max(seq) from game_changes
+1194|1194
+SQL> select provider_event_id, content_hash, deleted_at, provider_updated_at, payload->>'description' as description from play_events where provider_event_id='3a15aab5-2afe-45e6-ba84-bc20ef30906c'
+3a15aab5-2afe-45e6-ba84-bc20ef30906c|291721bd6a54071e2292cf0edc98693c77c0138e908dcd005b7674e960278131||2026-06-30 23:16:33+00|Aces lineup change (Stephanie Talbot, Jackie Young, Jewell Loyd, Chelsea Gray, NaLyssa Smith)
+--- INJECT mutate 2026-10-13T15:53:07Z
+{ "outcome": "applied", "runId": 3, "watchId": 2,
+  "changes": [ { "seq": 1195, "type": "event_update", "providerEventId": "3a15aab5-2afe-45e6-ba84-bc20ef30906c" } ],
+  "counts": { "inserted": 0, "updated": 1, "deleted": 0, "ignoredOlder": 0, "unchanged": 0 } }
+--- AFTER mutate
+SQL> select count(*) as changes, max(seq) from game_changes
+1195|1195
+SQL> select seq, change_type, provider_event_id from game_changes order by seq desc limit 2
+1195|event_update|3a15aab5-2afe-45e6-ba84-bc20ef30906c
+1194|status|
+SQL> select provider_event_id, content_hash, deleted_at, provider_updated_at, payload->>'description' ...
+3a15aab5-2afe-45e6-ba84-bc20ef30906c|4a8e1298e3cc4c4a1cfa1d2bddeab4aa5654b8110e16e8037f35a2f46a042f5e||2026-06-30 23:16:34+00|Aces lineup change (Stephanie Talbot, Jackie Young, Jewell Loyd, Chelsea Gray, NaLyssa Smith) [corrected]
+SQL> select count(*) from play_events where provider_event_id='3a15aab5-2afe-45e6-ba84-bc20ef30906c'
+1
+--- BEFORE delete
+SQL> select provider_event_id, content_hash, deleted_at from play_events where provider_event_id='aeaa8af3-ca64-45c5-ab47-0f19c11410dd'
+aeaa8af3-ca64-45c5-ab47-0f19c11410dd|3f3624d27dc5d1b0e7deea004e19814fd4d4ce6d493bf3333b1e7aff8a16829a|
+--- INJECT delete 2026-10-13T15:53:08Z
+{ "outcome": "applied", "runId": 4, "watchId": 2,
+  "changes": [ { "seq": 1196, "type": "event_delete", "providerEventId": "aeaa8af3-ca64-45c5-ab47-0f19c11410dd" } ],
+  "counts": { "inserted": 0, "updated": 0, "deleted": 1, "ignoredOlder": 0, "unchanged": 0 } }
+--- AFTER delete
+SQL> select count(*) as changes, max(seq) from game_changes
+1196|1196
+SQL> select seq, change_type, provider_event_id from game_changes order by seq desc limit 2
+1196|event_delete|aeaa8af3-ca64-45c5-ab47-0f19c11410dd
+1195|event_update|3a15aab5-2afe-45e6-ba84-bc20ef30906c
+SQL> select provider_event_id, content_hash, deleted_at from play_events where provider_event_id='aeaa8af3-ca64-45c5-ab47-0f19c11410dd'
+aeaa8af3-ca64-45c5-ab47-0f19c11410dd|3f3624d27dc5d1b0e7deea004e19814fd4d4ce6d493bf3333b1e7aff8a16829a|2026-10-13 15:53:09.134+00
+SQL> select id, kind, status, parent_run_id, meta->>'inject' from ingest.ingestion_runs where id > 2 order by id
+3|backfill|ok|2|mutate
+4|backfill|ok|2|delete
+```
+Mutate: exactly one new change (1194 → 1195), type `event_update`, `content_hash` and `provider_updated_at` (+1 s) changed in place, still one row. Delete: exactly one new change (1195 → 1196), type `event_delete`, `deleted_at` set, hash untouched. After both: outbox parity join 0, `pnpm invariants` 23/23.
+Integration form:
+```
+ ✓ test/integration/apply-changes.test.ts > ... > correction: mutate one event body and bump updated -> exactly one event_update with a new seq, play row updated in place 60ms
+ ✓ test/integration/apply-changes.test.ts > ... > correction without an updated bump is still applied (hash decides), and the marker path yields one event_delete 56ms
+```
+Result: PASS
+
+---
+
+### "Contiguity: subscriber `seq` 1..N contiguous"
+
+Setup (Run C): because the recording's first document is already `inprogress` with 4 events, a subscriber can never see seq 1 over Broadcast unless the game row exists at seq 0 first. The row was therefore seeded from the committed `fixtures/wnba/sim-93ee7c68-pbp-created.json` (same recording, status `created`, no events) wrapped as a one-line replay file (`jq -c '{feed:"pbp", status:200, requestedAt:"2026-10-13T07:00:00.000Z", receivedAt:"2026-10-13T07:00:00.100Z", body:.}' fixtures/wnba/sim-93ee7c68-pbp-created.json > created-prefix.jsonl`), the subscribers were attached, and the real file was replayed as a new generation (the §4 "worker restart as a new generation" path).
+
+Command:
+`pnpm supabase db reset` (#4); `pnpm dev:api` (background, `/health` → 200); `pnpm dev:worker --mode sim --league wnba --replay-file created-prefix.jsonl --pace 0`; `pnpm subscribe --game cb42c275-1dd0-4211-aad3-2e834308e812 --record subC-anon.jsonl --auth anon` and `... --record subC-guest.jsonl --auth guest` (background); `pnpm dev:worker --mode sim --league wnba --replay-file <scratchpad>/replay-full.jsonl --pace 0 --until closed`
+Output:
+```
+--- seed: runId: 1  finalStatus: "created"  batches: 1  changes: 0
+SQL> select id, status, last_seq, watch_run_id, away_points, home_points from games
+cb42c275-1dd0-4211-aad3-2e834308e812|created|0|1|0|0
+--- subscribers (started 2026-10-13T15:56:01Z)
+2026-10-13T15:56:01.922Z channel {"status":"SUBSCRIBED"}
+2026-10-13T15:56:01.935Z snapshot {"seq":0,"reason":"start","status":"created"}
+2026-10-13T15:56:01.927Z signed in as guest {"userId":"<redacted>","tokenBytes":667}
+2026-10-13T15:56:01.936Z channel {"status":"SUBSCRIBED"}
+--- worker (generation 2) 2026-10-13T15:56:33Z → exit=0 at 15:56:43Z, WORKER_PID=63655
+    runId: 2  finalStatus: "closed"  batches: 1316  changes: 1194  stale: 0
+--- anon subscriber exit
+2026-10-13T15:56:42.395Z catch-up {"trigger":"pulse","from":1094,"to":1194,"pages":1,"resnapshot":false}
+2026-10-13T15:56:42.407Z closed {"seq":1194,"score":{"home":93,"away":85}}
+2026-10-13T15:56:42.473Z summary {"applied":1194,"firstSeq":1,"lastSeq":1194,"contiguous":true,"duplicates":0,"catchUps":1,"derivedStateEqualsFinalSnapshot":true,"receivedEqualsApi":true}
+--- guest subscriber exit
+2026-10-13T15:56:42.478Z summary {"applied":1194,"firstSeq":1,"lastSeq":1194,"contiguous":true,"duplicates":0,"catchUps":1,"derivedStateEqualsFinalSnapshot":true,"receivedEqualsApi":true}
+```
+Recorded streams (`jq` over the `--record` files):
+```
+--- anon: lines=1194 distinct_seq=1194 min=1 max=1194  via: 1094 broadcast; 100 catch-up;  gaps (file order): 0  distinct ids: 1194
+--- guest: lines=1194 distinct_seq=1194 min=1 max=1194  via: 1094 broadcast; 100 catch-up;  gaps (file order): 0  distinct ids: 1194
+--- byte-compare anon vs guest change bodies (sorted by seq): identical
+SQL> select min(seq), max(seq), count(*), count(distinct seq) from game_changes   (Replay A)
+1|1194|1194|1194
+SQL> select count(*) as gaps from game_changes c where c.seq > 1 and not exists (select 1 from game_changes p where p.game_id=c.game_id and p.seq=c.seq-1)
+0
+```
+Both subscribers received seq 1..1194 contiguous. The last 100 arrived via one `pulse`-triggered catch-up because the publisher hit a Realtime 429 at the tail (see Observations).
+Result: PASS
+
+---
+
+### "Outbox parity by join: `game_changes ⟗ broadcast_outbox on change_id` → 0 unmatched either side, 0 `dead_at`"
+
+Command:
+§8 join and dead-letter query, after Replay A (also run after corrections, Replay B, Run C, and each crash restart — 0 every time); `pnpm invariants`
+Output:
+```
+SQL> select count(*) from game_changes c full outer join ingest.broadcast_outbox o on o.change_id = c.id where c.id is null or o.change_id is null or o.game_id <> c.game_id or o.seq <> c.seq or o.channel <> 'game:' || c.game_id::text
+0
+SQL> select count(*) from ingest.broadcast_outbox where dead_at is not null
+0
+SQL> select count(*) from (select game_id, seq from ingest.broadcast_outbox group by 1, 2 having count(*)>1) d
+0
+--- after corrections (1196 changes)
+SQL> select count(*) from game_changes c full outer join ingest.broadcast_outbox o on o.change_id = c.id where c.id is null or o.change_id is null or ...
+0
+SQL> select count(*) filter (where published_at is null) unpublished, count(*) filter (where dead_at is not null) dead from ingest.broadcast_outbox
+2|0
+```
+`pnpm invariants` after Replay A: `outbox_matches_changes_exactly 0 0 PASS`, `outbox_no_dead_letters 0 0 PASS`, `outbox_no_duplicate_game_seq 0 0 PASS`, `23/23 invariants hold` (full output in the final section is identical). Integration form: `✓ ... > contiguity and outbox parity by join: one outbox row per change, 0 unmatched, 0 dead 74ms`.
+Result: PASS
+
+---
+
+### "Crash points: `kill -9` (a) mid-replay, (b) with a fault injected just before commit, (c) after HTTP publish before `published_at` → after restart 0 gaps, 0 duplicate state, subscriber dedupes repeated `id`"
+
+**(a) `kill -9` mid-replay**
+
+Command:
+`pnpm supabase db reset` (#5); `pnpm dev:worker --mode sim --league wnba --replay-file <scratchpad>/replay-full.jsonl --pace 5 --until closed` (background); poll `select max(last_seq) from games` every 0.2 s until ≥ 500; `kill -9 <WORKER_PID>`; then restart `pnpm dev:worker ... --pace 0 --until closed`
+Output:
+```
+--- start worker 2026-10-13T15:58:04Z  WORKER_PID=64084  GAME_ID=8922d2ec-80af-4338-8375-fdd601366e98
+counts just before kill (changes|events|outbox|published|last_seq): 508|155|508|508|508
+kill -9 64084 at 2026-10-13T15:58:13Z (1791907093.372 epoch)
+kill exit=0
+process alive? no
+counts 1s after kill (changes|events|outbox|published|last_seq): 511|155|511|510|511
+counts 3s after kill: 511|155|511|510|511
+[ELIFECYCLE] Command failed with exit code 137.
+SQL> select id, status, away_points, home_points, last_seq, watch_run_id, current_period from games
+8922d2ec-80af-4338-8375-fdd601366e98|inprogress|31|39|511|1|2
+SQL> select id, kind, status, error from ingest.ingestion_runs order by id
+1|replay|running|
+SQL> gaps → 0 ; outbox unmatched → 0
+--- restart 2026-10-13T15:58:35Z → exit=0 at 15:58:42Z  WORKER_PID=64283
+[15:58:35.803] WARN: aborted orphaned runs   runs: [ 1 ]
+    runId: 2  finalStatus: "closed"  batches: 1138  changes: 683  stale: 532
+SQL> select id, status, away_points, home_points, last_seq, watch_run_id, current_period from games
+8922d2ec-80af-4338-8375-fdd601366e98|closed|85|93|1194|2|4
+SQL> changes|distinct_seq|min_seq|max_seq|live_events|deleted_events|outbox|published
+1194|1194|1|1194|408|4|1194|1194
+SQL> gaps → 0
+SQL> dup_events (play_events grouped by game_id, provider_event_id having count>1) → 0
+SQL> select id, kind, status, left(error,60) from ingest.ingestion_runs order by id
+1|replay|aborted|worker died; marked aborted by the next lock holder
+2|replay|ok|
+SQL> select run_id, reason, count(*) from ingest.stale_observations group by 1,2 order by 1,2
+1|superseded_observation|7
+2|run_regresses_state|532
+2|superseded_observation|18
+SQL> change_type histogram: event_insert 412, event_update 403, event_delete 4, status 91, period 87, stats_team 197   (identical to Replay A)
+23/23 invariants hold
+--- diff a.json crashA.json (294858 bytes): diff exit=0
+```
+511 changes at the kill (the batch in flight between the 508 poll and the signal committed atomically; nothing partial), 1194 after restart, 0 gaps, 0 duplicate events, dump byte-identical to the uninterrupted run.
+
+**(b) fault just before commit**
+
+Command:
+`pnpm supabase db reset` (#6); `WEHOOP_FAULT=before_commit:600 pnpm dev:worker --mode sim --league wnba --replay-file <scratchpad>/replay-full.jsonl --pace 0 --until closed`; then restart without the env
+Output:
+```
+--- run start 2026-10-13T15:59:31Z → exit=137 at 15:59:36Z  WORKER_PID=64652  GAME_ID=ef0c9d34-9e42-488e-a15b-7fef5c3f75b1
+FAULT_FIRED=before_commit:600
+[ELIFECYCLE] Command failed with exit code 137.
+--- state after fault
+SQL> select id, status, away_points, home_points, last_seq, watch_run_id from games
+ef0c9d34-9e42-488e-a15b-7fef5c3f75b1|inprogress|33|43|597|1
+SQL> changes|max_seq|events|outbox|published
+597|597|182|597|597
+SQL> select id, kind, status from ingest.ingestion_runs order by id
+1|replay|running
+--- restart 2026-10-13T15:59:37Z → exit=0 at 15:59:44Z  WORKER_PID=64718  WARN: aborted orphaned runs
+    runId: 2  finalStatus: "closed"  batches: 1108  changes: 597  stale: 620
+SQL> games → ef0c9d34-9e42-488e-a15b-7fef5c3f75b1|closed|85|93|1194|2|4
+SQL> changes|distinct_seq|min_seq|max_seq|live_events|deleted_events|outbox|published
+1194|1194|1|1194|408|4|1194|1194
+SQL> gaps → 0 ; dup_events → 0
+SQL> runs → 1|replay|aborted|worker died; marked aborted by the next lock holder ; 2|replay|ok|
+SQL> stale → 1|superseded_observation|8 ; 2|run_regresses_state|620 ; 2|superseded_observation|19
+23/23 invariants hold
+--- diff a.json crashB.json (294858 bytes): diff exit=0
+```
+The batch that would have reached seq 600 was rolled back entirely (`last_seq` 597 = 597 changes = 597 outbox rows), the restart re-applied it once, 1194 after restart, 0 gaps, dump identical. Integration form: `✓ ... > crash point (b): a fault just before commit rolls the whole batch back; the retry applies it once 81ms`.
+
+**(c) fault after HTTP publish, before `published_at`, subscriber attached**
+
+Command:
+`pnpm supabase db reset` (#7); API `/health` → 200 (PID 63313 still up); seed from `created-prefix.jsonl` → `last_seq 0`; `pnpm subscribe --game a55b9041-b9a9-4d2d-90d7-e5e7208cc896 --record subCrashC.jsonl --auth anon` (background, `SUBSCRIBED`, snapshot seq 0); `WEHOOP_FAULT=after_publish:600 pnpm dev:worker --mode sim --league wnba --replay-file <scratchpad>/replay-full.jsonl --pace 0 --until closed`; then restart without the env
+Output:
+```
+--- run start 2026-10-13T16:01:04Z → exit=137 at 16:01:09Z  WORKER_PID=65216  GAME_ID=a55b9041-b9a9-4d2d-90d7-e5e7208cc896
+FAULT_FIRED=after_publish:600
+[ELIFECYCLE] Command failed with exit code 137.
+--- state after fault
+SQL> select id, status, last_seq, watch_run_id from games
+a55b9041-b9a9-4d2d-90d7-e5e7208cc896|inprogress|600|2
+SQL> total|published|unpublished|first_unpublished|last_unpublished|last_published  (ingest.broadcast_outbox)
+600|597|3|598|600|597
+SQL> runs → 1|replay|ok ; 2|replay|running
+--- subscriber so far: 600 recorded lines; max seq 600      (seq 598-600 were delivered over HTTP but never marked published)
+--- restart 2026-10-13T16:01:10Z → exit=0 at 16:01:17Z  WORKER_PID=65287
+[16:01:10.689] INFO: outbox drained on startup
+[16:01:10.690] WARN: aborted orphaned runs
+    runId: 3  finalStatus: "closed"  batches: 1106  changes: 594  stale: 625  drained: published 6, failed 0
+--- subscriber exit (alive? no at 16:01:18Z)
+2026-10-13T16:01:17.200Z catch-up {"trigger":"pulse","from":1188,"to":1194,"pages":1,"resnapshot":false}
+2026-10-13T16:01:17.211Z closed {"seq":1194,"score":{"home":93,"away":85}}
+2026-10-13T16:01:17.268Z summary {"applied":1194,"firstSeq":1,"lastSeq":1194,"contiguous":true,"duplicates":9,"catchUps":1,"derivedStateEqualsFinalSnapshot":true,"receivedEqualsApi":true}
+--- recorded stream: lines=1194 distinct_seq=1194 min=1 max=1194 via: 1188 broadcast; 6 catch-up;
+SQL> games → a55b9041-b9a9-4d2d-90d7-e5e7208cc896|closed|85|93|1194|3|4
+SQL> changes|distinct_seq|min_seq|max_seq|live_events|deleted_events|outbox|published|dead
+1194|1194|1|1194|408|4|1194|1194|0
+SQL> gaps → 0 ; dup_events → 0
+SQL> runs → 1|replay|ok| ; 2|replay|aborted|worker died; marked aborted by the next lock holder ; 3|replay|ok|
+23/23 invariants hold
+--- diff a.json crashC.json (294858 bytes): diff exit=0
+```
+The subscriber saw repeated ids after the restart (`duplicates: 9`) and applied each seq once (1194 recorded lines, 1194 distinct seq, `contiguous: true`); DB 0 gaps, 0 duplicate state, dump identical. Integration form: `✓ test/integration/outbox.test.ts > outbox publisher > crash point (c): a fault after the HTTP publish and before published_at re-sends the same ids on restart (at-least-once) 18ms`.
+Result: PASS (a), PASS (b), PASS (c)
+
+---
+
+### "Missing final change: drop the last broadcast in `MemoryTransport` → subscriber catches up from the next `pulse.latestSeq`"
+
+Command:
+`pnpm test test/unit/live/subscriber.test.ts -t "missing final change" --reporter=verbose`
+Output:
+```
+ ✓ test/unit/live/subscriber.test.ts > reconnect contract (GameSubscriber + MemoryTransport) > missing final change: the last broadcast is dropped and the next pulse.latestSeq triggers catch-up 5ms
+ Test Files  1 passed (1)
+      Tests  1 passed | 5 skipped (6)
+exit=0
+```
+Observed live as well: in Run C the tail broadcasts (seq 1095–1194) were not published (Realtime 429) and both subscribers logged `catch-up {"trigger":"pulse","from":1094,"to":1194,...}` then `closed {"seq":1194,...}`.
+Result: PASS
+
+---
+
+### "Auth: anon key *and* an anonymous-sign-in guest JWT (the real iOS session) can receive but a publish attempt from each is rejected and never observed by a second subscriber"
+
+Command:
+`pnpm test:int --reporter=verbose` (file `test/integration/realtime-auth.test.ts`)
+Output:
+```
+ ✓ test/integration/realtime-auth.test.ts > Realtime: private game channel is receive-only for clients > anon key and guest JWT publish attempts are rejected over the socket and never observed by the other subscriber 1515ms
+ ✓ test/integration/realtime-auth.test.ts > Realtime: private game channel is receive-only for clients > the service-role publisher delivers to both; decoded GameChange from Broadcast deep-equals /changes 2583ms
+```
+What the test asserts (`test/integration/realtime-auth.test.ts` lines 100–126): `channel.send({type:'broadcast', ...})` returns `'error'` for the anon client and for the guest client; the REST `/realtime/v1/api/broadcast` attempts return a status `< 500` (comment: 202, accepted then dropped under RLS); neither subscriber's received list contains the forged payload.
+
+Observed REST status directly, mid-replay in Run C (only the status code was printed):
+Command:
+`curl -s -o /dev/null -w '%{http_code}' -X POST "$SUPABASE_URL/realtime/v1/api/broadcast" -H "apikey: $SUPABASE_ANON_KEY" -H "Authorization: Bearer $SUPABASE_ANON_KEY" -H 'content-type: application/json' -d '{"messages":[{"topic":"game:cb42c275-…","event":"change","private":true,"payload":{"v":1,"type":"status","forged":true,"seq":999999}}]}'`
+Output:
+```
+anon apikey+bearer: HTTP 202
+```
+and in both recorded streams of that run: `forged payload lines: 0` (anon and guest), with `lines=1194 distinct ids: 1194` each; the two streams are byte-identical.
+
+Receive side: both an anon-key subscriber and a guest-JWT subscriber (`signed in as guest {... "tokenBytes":667}`) received all 1194 changes (Contiguity item above).
+
+Worded honestly: the socket `send` from anon and guest is rejected (`'error'`); the REST endpoint returns 202 (not a 4xx) and silently drops the message; it was never delivered to the other subscriber.
+Result: PASS
+
+---
+
+### "Equal shapes: decoded `GameChange` from Broadcast deep-equals the one from `/changes`"
+
+Command:
+`pnpm test:int --reporter=verbose`; plus the Run C subscriber summaries; plus `test/integration/api.test.ts`
+Output:
+```
+ ✓ test/integration/realtime-auth.test.ts > ... > the service-role publisher delivers to both; decoded GameChange from Broadcast deep-equals /changes 2583ms
+ ✓ test/integration/api.test.ts > GET /v1/games/:id/snapshot and /changes > validates ids and 404s unknown games 23ms
+ ✓ test/integration/api.test.ts > ... > empty game: snapshot seq 0; changes latestSeq=0, retainedFrom=1, hasMore=false 15ms
+ ✓ test/integration/api.test.ts > ... > pages changes in seq order with limit/hasMore/nextAfter, and the pages decode-equal what applyChanges numbered 82ms
+ ✓ test/integration/api.test.ts > ... > snapshot is consistent with the stream: folding /changes from seq 0 reproduces the snapshot state and seq 59ms
+ ✓ test/integration/api.test.ts > ... > retention: after < retainedFrom-1 returns 200 with no changes and retainedFrom, so the client re-snapshots 46ms
+Run C anon:  summary {... "derivedStateEqualsFinalSnapshot":true,"receivedEqualsApi":true}
+Run C guest: summary {... "derivedStateEqualsFinalSnapshot":true,"receivedEqualsApi":true}
+crash (c):   summary {... "derivedStateEqualsFinalSnapshot":true,"receivedEqualsApi":true}
+```
+`receivedEqualsApi` compares `canonicalJson` of every applied `GameChange` (1094 via Broadcast + 100 via catch-up in Run C) with the `/changes` pages for the same range.
+Result: PASS
+
+---
+
+### "Final score matches recording boxscore"
+
+Command:
+`jq '{away: .away.points, home: .home.points, away_alias: .away.alias, home_alias: .home.alias, status: .status}' fixtures/wnba/sim-93ee7c68-boxscore-closed.json`; last pbp document of the replay file; DB after every full replay; `pnpm test test/unit/leagues/closed-game.test.ts --reporter=verbose`
+Output:
+```
+{ "away": 85, "home": 93, "away_alias": "LVA", "home_alias": "NYL", "status": "closed" }
+last pbp line of replay-full.jsonl: {"status":"closed","home":93,"away":85,"events":408,"deleted":5}
+SQL> select id, status, away_points, home_points, last_seq, watch_run_id, current_period, clock, retained_from_seq from games   (Replay A)
+3c5dd84e-022c-4495-9ff3-6f4e41ee89b8|closed|85|93|1194|1|4|00:00|1
+Replay B:  2c23895e-…|closed|85|93|1194|1
+Run C:     cb42c275-…|closed|85|93|1194|2
+crash (a): 8922d2ec-…|closed|85|93|1194|2|4
+crash (b): ef0c9d34-…|closed|85|93|1194|2|4
+crash (c): a55b9041-…|closed|85|93|1194|3|4
+ ✓ test/unit/leagues/closed-game.test.ts > full recorded game (closed documents) > normalizes every event of the closed pbp into a valid LiveEvent with positions 10ms
+ ✓ ... > carries the provider deletion markers (deleted_events[]) and never lists them as events 4ms
+ ✓ ... > final score and line score agree between pbp, summary and boxscore 0ms
+ ✓ ... > halftime -> closed as a new generation passes the gate; closed -> halftime as a new generation does not 5ms
+      Tests  4 passed (4)
+```
+DB `away_points=85, home_points=93` (LVA 85 – NYL 93) in all six full replays; equals the boxscore fixture. Line score in `a.json`: Q1 21–27, Q2 16–24, Q3 25–14, Q4 23–28 (sums 85–93).
+Result: PASS
+
+---
+
+## Observations (not acceptance failures; for the implementer)
+
+1. **Realtime REST 429 at pace 0.** In Replay B, Run C, and crash (c) the outbox publisher received `HTTP 429 {"message":"Too many messages to broadcast, please reduce the batch size"}` from the local Realtime broadcast endpoint for a 50-message batch; the channel was skipped with backoff and the worker's exit-time drain reported `failed: 50, skippedChannels: 1` / `skippedChannels: 1` and exited 0, leaving rows unpublished (Replay B: 445 unpublished, seq 750–1194, `attempts` 2 on the head; Run C: 100 unpublished, seq 1095–1194). Nothing was dead-lettered (`dead_at` 0) and the next worker start drained them, and subscribers recovered through `pulse` catch-up, so every acceptance item still holds. Replay A and the crash (a)/(b) restarts saw no 429. Worth a smaller batch or a 429-aware backoff before production, and the worker arguably should not exit 0 with a skipped channel.
+2. **`superseded_observation` at equal `observedAt`.** Each uninterrupted replay logs ~20 `superseded_observation` rows from `summary`/`boxscore` documents whose `observedAt` equals the stored pbp observation; §4 rule 3 ("newest observedAt") treats equal as not newer. Harmless here; noted so the number is not mistaken for a freshness bug.
+3. **`watch_run_id` after a full re-run** advances once the new generation reaches stored state (§4), so §8's "watch_run_id did not advance" is true for the regressing portion only (proved via the `stored` snapshots above). The wording in §8 could say "did not advance while batches were being rejected".
+4. The validator seeded the game row at seq 0 for Run C and crash (c) from the committed `pbp-created` fixture so a subscriber could attach before seq 1; the baseline, equivalence, no-regression, and crash (a)/(b) runs used the recording file only.
+
+---
+
+## `pnpm invariants` (final run, last command of the session)
+
+Command:
+`pnpm invariants` (database state: crash (c) after restart)
+Output:
+```
+check                                       expect  actual  result
+play_events_no_duplicate_provider_ids       0       0       PASS
+game_changes_no_gaps_in_retained_history    0       0       PASS
+games_last_seq_matches_max_change           0       0       PASS
+outbox_matches_changes_exactly              0       0       PASS
+outbox_no_dead_letters                      0       0       PASS
+outbox_no_duplicate_game_seq                0       0       PASS
+outbox_channel_is_generated                 1       1       PASS
+outbox_has_composite_routing_fk             1       1       PASS
+games_has_no_progress_key                   0       0       PASS
+generation_fks_restrict_delete              2       2       PASS
+outbox_has_single_fk                        1       1       PASS
+anon_cannot_select_ingest_tables            0       0       PASS
+anon_has_no_write_grants_on_public          0       0       PASS
+public_tables_all_have_rls                  0       0       PASS
+retained_head_exists                        0       0       PASS
+anon_has_no_maintain_privilege_on_public    0       0       PASS
+anon_has_no_usage_on_ingest_schema          0       0       PASS
+public_schema_has_no_client_write_policies  0       0       PASS
+realtime_has_no_client_insert_policy        0       0       PASS
+game_changes_has_append_only_trigger        1       1       PASS
+views_use_security_invoker                  0       0       PASS
+event_changes_reference_their_play_row      0       0       PASS
+outbox_published_rows_have_no_error         0       0       PASS
+
+23/23 invariants hold
+exit=0
+```
+`pnpm invariants` was also run after Replay A, after the corrections, after Replay B, after Run C, and after each crash restart: 23/23 every time.
+
+Cleanup: API wrapper (PID 63313) killed; `pgrep -fl 'src/bin/(api|worker|subscribe)\.ts'` → 0 processes; no listener on :3000; `git status --porcelain` empty before this file was written; HEAD `fe529cf86c8503023f553ba417fd405f85540ede`.
+
+## Summary
+
+| Acceptance item | Result |
+|---|---|
+| Idempotence | PASS |
+| Equivalence | PASS |
+| No regression (re-run → 0 changes, 974 `run_regresses_state`, score unchanged; delayed REST → `superseded_observation`; older `watchId` → `older_run`) | PASS |
+| Freshness cases (13/13 §4 cases, named tests) | PASS |
+| Correction (one `event_update`, row updated in place; one `event_delete`) | PASS |
+| Contiguity (subscriber seq 1..1194) | PASS |
+| Outbox parity by join (0 unmatched, 0 `dead_at`) | PASS |
+| Crash point (a) `kill -9` mid-replay | PASS |
+| Crash point (b) fault before commit | PASS |
+| Crash point (c) fault after publish, subscriber dedupes | PASS |
+| Missing final change | PASS |
+| Auth (receive ok; socket publish rejected; REST 202 silently dropped, never delivered) | PASS |
+| Equal shapes | PASS |
+| Final score matches recording boxscore (LVA 85 – NYL 93) | PASS |
+
+**M1: DONE** (all items PASS, no NOT RUN).
