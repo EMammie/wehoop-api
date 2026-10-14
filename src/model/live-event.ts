@@ -5,10 +5,14 @@ import { z } from 'zod';
  * carried by event_insert / event_update changes. Discriminated on `type`.
  * Shared by all three leagues; adapters only decide how to fill it.
  *
- * Ids in the body (`teamId`, `playerId`, `assistId`, ...) are PROVIDER ids
- * (Sportradar). Canonical uuids live in the play_events columns and in
- * player_external_ids (M2); the body stays provider-stable so content hashes do
- * not change when identity resolution improves.
+ * EVERY id inside a body is a PROVIDER id (Sportradar) and is named
+ * `provider…Id` (plan §3, ratified 2026-10-14): `providerTeamId`,
+ * `providerPlayerId`, `providerPossessionTeamId`, `providerAssistId`,
+ * `providerBlockId`, `providerStealId`, `providerDrawnById`,
+ * `providerOnCourtPlayerIds`. Canonical uuids (`teams.id`, `players.id`) are
+ * columns on play_events resolved by identity.ts (M2); they never enter the
+ * body or the content hash, so an identity merge never rewrites history.
+ * test/unit/model/live-event.test.ts enforces the prefix on every body shape.
  */
 export const PeriodTypeSchema = z.enum(['quarter', 'half', 'overtime', 'elam']);
 export type PeriodType = z.infer<typeof PeriodTypeSchema>;
@@ -45,9 +49,9 @@ const base = {
   clockDecimal: z.string().optional(),
   wallClock: z.iso.datetime({ offset: true }).nullable(),
   score: ScoreSchema,
-  teamId: z.string().optional(),
-  playerId: z.string().optional(),
-  possessionTeamId: z.string().optional(),
+  providerTeamId: z.string().optional(),
+  providerPlayerId: z.string().optional(),
+  providerPossessionTeamId: z.string().optional(),
   description: z.string().optional(),
   qualifiers: z.array(z.string()).optional(),
 };
@@ -68,8 +72,8 @@ export const LiveEventSchema = z.discriminatedUnion('type', [
     shotType: z.string().optional(),
     shotTypeDesc: z.string().optional(),
     distance: z.number().optional(),
-    assistId: z.string().optional(),
-    blockId: z.string().optional(),
+    providerAssistId: z.string().optional(),
+    providerBlockId: z.string().optional(),
     location: ShotLocationSchema.optional(),
   }),
   z.object({
@@ -89,13 +93,13 @@ export const LiveEventSchema = z.discriminatedUnion('type', [
     ...base,
     type: z.literal('turnover'),
     kind: z.string(),
-    stealId: z.string().optional(),
+    providerStealId: z.string().optional(),
   }),
   z.object({
     ...base,
     type: z.literal('foul'),
     kind: z.string(),
-    drawnById: z.string().optional(),
+    providerDrawnById: z.string().optional(),
   }),
   z.object({
     ...base,
@@ -105,7 +109,13 @@ export const LiveEventSchema = z.discriminatedUnion('type', [
   z.object({
     ...base,
     type: z.literal('lineup_change'),
-    onCourt: z.array(z.string()),
+    /**
+     * The full on-court set for the attributed team as the provider reports it
+     * AFTER the change (sorted provider player ids). Who came in and who went
+     * out is derived by clients from consecutive lineups; deriving it here
+     * would make the normalizer stateful.
+     */
+    providerOnCourtPlayerIds: z.array(z.string()),
   }),
   z.object({ ...base, type: z.literal('period_start') }),
   z.object({ ...base, type: z.literal('period_end') }),

@@ -210,8 +210,8 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
     ...(ev.clock_decimal !== undefined ? { clockDecimal: ev.clock_decimal } : {}),
     wallClock: ev.wall_clock ?? null,
     score: { home: ev.home_points ?? 0, away: ev.away_points ?? 0 },
-    ...(teamId ? { teamId } : {}),
-    ...(ev.possession?.id ? { possessionTeamId: ev.possession.id } : {}),
+    ...(teamId ? { providerTeamId: teamId } : {}),
+    ...(ev.possession?.id ? { providerPossessionTeamId: ev.possession.id } : {}),
     ...(ev.description !== undefined ? { description: ev.description } : {}),
     ...(ev.qualifiers?.length ? { qualifiers: ev.qualifiers.map((q) => q.qualifier) } : {}),
   };
@@ -222,7 +222,7 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
   if (t === 'opentip') {
     body = { ...base, type: 'tip_off' };
   } else if (t === 'lineupchange') {
-    body = { ...base, type: 'lineup_change', onCourt: lineupFor(ev, teamId) };
+    body = { ...base, type: 'lineup_change', providerOnCourtPlayerIds: lineupFor(ev, teamId) };
   } else if (t === 'startperiod') {
     body = { ...base, type: 'period_start' };
   } else if (t === 'endperiod') {
@@ -236,15 +236,15 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
     const block = stat(ev, 'block')?.player?.id;
     body = {
       ...base,
-      ...(playerId ? { playerId } : {}),
+      ...(playerId ? { providerPlayerId: playerId } : {}),
       type: 'shot',
       made,
       points: made ? (fg?.points ?? pts) : pts,
       ...(fg?.shot_type !== undefined ? { shotType: fg.shot_type } : {}),
       ...(fg?.shot_type_desc !== undefined ? { shotTypeDesc: fg.shot_type_desc } : {}),
       ...(fg?.shot_distance !== undefined ? { distance: fg.shot_distance } : {}),
-      ...(assist ? { assistId: assist } : {}),
-      ...(block ? { blockId: block } : {}),
+      ...(assist ? { providerAssistId: assist } : {}),
+      ...(block ? { providerBlockId: block } : {}),
       ...(ev.location
         ? {
             location: {
@@ -261,7 +261,7 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
     const m = /free throw (\d+) of (\d+)/i.exec(ev.description ?? '');
     body = {
       ...base,
-      ...(playerId ? { playerId } : {}),
+      ...(playerId ? { providerPlayerId: playerId } : {}),
       type: 'free_throw',
       made: t === 'freethrowmade',
       ...(m ? { attempt: Number(m[1]), of: Number(m[2]) } : {}),
@@ -276,17 +276,17 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
     let kind: 'offensive' | 'defensive' | 'team_offensive' | 'team_defensive' | 'unknown' =
       'unknown';
     if (rt === 'offensive' || rt === 'defensive') kind = playerId ? rt : `team_${rt}`;
-    body = { ...base, ...(playerId ? { playerId } : {}), type: 'rebound', kind };
+    body = { ...base, ...(playerId ? { providerPlayerId: playerId } : {}), type: 'rebound', kind };
   } else if (t === 'turnover') {
     const to = stat(ev, 'turnover');
     playerId = to?.player?.id;
     const steal = stat(ev, 'steal')?.player?.id;
     body = {
       ...base,
-      ...(playerId ? { playerId } : {}),
+      ...(playerId ? { providerPlayerId: playerId } : {}),
       type: 'turnover',
       kind: ev.turnover_type ?? to?.turnover_type ?? 'unknown',
-      ...(steal ? { stealId: steal } : {}),
+      ...(steal ? { providerStealId: steal } : {}),
     };
   } else if (t in FOUL_KINDS) {
     const foul = ev.statistics?.find((s) => s.type.endsWith('foul'));
@@ -294,10 +294,10 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
     const drawn = stat(ev, 'fouldrawn')?.player?.id;
     body = {
       ...base,
-      ...(playerId ? { playerId } : {}),
+      ...(playerId ? { providerPlayerId: playerId } : {}),
       type: 'foul',
       kind: foul?.foul_type ?? FOUL_KINDS[t] ?? t,
-      ...(drawn ? { drawnById: drawn } : {}),
+      ...(drawn ? { providerDrawnById: drawn } : {}),
     };
   } else if (t in TIMEOUT_KINDS) {
     body = { ...base, type: 'timeout', kind: TIMEOUT_KINDS[t] ?? 'other' };

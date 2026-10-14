@@ -40,8 +40,12 @@ describe('Sportradar basketball normalizer', () => {
   it('fills shot details from statistics[] and carries provider ids', () => {
     const made = nd.batch.events.find((e) => e.providerEventType === 'twopointmade');
     expect(made?.body).toMatchObject({ type: 'shot', made: true, points: 2, shotType: 'layup' });
-    expect(made?.body.playerId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(made?.body.teamId).toBe(made?.teamProviderId);
+    expect(made?.body.providerPlayerId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(made?.body.providerTeamId).toBe(made?.teamProviderId);
+    const lineup = nd.batch.events.find((e) => e.body.type === 'lineup_change');
+    expect(
+      lineup?.body.type === 'lineup_change' && lineup.body.providerOnCourtPlayerIds.length,
+    ).toBe(5);
     expect(made?.providerUpdatedAt).toMatch(/^2026-/);
     expect(made?.periodSequence).toBe(1);
   });
@@ -130,7 +134,7 @@ describe('Sportradar basketball normalizer', () => {
       made: true,
       attempt: 2,
       of: 2,
-      playerId: 'p1',
+      providerPlayerId: 'p1',
     });
     const to = normalizeEvent(
       PbpEventSchema.parse({
@@ -147,8 +151,8 @@ describe('Sportradar basketball normalizer', () => {
     expect(to.body).toMatchObject({
       type: 'turnover',
       kind: 'badpass',
-      playerId: 'p2',
-      stealId: 'p3',
+      providerPlayerId: 'p2',
+      providerStealId: 'p3',
     });
     const foul = normalizeEvent(
       PbpEventSchema.parse({
@@ -164,8 +168,8 @@ describe('Sportradar basketball normalizer', () => {
     expect(foul.body).toMatchObject({
       type: 'foul',
       kind: 'shooting',
-      playerId: 'p4',
-      drawnById: 'p5',
+      providerPlayerId: 'p4',
+      providerDrawnById: 'p5',
     });
     expect(
       normalizeEvent(PbpEventSchema.parse({ id: 'd', event_type: 'tvtimeout' }), period).body,
