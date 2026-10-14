@@ -21,6 +21,7 @@ pnpm sim record --league wnba --recording <id> --out <file.jsonl>          # DB-
 pnpm sim compact --in <full.jsonl> --out <file.jsonl.gz> [--target-mb 4]   # deterministic down-sample (replay fixture step 2)
 pnpm subscribe --game <uuid> --record <jsonl> [--auth guest]   # reference client: subscribe + reconnect contract
 pnpm dump-game --game <uuid> # canonical JSON of play_events bodies, periods, score (for replay diffs)
+pnpm release:tag --milestone <n> [--push]   # on main, clean tree, evidence all PASS: annotated tag m<n> at HEAD
 pnpm invariants              # run test/integration/invariants.sql against local DB
 ```
 
