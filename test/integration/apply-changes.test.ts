@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ensureGame } from '../../src/ingest/apply-changes.js';
 import { createFaultInjector } from '../../src/ingest/fault.js';
 import type { NormalizedDocument } from '../../src/ingest/types.js';
 import { normalizeEvent } from '../../src/leagues/sportradar-basketball/normalize.js';
@@ -468,6 +469,90 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     const [row] = await db<{ status: string }[]>`
       select status::text as status from public.games where id = ${created.gameId}`;
     expect(row?.status).toBe('scheduled');
+  });
+
+  it('omission is not change: a document without coverage / provider updated keeps the stored values; a present value changes them', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    const withUpdated: NormalizedDocument = {
+      ...nd,
+      gameView: nd.gameView
+        ? { ...nd.gameView, providerUpdatedAt: '2026-06-30T23:31:00+00:00' }
+        : null,
+    };
+    await apply(deps, gameId, withUpdated, observation(run, withUpdated, T0));
+    const game = async () =>
+      (
+        await db<{ coverage: string; providerUpdatedAt: Date | null; venue: unknown }[]>`
+          select coverage::text as coverage, provider_updated_at as "providerUpdatedAt", venue
+          from public.games where id = ${gameId}`
+      )[0];
+    expect(await game()).toMatchObject({
+      coverage: 'full',
+      providerUpdatedAt: new Date('2026-06-30T23:31:00Z'),
+    });
+    // omitted coverage, omitted provider updated, omitted venue: nothing moves
+    const omitting: NormalizedDocument = {
+      ...nd,
+      gameView: nd.gameView
+        ? { ...nd.gameView, coverage: null, providerUpdatedAt: null, venue: null }
+        : null,
+    };
+    const r = await apply(deps, gameId, omitting, observation(run, omitting, later(1)));
+    expect(r.outcome === 'applied' && r.gameLevel).toBe('write');
+    expect(await game()).toMatchObject({
+      coverage: 'full',
+      providerUpdatedAt: new Date('2026-06-30T23:31:00Z'),
+      venue: nd.gameView?.venue ?? null,
+    });
+    // an unrecognized coverage string is treated as omitted, never written as 'unknown'
+    const weird: NormalizedDocument = {
+      ...nd,
+      gameView: nd.gameView ? { ...nd.gameView, coverage: 'something_new' } : null,
+    };
+    await apply(deps, gameId, weird, observation(run, weird, later(2)));
+    expect((await game())?.coverage).toBe('full');
+    // a present, recognized value is a change
+    const extended: NormalizedDocument = {
+      ...nd,
+      gameView: nd.gameView
+        ? {
+            ...nd.gameView,
+            coverage: 'extended_boxscore',
+            providerUpdatedAt: '2026-06-30T23:32:00+00:00',
+          }
+        : null,
+    };
+    await apply(deps, gameId, extended, observation(run, extended, later(3)));
+    expect(await game()).toMatchObject({
+      coverage: 'extended_boxscore',
+      providerUpdatedAt: new Date('2026-06-30T23:32:00Z'),
+    });
+    // and the row-creation path (ensureGame): no coverage creates the row as 'unknown' once (the only
+    // place that value is written), a later document with coverage fixes it, a later one without keeps it
+    const base = {
+      league: 'wnba' as const,
+      providerGameId: `test-cov-${gameId}`,
+      scheduledAt: T0.toISOString(),
+      status: 'scheduled' as const,
+      homeTeamId: null,
+      awayTeamId: null,
+      venue: null,
+      broadcasts: null,
+    };
+    const { id: created } = await ensureGame(db, { ...base, coverage: null });
+    const cov = async () =>
+      (
+        await db<
+          { c: string }[]
+        >`select coverage::text as c from public.games where id = ${created}`
+      )[0]?.c;
+    expect(await cov()).toBe('unknown');
+    await ensureGame(db, { ...base, coverage: 'boxscore' });
+    expect(await cov()).toBe('boxscore');
+    await ensureGame(db, { ...base, coverage: null });
+    expect(await cov()).toBe('boxscore');
   });
 
   it('crash point (b): a fault just before commit rolls the whole batch back; the retry applies it once', async () => {

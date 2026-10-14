@@ -147,6 +147,8 @@ export async function ensureGame(
   },
   log?: Logger,
 ): Promise<{ id: string; created: boolean }> {
+  // 'unknown' exists only at row creation when the document carries no coverage; on update an
+  // omitted or unrecognized coverage keeps the stored value (omission is not change).
   const coverage = coverageOf(game.coverage);
   const status: GameStatus = game.status ?? 'scheduled';
   if (game.status === null) {
@@ -158,13 +160,13 @@ export async function ensureGame(
   const [row] = await db<{ id: string; created: boolean }[]>`
     insert into public.games (league, provider_game_id, scheduled_at, status, coverage,
                               home_team_id, away_team_id, venue, broadcasts)
-    values (${game.league}, ${game.providerGameId}, ${game.scheduledAt}, ${status}, ${coverage},
+    values (${game.league}, ${game.providerGameId}, ${game.scheduledAt}, ${status}, ${coverage ?? 'unknown'},
             ${game.homeTeamId}, ${game.awayTeamId},
             ${game.venue ? db.json(game.venue as never) : null},
             ${game.broadcasts ? db.json(game.broadcasts as never) : null})
     on conflict (league, provider_game_id) do update
       set scheduled_at = excluded.scheduled_at,
-          coverage = excluded.coverage,
+          coverage = coalesce(${coverage}::public.coverage_level, public.games.coverage),
           home_team_id = coalesce(excluded.home_team_id, public.games.home_team_id),
           away_team_id = coalesce(excluded.away_team_id, public.games.away_team_id),
           venue = coalesce(excluded.venue, public.games.venue),
@@ -174,14 +176,15 @@ export async function ensureGame(
   return row;
 }
 
-function coverageOf(c: string | null): 'full' | 'extended_boxscore' | 'boxscore' | 'unknown' {
+/** Recognized coverage levels; null for an omitted or unrecognized value (never 'unknown' on update). */
+function coverageOf(c: string | null): 'full' | 'extended_boxscore' | 'boxscore' | null {
   switch (c) {
     case 'full':
     case 'extended_boxscore':
     case 'boxscore':
       return c;
     default:
-      return 'unknown';
+      return null;
   }
 }
 
@@ -429,11 +432,12 @@ export async function applyChanges(
       }
     }
 
-    // 5. Observation write: clock + freshness metadata, never a seq.
+    // 5. Observation write: clock + freshness metadata, never a seq. Omission is not change:
+    // every field here is coalesced, so a document that omits it leaves the stored value in place.
     if (gv) {
       await tx`update public.games set
                  scheduled_at = coalesce(${gv.scheduledAt}, scheduled_at),
-                 coverage = ${coverageOf(gv.coverage)},
+                 coverage = coalesce(${coverageOf(gv.coverage)}::public.coverage_level, coverage),
                  venue = coalesce(${gv.venue ? tx.json(gv.venue as never) : null}, venue),
                  broadcasts = coalesce(${gv.broadcasts ? tx.json(gv.broadcasts as never) : null}, broadcasts)
                where id = ${gameId}`;
@@ -455,7 +459,7 @@ export async function applyChanges(
                    clock_extra = ${gv.clockExtra ? tx.json(gv.clockExtra as never) : null},
                    current_period_sequence = ${gv.period?.sequence ?? null},
                    observed_at = ${observation.observedAt}, observed_source = ${observation.source},
-                   provider_updated_at = ${observation.providerUpdatedAt ?? gv.providerUpdatedAt ?? null}
+                   provider_updated_at = coalesce(${observation.providerUpdatedAt ?? gv.providerUpdatedAt ?? null}::timestamptz, provider_updated_at)
                  where id = ${gameId}`;
       }
     }
