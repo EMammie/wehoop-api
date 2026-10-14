@@ -1,6 +1,10 @@
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { GameWatcher, replayRecording } from '../../src/ingest/game-watcher.js';
-import { readRecording } from '../../src/ingest/recording.js';
+import { GzipLineWriter, readRecording, readRecordingLines } from '../../src/ingest/recording.js';
 import type { RunHandle } from '../../src/ingest/runs.js';
 import type { NormalizedDocument } from '../../src/ingest/types.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
@@ -18,13 +22,19 @@ import {
 
 /**
  * The committed compact replay fixture, end to end through a real GameWatcher
- * (plan §7 "Reproducible replay", §8 "no regression"). The provider game id is
- * the real one, so this file owns that game row for the test database.
+ * (plan §7 "Reproducible replay", §8 "no regression"). The fixture is copied
+ * with its provider game id rewritten to a unique one, so this test never
+ * collides with the validator's replay of the real game in the same database
+ * (game_changes is append-only: an existing game cannot be deleted).
  */
 const FIXTURE = new URL('../../fixtures/wnba/sim-93ee7c68-replay.compact.jsonl.gz', import.meta.url)
   .pathname;
+const REAL_GAME_ID = '40bea3f6-68c0-4f3b-96fa-336dfb7a9034';
 const db = testDb();
 const deps = { db, log: silentLog };
+const dir = mkdtempSync(join(tmpdir(), 'wehoop-replay-fixture-'));
+const COPY = join(dir, 'replay.jsonl.gz');
+const testGameId = `test-${randomUUID()}`;
 
 async function replay(run: RunHandle) {
   const watcher = new GameWatcher({
@@ -35,7 +45,7 @@ async function replay(run: RunHandle) {
     apply: deps,
     pulse: null,
   });
-  const out = await replayRecording(watcher, FIXTURE, silentLog, {
+  const out = await replayRecording(watcher, COPY, silentLog, {
     paceMs: 0,
     untilClosed: true,
     isStopped: () => false,
@@ -52,8 +62,13 @@ let total = 0;
 
 beforeAll(async () => {
   await db`select 1`;
-  await db`delete from public.games where provider_game_id = '40bea3f6-68c0-4f3b-96fa-336dfb7a9034'`;
-  for await (const line of readRecording(FIXTURE)) {
+  const writer = new GzipLineWriter(COPY);
+  for await (const line of readRecordingLines(FIXTURE)) {
+    if (!line.includes(REAL_GAME_ID)) throw new Error('fixture line without the game id');
+    await writer.write(line.replaceAll(REAL_GAME_ID, testGameId));
+  }
+  await writer.close();
+  for await (const line of readRecording(COPY)) {
     total++;
     if (line.feed === 'summary')
       lastSummary = wnbaAdapter.normalizeSummary(SummaryDocumentSchema.parse(line.body));
@@ -62,12 +77,16 @@ beforeAll(async () => {
   gameId = firstPass.gameId;
 });
 afterAll(async () => {
+  rmSync(dir, { recursive: true, force: true });
   await db.end();
 });
 
 describe('committed replay fixture through the worker path', () => {
   it('consumes every document, including the summary and boxscore after the first closed pbp', async () => {
     expect(total).toBe(158);
+    const [g] = await db<{ providerGameId: string }[]>`
+      select provider_game_id as "providerGameId" from public.games where id = ${gameId}`;
+    expect(g?.providerGameId).toBe(testGameId);
     expect(firstPass.docs).toBe(total);
     expect(firstPass.status).toBe('closed');
     const c = await counts(db, gameId);
