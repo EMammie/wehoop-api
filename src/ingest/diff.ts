@@ -6,7 +6,7 @@ import type { DeletionMarker, NormalizedEvent } from './types.js';
 export interface EventDiffCounts {
   inserted: number;
   updated: number;
-  /** Revision-only updates: provider_updated_at advanced, no change row. */
+  /** Revision-only updates: event or deletion revision advanced, no change row. */
   touched: number;
   deleted: number;
   ignoredOlder: number;
@@ -29,6 +29,8 @@ export interface EventDiff {
   touches: NormalizedEvent[];
   /** Markers to apply as soft-deletes, with the marker's own revision. */
   deletions: DeletionMarker[];
+  /** Newer markers for already deleted rows: metadata only, no change row. */
+  deletionTouches: DeletionMarker[];
   counts: EventDiffCounts;
 }
 
@@ -56,6 +58,7 @@ export function diffEvents(
   const writes: EventWrite[] = [];
   const touches: NormalizedEvent[] = [];
   const deletions: DeletionMarker[] = [];
+  const deletionTouches: DeletionMarker[] = [];
   const markers = new Map<string, DeletionMarker>();
   for (const d of deletedEvents) markers.set(d.providerEventId, d); // last marker in the batch wins
 
@@ -99,9 +102,12 @@ export function diffEvents(
       counts.deleted++;
       deletions.push(marker);
       changes.push({ type: 'event_delete', providerEventId: id, body: { providerEventId: id } });
+    } else if (action === 'touch_deletion') {
+      counts.touched++;
+      deletionTouches.push(marker);
     } else if (action === 'ignore_older_deletion') {
       counts.ignoredOlderDeletions++;
     }
   }
-  return { changes, writes, touches, deletions, counts };
+  return { changes, writes, touches, deletions, deletionTouches, counts };
 }

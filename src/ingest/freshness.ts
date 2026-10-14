@@ -341,6 +341,8 @@ export type EventAction =
   | 'update'
   /** Newer `updated`, identical body: advance provider_updated_at only, no change row. */
   | 'touch'
+  /** Newer deletion marker for an already deleted event: metadata only. */
+  | 'touch_deletion'
   | 'delete'
   | 'reinstate'
   | 'ignore_older'
@@ -377,7 +379,16 @@ export function decideEvent(
 ): EventAction {
   if (deletion) {
     if (!stored) return 'ignore_missing';
-    if (stored.deleted) return 'unchanged';
+    if (stored.deleted) {
+      const revision = stored.deletedRevisionAt ?? stored.providerUpdatedAt;
+      if (newer(revision, deletion.updatedAt) === true) return 'ignore_older_deletion';
+      if (
+        deletion.updatedAt !== null &&
+        (revision === null || newer(deletion.updatedAt, revision) === true)
+      )
+        return 'touch_deletion';
+      return 'unchanged';
+    }
     if (newer(stored.providerUpdatedAt, deletion.updatedAt) === true)
       return 'ignore_older_deletion';
     return 'delete';

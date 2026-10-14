@@ -861,6 +861,38 @@ describe('freshness rules: details', () => {
     expect(d2.deletions).toEqual([{ providerEventId: 'e1', updatedAt: null }]);
   });
 
+  it('repeated deletion advances its revision without a change and rejects intermediate reinstatement', () => {
+    const rev = (s: number) => new Date(Date.UTC(2026, 5, 30, 23, 0, s)).toISOString();
+    const stored = {
+      contentHash: 'h',
+      providerUpdatedAt: rev(10),
+      deleted: true,
+      deletedRevisionAt: rev(20),
+    };
+    const d = diffEvents(
+      new Map([['e1', stored]]),
+      [],
+      [{ providerEventId: 'e1', updatedAt: rev(40) }],
+    );
+    expect(d.changes).toEqual([]);
+    expect(d.deletionTouches).toEqual([{ providerEventId: 'e1', updatedAt: rev(40) }]);
+    const advanced = { ...stored, deletedRevisionAt: rev(40) };
+    expect(decideEvent(advanced, { contentHash: 'h', providerUpdatedAt: rev(30) }, null)).toBe(
+      'unchanged',
+    );
+    expect(decideEvent(advanced, { contentHash: 'h', providerUpdatedAt: rev(50) }, null)).toBe(
+      'reinstate',
+    );
+    expect(decideEvent(advanced, null, { updatedAt: rev(30) })).toBe('ignore_older_deletion');
+    expect(decideEvent(advanced, null, { updatedAt: rev(40) })).toBe('unchanged');
+    expect(decideEvent(advanced, null, { updatedAt: null })).toBe('unchanged');
+    expect(
+      decideEvent({ ...stored, providerUpdatedAt: null, deletedRevisionAt: null }, null, {
+        updatedAt: rev(40),
+      }),
+    ).toBe('touch_deletion');
+  });
+
   it('revision-only update: revision 12 with revision 10 body touches (no change); a later differing revision 11 is then older and ignored', () => {
     const r10 = nev('a', { providerUpdatedAt: '2026-06-30T23:00:10+00:00' });
     const first = diffEvents(new Map(), [r10], []);

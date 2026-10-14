@@ -341,6 +341,59 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     expect((await row())?.deletedAt).not.toBeNull();
   });
 
+  it('repeated deletion revision is persisted without seq/outbox growth and blocks an intermediate event', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    await apply(deps, gameId, nd, observation(run, nd, T0));
+    const target = nd.batch.events[6];
+    if (!target?.providerUpdatedAt) throw new Error('fixture event has no updated');
+    const id = target.providerEventId;
+    const rev = (s: number) =>
+      new Date(Date.parse(target.providerUpdatedAt ?? '') + s * 1000).toISOString();
+    const marker = (updatedAt: string | null): NormalizedDocument => ({
+      ...nd,
+      gameView: null,
+      isComplete: false,
+      batch: { events: [], deletedEvents: [{ providerEventId: id, updatedAt }], teamStats: [] },
+    });
+    const applyDoc = (doc: NormalizedDocument, at: number) =>
+      apply(deps, gameId, doc, observation(run, doc, later(at)));
+    const row = async () =>
+      (
+        await db<{ deletedAt: Date | null; deletedRevisionAt: Date | null }[]>`
+      select deleted_at as "deletedAt", deleted_revision_at as "deletedRevisionAt"
+      from public.play_events where game_id = ${gameId} and provider_event_id = ${id}`
+      )[0];
+    await applyDoc(marker(rev(20)), 1);
+    const deleted = await row();
+    const before = await counts(db, gameId);
+    expect((await applyDoc(marker(rev(40)), 2)).changes).toEqual([]);
+    expect((await row())?.deletedRevisionAt?.toISOString()).toBe(rev(40));
+    expect((await row())?.deletedAt).toEqual(deleted?.deletedAt);
+    for (const revision of [rev(30), rev(40), null]) {
+      expect((await applyDoc(marker(revision), 3)).changes).toEqual([]);
+      expect((await row())?.deletedRevisionAt?.toISOString()).toBe(rev(40));
+    }
+    const event = (revision: string): NormalizedDocument => ({
+      ...nd,
+      gameView: null,
+      isComplete: false,
+      batch: {
+        events: [{ ...target, providerUpdatedAt: revision }],
+        deletedEvents: [],
+        teamStats: [],
+      },
+    });
+    expect((await applyDoc(event(rev(30)), 4)).changes).toEqual([]);
+    expect((await row())?.deletedAt).not.toBeNull();
+    expect(await counts(db, gameId)).toEqual(before);
+    expect((await applyDoc(event(rev(50)), 5)).changes.map((c) => c.type)).toEqual([
+      'event_insert',
+    ]);
+    expect(await row()).toEqual({ deletedAt: null, deletedRevisionAt: null });
+  });
+
   it('no regression: a new generation replaying from the start is stale (run_regresses_state), score and watch_run_id unchanged', async () => {
     const nd = pbpQ1();
     const { gameId } = await seedGame(db, nd);

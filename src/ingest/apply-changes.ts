@@ -572,6 +572,15 @@ export async function applyChanges(
                on conflict (play_event_id) do update set raw = excluded.raw, provider_updated_at = excluded.provider_updated_at`;
     }
 
+    // A repeated deletion can advance its revision without changing the deleted state.
+    // Keep the original deleted_at and allocate neither a change nor an outbox row.
+    for (const marker of diff.deletionTouches) {
+      const s = stored.get(marker.providerEventId);
+      if (!s) continue;
+      await tx`update public.play_events set deleted_revision_at = ${marker.updatedAt}, updated_at = now()
+               where id = ${s.id}`;
+    }
+
     // 6. Durable write.
     const n = changes.length;
     let firstSeq: number | null = null;
