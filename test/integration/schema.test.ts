@@ -233,17 +233,23 @@ describe('change stream constraints', () => {
     });
   });
 
-  it('stale_observations accepts the three freshness reasons and rejects any other', async () => {
+  it('stale_observations accepts the four freshness reasons and rejects any other', async () => {
     await rolledBack(async (tx) => {
       const { gameId } = await seedGameWithChange(tx, 'test-stale-reasons');
-      for (const reason of ['older_run', 'run_regresses_state', 'superseded_observation']) {
+      const reasons = [
+        'older_run',
+        'run_regresses_state',
+        'superseded_observation',
+        'ambiguous_regression',
+      ];
+      for (const reason of reasons) {
         await tx`insert into ingest.stale_observations (game_id, source, observed_at, observation, reason)
                  values (${gameId}, 'simulation', now(), '{}'::jsonb, ${reason})`;
       }
       const [n] = await tx<
         { n: number }[]
       >`select count(*)::int as n from ingest.stale_observations where game_id = ${gameId}`;
-      expect(n?.n).toBe(3);
+      expect(n?.n).toBe(4);
       await expect(
         tx.savepoint(
           (

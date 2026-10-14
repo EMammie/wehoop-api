@@ -174,3 +174,8 @@ where c.change_type in ('event_insert', 'event_update', 'event_delete')
 select count(*)
 from ingest.broadcast_outbox
 where published_at is not null and (dead_at is not null or last_error is not null);
+
+-- check: deleted_revision_only_on_deleted_events | expect: 0
+select count(*)
+from public.play_events
+where deleted_revision_at is not null and deleted_at is null;
