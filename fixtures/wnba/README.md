@@ -75,4 +75,4 @@ observation's `observedAt` on replay; `body` is the provider document exactly as
 
 | File | Source | Documents | sha256 |
 |---|---|---|---|
-| `sim-93ee7c68-replay.compact.jsonl.gz` | `pnpm sim record` + `pnpm sim compact` as above | <to be filled after pnpm sim compact> | sha256: <to be filled after pnpm sim compact> |
+| `sim-93ee7c68-replay.compact.jsonl.gz` | `pnpm sim record` + `pnpm sim compact` as above (recorded 2026-10-14, session at natural pace, 3,350 raw documents: 2,790 pbp / 280 summary / 280 boxscore, 1,802,476,345 bytes raw) | 158 documents (76 pbp, 41 summary, 41 boxscore), 2,541,778 bytes | sha256: 7be194ab80d0ca885a12d802702d046f73e8ab9c13763af13d5a4527c5b0481c |
