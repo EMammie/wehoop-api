@@ -27,11 +27,14 @@ export interface FetchedDocument<T> {
  * One HTTP client for every Sportradar source. Every call is logged to
  * ingest.provider_calls; `quota_counted` is true only for trial/production
  * (CLAUDE.md non-negotiable 8). Keys never appear in the stored URL.
+ * `db: null` is for DB-free tooling against the simulation service only
+ * (`pnpm sim record`): calls are not logged, and the resolver must be a
+ * simulation resolver so no quota-counted call can go unrecorded.
  */
 export class SportradarHttp {
   constructor(
     private readonly deps: {
-      db: Db;
+      db: Db | null;
       log: Logger;
       resolver: UrlResolver;
       league: LeagueCode;
@@ -39,7 +42,11 @@ export class SportradarHttp {
       fetchImpl?: typeof fetch;
       timeoutMs?: number;
     },
-  ) {}
+  ) {
+    if (deps.db === null && deps.resolver.source !== 'simulation') {
+      throw new Error('SportradarHttp without a database is only allowed for simulation sources');
+    }
+  }
 
   get source() {
     return this.deps.resolver.source;
@@ -94,6 +101,7 @@ export class SportradarHttp {
     durationMs: number,
     bytes: number,
   ) {
+    if (this.deps.db === null) return;
     const source = this.deps.resolver.source;
     const quotaCounted = source === 'trial' || source === 'production';
     try {

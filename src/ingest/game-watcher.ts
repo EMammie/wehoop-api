@@ -1,5 +1,3 @@
-import { appendFileSync, createReadStream } from 'node:fs';
-import { createInterface } from 'node:readline';
 import type { ZodType } from 'zod';
 import type { Db } from '../db/client.js';
 import type { LeagueAdapter } from '../leagues/adapter.js';
@@ -12,17 +10,16 @@ import { SummaryDocumentSchema } from '../providers/sportradar/schemas/summary.j
 import type { Feed } from '../providers/sportradar/urls.js';
 import { type ApplyDeps, type ApplyResult, applyChanges, ensureGame } from './apply-changes.js';
 import { ensureTeams } from './identity.js';
+import {
+  appendRecordedDocument,
+  type RecordedDocument,
+  readRecording,
+  toRecordedDocument,
+} from './recording.js';
 import type { RunHandle } from './runs.js';
 import type { NormalizedDocument, ObservationSource } from './types.js';
 
-/** A recorded document line (`--record-to` writes these, `--replay-file` reads them). */
-export interface RecordedDocument {
-  feed: Feed;
-  requestedAt: string;
-  receivedAt: string;
-  status: number;
-  body: unknown;
-}
+export { type RecordedDocument, readRecording };
 
 /** Where documents come from: the simulation service (polling) or a recording on disk. */
 export interface DocumentSource {
@@ -38,29 +35,8 @@ export class HttpDocumentSource implements DocumentSource {
   ) {}
   async fetch<T>(feed: Feed, schema: ZodType<T>): Promise<FetchedDocument<T>> {
     const doc = await this.http.getJson(feed, schema);
-    if (this.recordTo) {
-      const line: RecordedDocument = {
-        feed,
-        requestedAt: doc.requestedAt.toISOString(),
-        receivedAt: doc.receivedAt.toISOString(),
-        status: 200,
-        body: JSON.parse(doc.rawText),
-      };
-      appendFileSync(this.recordTo, `${JSON.stringify(line)}\n`);
-    }
+    if (this.recordTo) appendRecordedDocument(this.recordTo, toRecordedDocument(feed, doc));
     return doc;
-  }
-}
-
-/** Reads a jsonl recording in order. `observedAt` is the recorded request time (fixture semantics). */
-export async function* readRecording(path: string): AsyncGenerator<RecordedDocument> {
-  const rl = createInterface({
-    input: createReadStream(path),
-    crlfDelay: Number.POSITIVE_INFINITY,
-  });
-  for await (const line of rl) {
-    if (!line.trim()) continue;
-    yield JSON.parse(line) as RecordedDocument;
   }
 }
 

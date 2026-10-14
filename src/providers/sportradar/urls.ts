@@ -1,7 +1,8 @@
 import type { LeagueCode } from '../../leagues/codes.js';
 
-/** Feeds the M1 replay needs. M2/M3 extend this union. */
-export type Feed = 'pbp' | 'summary' | 'boxscore' | 'schedule';
+/** Feeds the M1 replay needs. M2/M3 extend this list. */
+export const FEEDS = ['pbp', 'summary', 'boxscore', 'schedule'] as const;
+export type Feed = (typeof FEEDS)[number];
 
 export interface ResolvedUrl {
   url: string;
