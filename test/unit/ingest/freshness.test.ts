@@ -65,7 +65,7 @@ const batch = (over: Partial<BatchInput> = {}): BatchInput => ({
   isComplete: true,
   gameView: view(),
   eventPositions: [pos(1, 100), pos(1, 200)],
-  deletedEventIds: [],
+  deletedEvents: [],
   ...over,
 });
 const liveEvents: StoredEventForFreshness[] = [storedEv('e1', 1, 100), storedEv('e2', 1, 200)];
@@ -141,16 +141,29 @@ describe('freshness §4 acceptance cases', () => {
 
   it('case 3: explicit deletion lowering the event count accepted as exactly one event_delete', () => {
     const storedMap = new Map([
-      ['e1', { contentHash: 'h1', providerUpdatedAt: null, deleted: false }],
-      ['e2', { contentHash: 'h2', providerUpdatedAt: null, deleted: false }],
+      [
+        'e1',
+        { contentHash: 'h1', providerUpdatedAt: null, deleted: false, deletedRevisionAt: null },
+      ],
+      [
+        'e2',
+        { contentHash: 'h2', providerUpdatedAt: null, deleted: false, deletedRevisionAt: null },
+      ],
     ]);
     const d = decideBatch(
       stored(),
-      batch({ eventPositions: [pos(1, 100)], deletedEventIds: ['e2'] }),
+      batch({
+        eventPositions: [pos(1, 100)],
+        deletedEvents: [{ providerEventId: 'e2', updatedAt: null }],
+      }),
       liveEvents,
     );
     expect(d.kind).toBe('accept');
-    const diff = diffEvents(storedMap, [nev('e1', { providerSequence: 100 })], ['e2']);
+    const diff = diffEvents(
+      storedMap,
+      [nev('e1', { providerSequence: 100 })],
+      [{ providerEventId: 'e2', updatedAt: null }],
+    );
     expect(diff.changes.filter((c) => c.type === 'event_delete')).toEqual([
       { type: 'event_delete', providerEventId: 'e2', body: { providerEventId: 'e2' } },
     ]);
@@ -159,25 +172,39 @@ describe('freshness §4 acceptance cases', () => {
     const again = diffEvents(
       new Map([
         ...storedMap,
-        ['e2', { contentHash: 'h2', providerUpdatedAt: null, deleted: true }],
+        [
+          'e2',
+          { contentHash: 'h2', providerUpdatedAt: null, deleted: true, deletedRevisionAt: null },
+        ],
       ]),
       [],
-      ['e2'],
+      [{ providerEventId: 'e2', updatedAt: null }],
     );
     expect(again.changes).toEqual([]);
   });
 
   it('case 4: absence of events without a marker never deletes', () => {
     const storedMap = new Map([
-      ['e1', { contentHash: 'h1', providerUpdatedAt: null, deleted: false }],
-      ['e2', { contentHash: 'h2', providerUpdatedAt: null, deleted: false }],
+      [
+        'e1',
+        { contentHash: 'h1', providerUpdatedAt: null, deleted: false, deletedRevisionAt: null },
+      ],
+      [
+        'e2',
+        { contentHash: 'h2', providerUpdatedAt: null, deleted: false, deletedRevisionAt: null },
+      ],
     ]);
     const e1 = nev('e1');
-    storedMap.set('e1', { contentHash: hashOf(e1), providerUpdatedAt: null, deleted: false });
+    storedMap.set('e1', {
+      contentHash: hashOf(e1),
+      providerUpdatedAt: null,
+      deleted: false,
+      deletedRevisionAt: null,
+    });
     const diff = diffEvents(storedMap, [e1], []);
     expect(diff.changes).toEqual([]);
     expect(diff.deletions).toEqual([]);
-    expect(decideEvent(storedMap.get('e2'), null, false)).toBe('unchanged');
+    expect(decideEvent(storedMap.get('e2'), null, null)).toBe('unchanged');
   });
 
   it('case 5: delayed REST (observedAt earlier than the stored push observation) -> superseded_observation, no game-level write; events still reconciled per entity', () => {
@@ -192,17 +219,27 @@ describe('freshness §4 acceptance cases', () => {
     // the REST document's newer revision of an event is honoured by `updated`
     expect(
       decideEvent(
-        { contentHash: 'old', providerUpdatedAt: '2026-06-30T23:19:00+00:00', deleted: false },
+        {
+          contentHash: 'old',
+          providerUpdatedAt: '2026-06-30T23:19:00+00:00',
+          deleted: false,
+          deletedRevisionAt: null,
+        },
         { contentHash: 'new', providerUpdatedAt: '2026-06-30T23:19:30+00:00' },
-        false,
+        null,
       ),
     ).toBe('update');
     // and its older revision is ignored (counted, not stale)
     expect(
       decideEvent(
-        { contentHash: 'new', providerUpdatedAt: '2026-06-30T23:19:30+00:00', deleted: false },
+        {
+          contentHash: 'new',
+          providerUpdatedAt: '2026-06-30T23:19:30+00:00',
+          deleted: false,
+          deletedRevisionAt: null,
+        },
         { contentHash: 'old', providerUpdatedAt: '2026-06-30T23:19:00+00:00' },
-        false,
+        null,
       ),
     ).toBe('ignore_older');
   });
@@ -314,11 +351,22 @@ describe('freshness §4 acceptance cases', () => {
     expect(d).toMatchObject({ kind: 'accept', generation: 'new' });
     // and within the generation the missing old event is simply not touched
     const storedMap = new Map([
-      ['e1', { contentHash: 'h1', providerUpdatedAt: null, deleted: false }],
-      ['e2', { contentHash: 'h2', providerUpdatedAt: null, deleted: false }],
+      [
+        'e1',
+        { contentHash: 'h1', providerUpdatedAt: null, deleted: false, deletedRevisionAt: null },
+      ],
+      [
+        'e2',
+        { contentHash: 'h2', providerUpdatedAt: null, deleted: false, deletedRevisionAt: null },
+      ],
     ]);
     const e2 = nev('e2', { providerSequence: 200 });
-    storedMap.set('e2', { contentHash: hashOf(e2), providerUpdatedAt: null, deleted: false });
+    storedMap.set('e2', {
+      contentHash: hashOf(e2),
+      providerUpdatedAt: null,
+      deleted: false,
+      deletedRevisionAt: null,
+    });
     expect(diffEvents(storedMap, [e2], []).changes).toEqual([]);
   });
 
@@ -363,17 +411,32 @@ describe('freshness §4 acceptance cases', () => {
   it("case 13: a new generation's first document that explicitly deletes the stored newest event is accepted and yields one event_delete", () => {
     const d = decideBatch(
       stored(),
-      batch({ watchId: 11, eventPositions: [pos(1, 100)], deletedEventIds: ['e2'] }),
+      batch({
+        watchId: 11,
+        eventPositions: [pos(1, 100)],
+        deletedEvents: [{ providerEventId: 'e2', updatedAt: null }],
+      }),
       liveEvents,
     );
     expect(d).toMatchObject({ kind: 'accept', generation: 'new', advanceWatchRunId: true });
     const storedMap = new Map([
-      ['e1', { contentHash: 'h1', providerUpdatedAt: null, deleted: false }],
-      ['e2', { contentHash: 'h2', providerUpdatedAt: null, deleted: false }],
+      [
+        'e1',
+        { contentHash: 'h1', providerUpdatedAt: null, deleted: false, deletedRevisionAt: null },
+      ],
+      [
+        'e2',
+        { contentHash: 'h2', providerUpdatedAt: null, deleted: false, deletedRevisionAt: null },
+      ],
     ]);
     const e1 = nev('e1', { providerSequence: 100 });
-    storedMap.set('e1', { contentHash: hashOf(e1), providerUpdatedAt: null, deleted: false });
-    const diff = diffEvents(storedMap, [e1], ['e2']);
+    storedMap.set('e1', {
+      contentHash: hashOf(e1),
+      providerUpdatedAt: null,
+      deleted: false,
+      deletedRevisionAt: null,
+    });
+    const diff = diffEvents(storedMap, [e1], [{ providerEventId: 'e2', updatedAt: null }]);
     expect(diff.changes).toEqual([
       { type: 'event_delete', providerEventId: 'e2', body: { providerEventId: 'e2' } },
     ]);
@@ -520,33 +583,121 @@ describe('freshness rules: details', () => {
   });
 
   it('decideEvent: revision then hash; deletion only by marker; reinstate only by a newer revision', () => {
-    const s = { contentHash: 'h', providerUpdatedAt: '2026-06-30T23:00:00+00:00', deleted: false };
-    expect(decideEvent(undefined, { contentHash: 'h', providerUpdatedAt: null }, false)).toBe(
+    const s = {
+      contentHash: 'h',
+      providerUpdatedAt: '2026-06-30T23:00:00+00:00',
+      deleted: false,
+      deletedRevisionAt: null,
+    };
+    expect(decideEvent(undefined, { contentHash: 'h', providerUpdatedAt: null }, null)).toBe(
       'insert',
     );
     expect(
-      decideEvent(s, { contentHash: 'h', providerUpdatedAt: '2026-06-30T23:00:00+00:00' }, false),
+      decideEvent(s, { contentHash: 'h', providerUpdatedAt: '2026-06-30T23:00:00+00:00' }, null),
     ).toBe('unchanged');
     expect(
-      decideEvent(s, { contentHash: 'x', providerUpdatedAt: '2026-06-30T23:00:00+00:00' }, false),
+      decideEvent(s, { contentHash: 'x', providerUpdatedAt: '2026-06-30T23:00:00+00:00' }, null),
     ).toBe('update'); // equal updated, body differs: correction
-    expect(decideEvent(s, { contentHash: 'x', providerUpdatedAt: null }, false)).toBe('update'); // missing updated: hash decides
+    expect(decideEvent(s, { contentHash: 'x', providerUpdatedAt: null }, null)).toBe('update'); // missing updated: hash decides
     expect(
-      decideEvent(s, { contentHash: 'x', providerUpdatedAt: '2026-06-30T22:59:00+00:00' }, false),
+      decideEvent(s, { contentHash: 'x', providerUpdatedAt: '2026-06-30T22:59:00+00:00' }, null),
     ).toBe('ignore_older');
     expect(
-      decideEvent(s, { contentHash: 'h', providerUpdatedAt: '2026-06-30T23:01:00+00:00' }, false),
-    ).toBe('unchanged'); // newer but identical
-    expect(decideEvent(s, null, true)).toBe('delete');
-    expect(decideEvent(undefined, null, true)).toBe('ignore_missing');
-    const del = { ...s, deleted: true };
-    expect(decideEvent(del, null, true)).toBe('unchanged');
+      decideEvent(s, { contentHash: 'h', providerUpdatedAt: '2026-06-30T23:01:00+00:00' }, null),
+    ).toBe('touch'); // newer but identical: revision-only update, no change row
+    expect(decideEvent(s, null, { updatedAt: null })).toBe('delete');
+    expect(decideEvent(undefined, null, { updatedAt: null })).toBe('ignore_missing');
+    const del = { ...s, deleted: true, deletedRevisionAt: null };
+    expect(decideEvent(del, null, { updatedAt: null })).toBe('unchanged');
     expect(
-      decideEvent(del, { contentHash: 'h', providerUpdatedAt: '2026-06-30T23:00:00+00:00' }, false),
+      decideEvent(del, { contentHash: 'h', providerUpdatedAt: '2026-06-30T23:00:00+00:00' }, null),
     ).toBe('unchanged');
     expect(
-      decideEvent(del, { contentHash: 'h', providerUpdatedAt: '2026-06-30T23:05:00+00:00' }, false),
+      decideEvent(del, { contentHash: 'h', providerUpdatedAt: '2026-06-30T23:05:00+00:00' }, null),
     ).toBe('reinstate');
+  });
+
+  it('deletion revisions: an older marker is ignored, a marker without one is applied, reinstatement needs a newer revision than the deletion, none on either side is sticky', () => {
+    const T1 = '2026-06-30T23:00:00+00:00';
+    const T2 = '2026-06-30T23:05:00+00:00';
+    const T3 = '2026-06-30T23:10:00+00:00';
+    const live = {
+      contentHash: 'h',
+      providerUpdatedAt: T2,
+      deleted: false,
+      deletedRevisionAt: null,
+    };
+    expect(decideEvent(live, null, { updatedAt: T1 })).toBe('ignore_older_deletion');
+    expect(decideEvent(live, null, { updatedAt: T2 })).toBe('delete'); // equal: explicit statement wins
+    expect(decideEvent(live, null, { updatedAt: T3 })).toBe('delete');
+    expect(decideEvent(live, null, { updatedAt: null })).toBe('delete'); // no revision: applied
+    const noRev = { ...live, providerUpdatedAt: null };
+    expect(decideEvent(noRev, null, { updatedAt: T1 })).toBe('delete');
+    // deleted by a marker with revision T3: only an incoming newer than T3 reinstates
+    const deletedAtT3 = { ...live, deleted: true, deletedRevisionAt: T3 };
+    expect(decideEvent(deletedAtT3, { contentHash: 'h', providerUpdatedAt: T3 }, null)).toBe(
+      'unchanged',
+    );
+    expect(
+      decideEvent(
+        deletedAtT3,
+        { contentHash: 'h', providerUpdatedAt: '2026-06-30T23:11:00+00:00' },
+        null,
+      ),
+    ).toBe('reinstate');
+    // deleted by a marker without revision: coalesce falls back to the event's own `updated` (T2)
+    const deletedNoRev = { ...live, deleted: true };
+    expect(decideEvent(deletedNoRev, { contentHash: 'h', providerUpdatedAt: T2 }, null)).toBe(
+      'unchanged',
+    );
+    expect(decideEvent(deletedNoRev, { contentHash: 'h', providerUpdatedAt: T3 }, null)).toBe(
+      'reinstate',
+    );
+    // neither side carries a revision: sticky (no special case for "incoming has one, stored has none")
+    const sticky = { ...noRev, deleted: true };
+    expect(decideEvent(sticky, { contentHash: 'h', providerUpdatedAt: null }, null)).toBe(
+      'unchanged',
+    );
+    expect(decideEvent(sticky, { contentHash: 'h', providerUpdatedAt: T3 }, null)).toBe(
+      'unchanged',
+    );
+    // through diffEvents the older marker is counted, not applied
+    const storedMap = new Map([['e1', live]]);
+    const d = diffEvents(storedMap, [], [{ providerEventId: 'e1', updatedAt: T1 }]);
+    expect(d.changes).toEqual([]);
+    expect(d.counts.ignoredOlderDeletions).toBe(1);
+    const d2 = diffEvents(storedMap, [], [{ providerEventId: 'e1', updatedAt: null }]);
+    expect(d2.deletions).toEqual([{ providerEventId: 'e1', updatedAt: null }]);
+  });
+
+  it('revision-only update: revision 12 with revision 10 body touches (no change); a later differing revision 11 is then older and ignored', () => {
+    const r10 = nev('a', { providerUpdatedAt: '2026-06-30T23:00:10+00:00' });
+    const first = diffEvents(new Map(), [r10], []);
+    const storedMap = new Map(
+      first.writes.map((w) => [
+        w.event.providerEventId,
+        {
+          contentHash: w.hash,
+          providerUpdatedAt: w.event.providerUpdatedAt,
+          deleted: false,
+          deletedRevisionAt: null,
+        },
+      ]),
+    );
+    const r12 = nev('a', { providerUpdatedAt: '2026-06-30T23:00:12+00:00' });
+    const touch = diffEvents(storedMap, [r12], []);
+    expect(touch.changes).toEqual([]);
+    expect(touch.touches.map((e) => e.providerUpdatedAt)).toEqual(['2026-06-30T23:00:12+00:00']);
+    expect(touch.counts).toMatchObject({ touched: 1, updated: 0, unchanged: 0 });
+    // the store advanced to 12; revision 11 with a different body is older
+    const s = storedMap.get('a');
+    if (!s) throw new Error('missing');
+    storedMap.set('a', { ...s, providerUpdatedAt: '2026-06-30T23:00:12+00:00' });
+    const r11 = nev('a', { providerUpdatedAt: '2026-06-30T23:00:11+00:00' });
+    r11.body = { ...r11.body, description: 'different' };
+    const older = diffEvents(storedMap, [r11], []);
+    expect(older.changes).toEqual([]);
+    expect(older.counts.ignoredOlder).toBe(1);
   });
 
   it('diffEvents: the same batch twice is empty; last duplicate in a batch wins; a marker overrides a body in the same batch', () => {
@@ -556,11 +707,16 @@ describe('freshness rules: details', () => {
     const storedMap = new Map(
       first.writes.map((w) => [
         w.event.providerEventId,
-        { contentHash: w.hash, providerUpdatedAt: w.event.providerUpdatedAt, deleted: false },
+        {
+          contentHash: w.hash,
+          providerUpdatedAt: w.event.providerUpdatedAt,
+          deleted: false,
+          deletedRevisionAt: null,
+        },
       ]),
     );
     expect(diffEvents(storedMap, [a], []).changes).toEqual([]);
-    const withMarker = diffEvents(storedMap, [a], ['a']);
+    const withMarker = diffEvents(storedMap, [a], [{ providerEventId: 'a', updatedAt: null }]);
     expect(withMarker.changes.map((c) => c.type)).toEqual(['event_delete']);
   });
 });

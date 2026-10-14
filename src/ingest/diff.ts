@@ -1,13 +1,17 @@
 import { contentHash } from '../model/content-hash.js';
 import type { PendingChange } from '../model/game-change.js';
 import { decideEvent, type EventAction, type StoredEventRevision } from './freshness.js';
-import type { NormalizedEvent } from './types.js';
+import type { DeletionMarker, NormalizedEvent } from './types.js';
 
 export interface EventDiffCounts {
   inserted: number;
   updated: number;
+  /** Revision-only updates: provider_updated_at advanced, no change row. */
+  touched: number;
   deleted: number;
   ignoredOlder: number;
+  /** Explicit markers older than the stored event's revision. */
+  ignoredOlderDeletions: number;
   unchanged: number;
 }
 
@@ -21,43 +25,49 @@ export interface EventDiff {
   /** Durable changes in document order: inserts/updates first, then explicit deletions. */
   changes: PendingChange[];
   writes: EventWrite[];
-  /** Provider event ids to soft-delete (explicit markers only). */
-  deletions: string[];
+  /** Revision-only updates (newer `updated`, same body): no change row, no seq. */
+  touches: NormalizedEvent[];
+  /** Markers to apply as soft-deletes, with the marker's own revision. */
+  deletions: DeletionMarker[];
   counts: EventDiffCounts;
 }
 
 /**
  * Pure per-entity reconciliation of one batch against stored play state
  * (plan §4 rule 3). Absence from the batch never deletes; only
- * `deletedEventIds` (an explicit provider marker) does. Applying the same
+ * `deletedEvents` (an explicit provider marker) does. Applying the same
  * batch twice yields an empty diff.
  */
 export function diffEvents(
   stored: Map<string, StoredEventRevision>,
   events: NormalizedEvent[],
-  deletedEventIds: string[],
+  deletedEvents: DeletionMarker[],
 ): EventDiff {
   const counts: EventDiffCounts = {
     inserted: 0,
     updated: 0,
+    touched: 0,
     deleted: 0,
     ignoredOlder: 0,
+    ignoredOlderDeletions: 0,
     unchanged: 0,
   };
   const changes: PendingChange[] = [];
   const writes: EventWrite[] = [];
-  const deletions: string[] = [];
-  const deletedSet = new Set(deletedEventIds);
+  const touches: NormalizedEvent[] = [];
+  const deletions: DeletionMarker[] = [];
+  const markers = new Map<string, DeletionMarker>();
+  for (const d of deletedEvents) markers.set(d.providerEventId, d); // last marker in the batch wins
 
   const byId = new Map<string, NormalizedEvent>();
   for (const ev of events) byId.set(ev.providerEventId, ev); // last occurrence in the batch wins
   for (const ev of byId.values()) {
-    if (deletedSet.has(ev.providerEventId)) continue; // the marker is authoritative
+    if (markers.has(ev.providerEventId)) continue; // the marker is authoritative
     const hash = contentHash(ev.body);
     const action = decideEvent(
       stored.get(ev.providerEventId),
       { contentHash: hash, providerUpdatedAt: ev.providerUpdatedAt },
-      false,
+      null,
     );
     switch (action) {
       case 'insert':
@@ -71,6 +81,10 @@ export function diffEvents(
         writes.push({ action, event: ev, hash });
         changes.push({ type: 'event_update', providerEventId: ev.providerEventId, body: ev.body });
         break;
+      case 'touch':
+        counts.touched++;
+        touches.push(ev);
+        break;
       case 'ignore_older':
         counts.ignoredOlder++;
         break;
@@ -78,12 +92,16 @@ export function diffEvents(
         counts.unchanged++;
     }
   }
-  for (const id of deletedSet) {
-    if (decideEvent(stored.get(id), null, true) === 'delete') {
+  for (const marker of markers.values()) {
+    const id = marker.providerEventId;
+    const action = decideEvent(stored.get(id), null, { updatedAt: marker.updatedAt });
+    if (action === 'delete') {
       counts.deleted++;
-      deletions.push(id);
+      deletions.push(marker);
       changes.push({ type: 'event_delete', providerEventId: id, body: { providerEventId: id } });
+    } else if (action === 'ignore_older_deletion') {
+      counts.ignoredOlderDeletions++;
     }
   }
-  return { changes, writes, deletions, counts };
+  return { changes, writes, touches, deletions, counts };
 }

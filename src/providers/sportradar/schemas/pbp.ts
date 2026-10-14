@@ -99,8 +99,14 @@ export const PbpDocumentSchema = z
     home: z.object(GameHeaderTeamFields).loose(),
     away: z.object(GameHeaderTeamFields).loose(),
     periods: z.array(PbpPeriodSchema).default([]),
-    /** Explicit deletion markers. Absence from `periods[].events` never deletes. */
-    deleted_events: z.array(z.object({ id: z.string() }).loose()).optional(),
+    /**
+     * Explicit deletion markers. Absence from `periods[].events` never deletes.
+     * `updated` is the marker's own revision when the feed carries one (the
+     * recorded WNBA simulation carries only `id`).
+     */
+    deleted_events: z
+      .array(z.object({ id: z.string(), updated: z.string().optional() }).loose())
+      .optional(),
   })
   .loose();
 export type PbpDocument = z.infer<typeof PbpDocumentSchema>;

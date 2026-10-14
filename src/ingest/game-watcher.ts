@@ -116,7 +116,7 @@ export class GameWatcher {
     if (
       !this.generationOpen &&
       nd.batch.events.length === 0 &&
-      nd.batch.deletedEventIds.length === 0
+      nd.batch.deletedEvents.length === 0
     ) {
       this.skipped++;
       this.deps.log.info(
@@ -140,7 +140,7 @@ export class GameWatcher {
       this.deps.log.warn({ feed, reason: result.reason, detail: result.detail, status }, 'stale');
     } else {
       this.applied += result.changes.length;
-      if (nd.batch.events.length > 0 || nd.batch.deletedEventIds.length > 0)
+      if (nd.batch.events.length > 0 || nd.batch.deletedEvents.length > 0)
         this.generationOpen = true;
       if (nd.gameView?.status && result.gameLevel === 'write') this.lastStatus = nd.gameView.status;
       this.deps.log.info(

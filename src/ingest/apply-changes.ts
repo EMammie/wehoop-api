@@ -45,8 +45,12 @@ export interface ApplyDeps {
 export interface ApplyCounts {
   inserted: number;
   updated: number;
+  /** Revision-only updates (newer `updated`, same body): no change row. */
+  touched: number;
   deleted: number;
   ignoredOlder: number;
+  /** Explicit deletion markers older than the stored event's revision. */
+  ignoredOlderDeletions: number;
   unchanged: number;
 }
 
@@ -92,6 +96,7 @@ interface StoredEventRow {
   providerEventId: string;
   contentHash: string;
   deletedAt: Date | null;
+  deletedRevisionAt: Date | null;
   providerUpdatedAt: Date | null;
   periodSequence: number | null;
   providerSequence: string | null;
@@ -202,7 +207,8 @@ export async function applyChanges(
     // 3 (load). Current play state; rule 2c needs positions, rule 3 needs revisions.
     const storedRows = await tx<StoredEventRow[]>`
       select id, provider_event_id as "providerEventId", content_hash as "contentHash",
-             deleted_at as "deletedAt", provider_updated_at as "providerUpdatedAt",
+             deleted_at as "deletedAt", deleted_revision_at as "deletedRevisionAt",
+             provider_updated_at as "providerUpdatedAt",
              period_sequence as "periodSequence", provider_sequence::text as "providerSequence",
              provider_number as "providerNumber", wall_clock as "wallClock", event_type as "eventType"
       from public.play_events where game_id = ${gameId}`;
@@ -236,7 +242,7 @@ export async function applyChanges(
           providerNumber: e.providerNumber,
           wallClock: e.wallClock,
         })),
-        deletedEventIds: batch.deletedEventIds,
+        deletedEvents: batch.deletedEvents,
       },
       storedForGate,
     );
@@ -266,7 +272,7 @@ export async function applyChanges(
     );
     const incomingView = viewJson(observation.gameView, {
       eventCount: batch.events.length,
-      deletedEventIds: batch.deletedEventIds,
+      deletedEvents: batch.deletedEvents,
       newestPosition: newestPosition(
         batch.events.map((e) => ({
           periodSequence: e.periodSequence,
@@ -325,19 +331,20 @@ export async function applyChanges(
             contentHash: r.contentHash,
             providerUpdatedAt: iso(r.providerUpdatedAt),
             deleted: r.deletedAt !== null,
+            deletedRevisionAt: iso(r.deletedRevisionAt),
           },
         ]),
       ),
       batch.events,
-      batch.deletedEventIds,
+      batch.deletedEvents,
     );
     const changes: PendingChange[] = [...diff.changes];
     const counts: ApplyCounts = diff.counts;
     const eventWrites = diff.writes.map((w) => ({ action: w.action, ev: w.event, hash: w.hash }));
-    const deletions: StoredEventRow[] = [];
-    for (const id of diff.deletions) {
-      const s = stored.get(id);
-      if (s) deletions.push(s);
+    const deletions: Array<{ row: StoredEventRow; revision: string | null }> = [];
+    for (const marker of diff.deletions) {
+      const s = stored.get(marker.providerEventId);
+      if (s) deletions.push({ row: s, revision: marker.updatedAt });
     }
 
     // Game-level durable fields (status / score / period / line score).
@@ -453,6 +460,19 @@ export async function applyChanges(
       }
     }
 
+    // 5b. Revision-only updates: a newer `updated` with an identical body advances the stored
+    // revision (and the raw copy) so a later, differing, intermediate revision is seen as older.
+    // No change row, no seq.
+    for (const ev of diff.touches) {
+      const s = stored.get(ev.providerEventId);
+      if (!s) continue;
+      await tx`update public.play_events set provider_updated_at = ${ev.providerUpdatedAt}, updated_at = now()
+               where id = ${s.id}`;
+      await tx`insert into ingest.play_event_raw (play_event_id, raw, provider_updated_at)
+               values (${s.id}, ${tx.json(ev.raw as never)}, ${ev.providerUpdatedAt})
+               on conflict (play_event_id) do update set raw = excluded.raw, provider_updated_at = excluded.provider_updated_at`;
+    }
+
     // 6. Durable write.
     const n = changes.length;
     let firstSeq: number | null = null;
@@ -498,17 +518,20 @@ export async function applyChanges(
             provider_event_type = excluded.provider_event_type, team_id = excluded.team_id,
             home_points = excluded.home_points, away_points = excluded.away_points,
             payload = excluded.payload, content_hash = excluded.content_hash,
-            provider_updated_at = excluded.provider_updated_at, deleted_at = null
+            provider_updated_at = coalesce(excluded.provider_updated_at, play_events.provider_updated_at),
+            deleted_at = null, deleted_revision_at = null
           returning id`;
         if (!row) throw new Error('play_events upsert returned no row');
         playEventIds.set(w.ev.providerEventId, row.id);
         await tx`insert into ingest.play_event_raw (play_event_id, raw, provider_updated_at)
                  values (${row.id}, ${tx.json(w.ev.raw as never)}, ${w.ev.providerUpdatedAt})
-                 on conflict (play_event_id) do update set raw = excluded.raw, provider_updated_at = excluded.provider_updated_at`;
+                 on conflict (play_event_id) do update set raw = excluded.raw,
+                   provider_updated_at = coalesce(excluded.provider_updated_at, play_event_raw.provider_updated_at)`;
       }
       for (const d of deletions) {
-        await tx`update public.play_events set deleted_at = ${now()} where id = ${d.id}`;
-        playEventIds.set(d.providerEventId, d.id);
+        await tx`update public.play_events set deleted_at = ${now()}, deleted_revision_at = ${d.revision}, updated_at = now()
+                 where id = ${d.row.id}`;
+        playEventIds.set(d.row.providerEventId, d.row.id);
       }
       if (nextPeriods) {
         for (const p of nextPeriods) {

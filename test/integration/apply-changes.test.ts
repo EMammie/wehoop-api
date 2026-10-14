@@ -161,7 +161,7 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     const before = await counts(db, gameId);
     const del: NormalizedDocument = {
       ...doc,
-      batch: { events: [], deletedEventIds: [providerEventId], teamStats: [] },
+      batch: { events: [], deletedEvents: [{ providerEventId, updatedAt: null }], teamStats: [] },
       gameView: null,
       isComplete: false,
     };
@@ -178,6 +178,132 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     // absence of the deleted event from a later full document never deletes anything else
     const c2 = await counts(db, gameId);
     expect(c2.deleted).toBe(1);
+  });
+
+  it('revision-only update: a newer updated with the same body advances provider_updated_at without a change; a missing updated never nulls the stored revision', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    await apply(deps, gameId, nd, observation(run, nd, T0));
+    const before = await counts(db, gameId);
+    const target = nd.batch.events[4];
+    if (!target?.providerUpdatedAt) throw new Error('fixture event has no updated');
+    const rev = (plusSeconds: number) =>
+      new Date(Date.parse(target.providerUpdatedAt ?? '') + plusSeconds * 1000).toISOString();
+    const revised = (updatedAt: string | null, ev = target): NormalizedDocument => ({
+      ...nd,
+      batch: { ...nd.batch, events: [{ ...ev, providerUpdatedAt: updatedAt }] },
+      gameView: null,
+      isComplete: false,
+    });
+    // revision +12 s, identical body: touch
+    const touch = await apply(deps, gameId, revised(rev(12)), observation(run, nd, later(1)));
+    expect(touch.outcome === 'applied' && touch.changes).toEqual([]);
+    expect(touch.outcome === 'applied' && touch.counts.touched).toBe(1);
+    const row = async () =>
+      (
+        await db<{ providerUpdatedAt: Date; payload: { description?: string }; rawRev: Date }[]>`
+          select p.provider_updated_at as "providerUpdatedAt", p.payload, r.provider_updated_at as "rawRev"
+          from public.play_events p join ingest.play_event_raw r on r.play_event_id = p.id
+          where p.game_id = ${gameId} and p.provider_event_id = ${target.providerEventId}`
+      )[0];
+    const r1 = await row();
+    expect(r1?.providerUpdatedAt.toISOString()).toBe(rev(12));
+    expect(r1?.rawRev.toISOString()).toBe(rev(12));
+    expect((await counts(db, gameId)).changes).toBe(before.changes);
+    // revision +11 s with a different body: older than the stored 12, ignored, body unchanged
+    const { doc } = withCorrection(nd, 4, false);
+    const corrected = doc.batch.events[4];
+    if (!corrected) throw new Error('missing');
+    const older = await apply(
+      deps,
+      gameId,
+      revised(rev(11), corrected),
+      observation(run, nd, later(2)),
+    );
+    expect(older.outcome === 'applied' && older.changes).toEqual([]);
+    expect(older.outcome === 'applied' && older.counts.ignoredOlder).toBe(1);
+    expect((await row())?.payload.description).not.toMatch(/\[corrected\]/);
+    // a differing body without any `updated`: hash decides (update) and the stored revision stays 12
+    const noRev = await apply(
+      deps,
+      gameId,
+      revised(null, corrected),
+      observation(run, nd, later(3)),
+    );
+    expect(noRev.outcome === 'applied' && noRev.changes.map((c) => c.type)).toEqual([
+      'event_update',
+    ]);
+    const r3 = await row();
+    expect(r3?.payload.description).toMatch(/\[corrected\]/);
+    expect(r3?.providerUpdatedAt.toISOString()).toBe(rev(12));
+  });
+
+  it('deletion revision: an older marker is ignored (counted); a marker without one deletes with deleted_revision_at null; reinstatement needs a newer revision than the deletion', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    await apply(deps, gameId, nd, observation(run, nd, T0));
+    const target = nd.batch.events[6];
+    if (!target?.providerUpdatedAt) throw new Error('fixture event has no updated');
+    const id = target.providerEventId;
+    const rev = (plusSeconds: number) =>
+      new Date(Date.parse(target.providerUpdatedAt ?? '') + plusSeconds * 1000).toISOString();
+    const markerDoc = (updatedAt: string | null): NormalizedDocument => ({
+      ...nd,
+      batch: { events: [], deletedEvents: [{ providerEventId: id, updatedAt }], teamStats: [] },
+      gameView: null,
+      isComplete: false,
+    });
+    const row = async () =>
+      (
+        await db<{ deletedAt: Date | null; deletedRevisionAt: Date | null }[]>`
+          select deleted_at as "deletedAt", deleted_revision_at as "deletedRevisionAt"
+          from public.play_events where game_id = ${gameId} and provider_event_id = ${id}`
+      )[0];
+    // marker older than the event's own revision: ignored
+    const olderMarker = await apply(
+      deps,
+      gameId,
+      markerDoc(rev(-5)),
+      observation(run, nd, later(1)),
+    );
+    expect(olderMarker.outcome === 'applied' && olderMarker.changes).toEqual([]);
+    expect(olderMarker.outcome === 'applied' && olderMarker.counts.ignoredOlderDeletions).toBe(1);
+    expect((await row())?.deletedAt).toBeNull();
+    // marker without a revision (the recorded fixture's shape): applied, revision recorded as null
+    const del = await apply(deps, gameId, markerDoc(null), observation(run, nd, later(2)));
+    expect(del.outcome === 'applied' && del.changes.map((c) => c.type)).toEqual(['event_delete']);
+    const afterDel = await row();
+    expect(afterDel?.deletedAt).not.toBeNull();
+    expect(afterDel?.deletedRevisionAt).toBeNull();
+    // the event's own revision again: not reinstated (not newer than coalesce(null, updated))
+    const same: NormalizedDocument = {
+      ...nd,
+      batch: { ...nd.batch, events: [target] },
+      gameView: null,
+      isComplete: false,
+    };
+    expect((await apply(deps, gameId, same, observation(run, nd, later(3)))).changes).toEqual([]);
+    // a newer revision reinstates and clears deleted_revision_at
+    const newer: NormalizedDocument = {
+      ...same,
+      batch: { ...same.batch, events: [{ ...target, providerUpdatedAt: rev(10) }] },
+    };
+    const back = await apply(deps, gameId, newer, observation(run, nd, later(4)));
+    expect(back.outcome === 'applied' && back.changes.map((c) => c.type)).toEqual(['event_insert']);
+    expect(await row()).toEqual({ deletedAt: null, deletedRevisionAt: null });
+    // a marker carrying revision +20 deletes again and is recorded; +15 (older than the event's +10? no: newer) ...
+    const del2 = await apply(deps, gameId, markerDoc(rev(20)), observation(run, nd, later(5)));
+    expect(del2.outcome === 'applied' && del2.changes.map((c) => c.type)).toEqual(['event_delete']);
+    expect((await row())?.deletedRevisionAt?.toISOString()).toBe(rev(20));
+    // now an incoming revision +15 is newer than the event (+10) but not than the deletion (+20): stays deleted
+    const r15: NormalizedDocument = {
+      ...same,
+      batch: { ...same.batch, events: [{ ...target, providerUpdatedAt: rev(15) }] },
+    };
+    expect((await apply(deps, gameId, r15, observation(run, nd, later(6)))).changes).toEqual([]);
+    expect((await row())?.deletedAt).not.toBeNull();
   });
 
   it('no regression: a new generation replaying from the start is stale (run_regresses_state), score and watch_run_id unchanged', async () => {

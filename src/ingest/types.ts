@@ -53,10 +53,17 @@ export interface NormalizedTeamStats {
   stats: TeamStats;
 }
 
+/** An explicit provider deletion marker (`deleted_events[]` entry, push `operation=delete`). */
+export interface DeletionMarker {
+  providerEventId: string;
+  /** The marker's own revision (`updated`), ISO; null when the feed carries none. */
+  updatedAt: string | null;
+}
+
 export interface NormalizedBatch {
   events: NormalizedEvent[];
-  /** Explicit provider deletion markers (`deleted_events[]`, push `operation=delete`). */
-  deletedEventIds: string[];
+  /** Explicit provider deletion markers. Absence from `events` never deletes. */
+  deletedEvents: DeletionMarker[];
   teamStats: NormalizedTeamStats[];
 }
 

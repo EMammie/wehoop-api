@@ -1,5 +1,5 @@
 import type { GameStatus } from '../model/live-event.js';
-import type { GameView } from './types.js';
+import type { DeletionMarker, GameView } from './types.js';
 
 /**
  * Freshness policy (plan §4, rev 4.2). Pure functions; applyChanges calls them
@@ -110,7 +110,7 @@ export interface BatchInput {
   gameView: GameView | null;
   /** Positions of the incoming document's events (only meaningful when isComplete). */
   eventPositions: EventPosition[];
-  deletedEventIds: string[];
+  deletedEvents: DeletionMarker[];
 }
 
 export type StaleReason = 'older_run' | 'run_regresses_state' | 'superseded_observation';
@@ -191,7 +191,7 @@ export function decideBatch(
       }
     }
     if (input.isComplete) {
-      const deleted = new Set(input.deletedEventIds);
+      const deleted = new Set(input.deletedEvents.map((d) => d.providerEventId));
       const storedNewest = newestPosition(
         storedEvents.filter((e) => !e.deleted && !deleted.has(e.providerEventId)),
       );
@@ -254,6 +254,8 @@ export interface StoredEventRevision {
   contentHash: string;
   providerUpdatedAt: string | null;
   deleted: boolean;
+  /** The revision of the marker that deleted it (play_events.deleted_revision_at); null if none. */
+  deletedRevisionAt: string | null;
 }
 
 export interface IncomingEventRevision {
@@ -264,9 +266,13 @@ export interface IncomingEventRevision {
 export type EventAction =
   | 'insert'
   | 'update'
+  /** Newer `updated`, identical body: advance provider_updated_at only, no change row. */
+  | 'touch'
   | 'delete'
   | 'reinstate'
   | 'ignore_older'
+  /** Explicit marker whose revision is older than the stored event's `updated`. */
+  | 'ignore_older_deletion'
   | 'ignore_missing'
   | 'unchanged';
 
@@ -279,30 +285,39 @@ function newer(a: string | null, b: string | null): boolean | null {
 }
 
 /**
- * Rule 3 for one event. `explicitlyDeleted` is the provider marker; absence
- * from a document never reaches this function as a deletion.
+ * Rule 3 for one event (plan §4 rev 4.3). `deletion` is the explicit provider
+ * marker with its own revision; absence from a document never reaches this
+ * function as a deletion.
+ *   - marker, revision older than the stored `updated`  -> ignore_older_deletion
+ *   - marker without a revision (or stored has none)    -> delete (explicit statement)
+ *   - deleted row: reinstated only by an incoming `updated` newer than
+ *     coalesce(deletedRevisionAt, providerUpdatedAt); with no revision on either
+ *     side the deletion is sticky
+ *   - newer `updated`, identical body                    -> touch (revision-only)
+ *   - older `updated`                                    -> ignore_older
+ *   - otherwise content decides: a differing body is a correction (update)
  */
 export function decideEvent(
   stored: StoredEventRevision | undefined,
   incoming: IncomingEventRevision | null,
-  explicitlyDeleted: boolean,
+  deletion: { updatedAt: string | null } | null,
 ): EventAction {
-  if (explicitlyDeleted) {
+  if (deletion) {
     if (!stored) return 'ignore_missing';
-    return stored.deleted ? 'unchanged' : 'delete';
+    if (stored.deleted) return 'unchanged';
+    if (newer(stored.providerUpdatedAt, deletion.updatedAt) === true)
+      return 'ignore_older_deletion';
+    return 'delete';
   }
   if (!incoming) return 'unchanged';
   if (!stored) return 'insert';
   if (stored.deleted) {
-    // Reinstated only by a revision newer than the one that was deleted.
-    if (incoming.providerUpdatedAt !== null && stored.providerUpdatedAt === null)
-      return 'reinstate';
-    return newer(incoming.providerUpdatedAt, stored.providerUpdatedAt) === true
-      ? 'reinstate'
-      : 'unchanged';
+    const deletedAs = stored.deletedRevisionAt ?? stored.providerUpdatedAt;
+    return newer(incoming.providerUpdatedAt, deletedAs) === true ? 'reinstate' : 'unchanged';
   }
   const cmp = newer(incoming.providerUpdatedAt, stored.providerUpdatedAt);
   if (cmp === false) return 'ignore_older';
-  // Newer or equal/missing `updated`: content decides; a differing body is a correction.
-  return incoming.contentHash === stored.contentHash ? 'unchanged' : 'update';
+  if (incoming.contentHash === stored.contentHash) return cmp === true ? 'touch' : 'unchanged';
+  // Newer or equal/missing `updated` with a differing body: a correction.
+  return 'update';
 }

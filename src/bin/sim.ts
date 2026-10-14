@@ -227,9 +227,9 @@ async function main() {
         type: pe.periodType ?? 'quarter',
         sequence: pe.periodSequence ?? 0,
       };
-      batch = { events: [normalizeEvent(mutated, period)], deletedEventIds: [], teamStats: [] };
+      batch = { events: [normalizeEvent(mutated, period)], deletedEvents: [], teamStats: [] };
     } else {
-      batch = { events: [], deletedEventIds: [providerEventId], teamStats: [] };
+      batch = { events: [], deletedEvents: [{ providerEventId, updatedAt: null }], teamStats: [] };
     }
     const result = await applyChanges({ db, log }, g.id, batch, {
       source: 'fixture',

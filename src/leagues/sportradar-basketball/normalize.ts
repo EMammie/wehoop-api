@@ -363,7 +363,10 @@ export function normalizePbpDocument(doc: PbpDocument): NormalizedDocument {
     isComplete: true,
     batch: {
       events,
-      deletedEventIds: (doc.deleted_events ?? []).map((d) => d.id),
+      deletedEvents: (doc.deleted_events ?? []).map((d) => ({
+        providerEventId: d.id,
+        updatedAt: d.updated ?? null,
+      })),
       teamStats: [],
     },
   };
@@ -443,7 +446,7 @@ export function normalizeSummaryDocument(doc: SummaryDocument): NormalizedDocume
     teams: teamsOf(doc),
     gameView: gameViewOf(doc, periods),
     isComplete: false,
-    batch: { events: [], deletedEventIds: [], teamStats },
+    batch: { events: [], deletedEvents: [], teamStats },
   };
 }
 
@@ -454,6 +457,6 @@ export function normalizeBoxscoreDocument(doc: BoxscoreDocument): NormalizedDocu
     teams: teamsOf(doc),
     gameView: gameViewOf(doc, periods),
     isComplete: false,
-    batch: { events: [], deletedEventIds: [], teamStats: [] },
+    batch: { events: [], deletedEvents: [], teamStats: [] },
   };
 }

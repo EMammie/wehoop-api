@@ -32,9 +32,9 @@ describe('full recorded game (closed documents)', () => {
   });
 
   it('carries the provider deletion markers (deleted_events[]) and never lists them as events', () => {
-    expect(closed.batch.deletedEventIds.length).toBeGreaterThan(0);
+    expect(closed.batch.deletedEvents.length).toBeGreaterThan(0);
     const ids = new Set(closed.batch.events.map((e) => e.providerEventId));
-    for (const d of closed.batch.deletedEventIds) expect(ids.has(d)).toBe(false);
+    for (const d of closed.batch.deletedEvents) expect(ids.has(d.providerEventId)).toBe(false);
     // a stored copy of a deleted event yields exactly one event_delete; absent events are untouched
     const stored = new Map(
       closed.batch.events.map((e) => [
@@ -43,12 +43,18 @@ describe('full recorded game (closed documents)', () => {
           contentHash: contentHash(e.body),
           providerUpdatedAt: e.providerUpdatedAt,
           deleted: false,
+          deletedRevisionAt: null,
         },
       ]),
     );
-    const victim = closed.batch.deletedEventIds[0] as string;
-    stored.set(victim, { contentHash: 'x', providerUpdatedAt: null, deleted: false });
-    const diff = diffEvents(stored, closed.batch.events, closed.batch.deletedEventIds);
+    const victim = closed.batch.deletedEvents[0]?.providerEventId as string;
+    stored.set(victim, {
+      contentHash: 'x',
+      providerUpdatedAt: null,
+      deleted: false,
+      deletedRevisionAt: null,
+    });
+    const diff = diffEvents(stored, closed.batch.events, closed.batch.deletedEvents);
     expect(diff.changes).toEqual([
       { type: 'event_delete', providerEventId: victim, body: { providerEventId: victim } },
     ]);
@@ -102,7 +108,7 @@ describe('full recorded game (closed documents)', () => {
         isComplete: true,
         gameView: closed.gameView,
         eventPositions: pos(closed),
-        deletedEventIds: closed.batch.deletedEventIds,
+        deletedEvents: closed.batch.deletedEvents,
       },
       storedEvents,
     );
@@ -130,7 +136,7 @@ describe('full recorded game (closed documents)', () => {
         isComplete: true,
         gameView: half.gameView,
         eventPositions: pos(half),
-        deletedEventIds: [],
+        deletedEvents: [],
       },
       closedEvents,
     );

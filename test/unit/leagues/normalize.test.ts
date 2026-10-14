@@ -71,10 +71,13 @@ describe('Sportradar basketball normalizer', () => {
   it('reads an explicit deleted_events[] marker and never infers deletion from absence', () => {
     const withMarker = PbpDocumentSchema.parse({
       ...(fixture(`${R}-pbp-q1.json`) as object),
-      deleted_events: [{ id: 'gone' }],
+      deleted_events: [{ id: 'gone' }, { id: 'gone-rev', updated: '2026-06-30T23:40:00+00:00' }],
     });
-    expect(wnbaAdapter.normalizePbp(withMarker).batch.deletedEventIds).toEqual(['gone']);
-    expect(nd.batch.deletedEventIds).toEqual([]);
+    expect(wnbaAdapter.normalizePbp(withMarker).batch.deletedEvents).toEqual([
+      { providerEventId: 'gone', updatedAt: null },
+      { providerEventId: 'gone-rev', updatedAt: '2026-06-30T23:40:00+00:00' },
+    ]);
+    expect(nd.batch.deletedEvents).toEqual([]);
   });
 
   it('normalizes summary into gameView + team stats (no events) and boxscore into a line score', () => {
