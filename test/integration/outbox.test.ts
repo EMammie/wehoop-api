@@ -143,6 +143,47 @@ describe('outbox publisher', () => {
     expect(await pendingFor(ga.gameId)).toMatchObject({ pending: 0, dead: 0 });
   });
 
+  it('429 is retryable: two rate-limited attempts then success publishes every row, counts attempts, honours Retry-After, never dead-letters', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    await apply(deps, gameId, nd, observation(run, nd, T0));
+    const total = (await counts(db, gameId)).changes;
+    const transport = new MemoryTransport();
+    let calls = 0;
+    transport.rateLimitIf = (channel) => {
+      if (channel !== gameChannel(gameId)) return false;
+      calls++;
+      return calls <= 2 ? 60 : false; // Retry-After 60 ms, twice (the publisher floors it at 50 ms)
+    };
+    const publisher = new OutboxPublisher({ db, log: silentLog, transport, maxAttempts: 2 });
+    const r1 = await publisher.drainOnce();
+    expect(r1).toMatchObject({ published: 0, failed: 0 });
+    expect(r1.rateLimited).toBeGreaterThan(0);
+    let p = await pendingFor(gameId);
+    expect(p).toMatchObject({ published: 0, dead: 0, maxAttempts: 1 });
+    // not publishable until Retry-After elapses
+    expect((await publisher.drainOnce()).published).toBe(0);
+    await new Promise((r) => setTimeout(r, 90));
+    const r2 = await publisher.drainOnce();
+    expect(r2.published).toBe(0);
+    expect(r2.rateLimited).toBeGreaterThan(0);
+    p = await pendingFor(gameId);
+    expect(p).toMatchObject({ dead: 0, maxAttempts: 2 }); // attempts >= maxAttempts, yet NOT dead: 429 alone never dead-letters
+    // the bounded shutdown drain waits out the backoff and finishes
+    const left = await publisher.drainUntilEmpty(5_000);
+    expect(left).toMatchObject({ pending: 0, dead: 0 });
+    expect(await pendingFor(gameId)).toMatchObject({ pending: 0, published: total, dead: 0 });
+    const seqs = transport.published
+      .filter((x) => x.channel === gameChannel(gameId))
+      .map((x) => (x.message.event === 'change' ? x.message.payload.seq : -1));
+    expect(seqs).toEqual(seqs.map((_s, i) => i + 1));
+    // with nothing pending the shutdown drain returns at once
+    const started = Date.now();
+    expect((await publisher.drainUntilEmpty(60_000)).pending).toBe(0);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
   it('crash point (c): a fault after the HTTP publish and before published_at re-sends the same ids on restart (at-least-once)', async () => {
     const nd = summaryQ1();
     const { gameId } = await seedGame(db, nd);

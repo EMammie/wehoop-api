@@ -3,7 +3,7 @@ import type { SessionDb } from '../db/session-client.js';
 import type { FaultInjector } from '../ingest/fault.js';
 import type { Logger } from '../logger.js';
 import { type GameChange, gameChangeFromRow } from '../model/game-change.js';
-import { gameChannel, type LiveTransport } from './transport.js';
+import { gameChannel, type LiveTransport, TransportRateLimitError } from './transport.js';
 
 interface PendingRow {
   changeId: string;
@@ -18,7 +18,10 @@ interface PendingRow {
 
 export interface DrainResult {
   published: number;
+  /** Rows whose publish threw a non-rate-limit error (attempt counted, may dead-letter). */
   failed: number;
+  /** Rows deferred by a 429 (attempt counted, backoff from Retry-After or 1 s doubling; never dead). */
+  rateLimited: number;
   /**
    * Channels that had pending rows but whose head (lowest unpublished, non-dead
    * seq) was not publishable now (`next_attempt_at` in the future). They
@@ -68,13 +71,14 @@ export class OutboxPublisher {
       return this.draining;
     }
     this.draining = (async () => {
-      const total: DrainResult = { published: 0, failed: 0, skippedChannels: 0 };
+      const total: DrainResult = { published: 0, failed: 0, rateLimited: 0, skippedChannels: 0 };
       try {
         for (;;) {
           this.wanted = false;
           const r = await this.drainOnce();
           total.published += r.published;
           total.failed += r.failed;
+          total.rateLimited += r.rateLimited;
           total.skippedChannels += r.skippedChannels;
           if (r.published === 0 && !this.wanted) break;
         }
@@ -118,7 +122,12 @@ export class OutboxPublisher {
       join public.game_changes c on c.id = p.change_id
       order by p.rn, p.game_id, p.seq
       limit ${limit}`;
-    const result: DrainResult = { published: 0, failed: 0, skippedChannels: blocked?.n ?? 0 };
+    const result: DrainResult = {
+      published: 0,
+      failed: 0,
+      rateLimited: 0,
+      skippedChannels: blocked?.n ?? 0,
+    };
     if (result.skippedChannels > 0) {
       log.warn(
         { channels: result.skippedChannels },
@@ -169,9 +178,25 @@ export class OutboxPublisher {
             changes.map((c) => ({ event: 'change', payload: c })),
           );
         } catch (err) {
-          result.failed += chunk.length;
           const ids = chunk.map((r) => r.changeId);
           const message = (err as Error).message.slice(0, 500);
+          if (err instanceof TransportRateLimitError) {
+            // 429: retryable. Honour Retry-After, else 1 s doubling (capped at 5 min); never dead-letter.
+            result.rateLimited += chunk.length;
+            const retrySecs =
+              err.retryAfterMs === null ? null : Math.max(0.05, err.retryAfterMs / 1000);
+            await db`update ingest.broadcast_outbox set
+                       attempts = attempts + 1,
+                       last_error = ${message},
+                       next_attempt_at = now() + make_interval(secs => coalesce(${retrySecs}::float8, least(300, power(2, attempts))))
+                     where change_id = any(${ids})`;
+            log.warn(
+              { gameId, retryAfterMs: err.retryAfterMs, count: chunk.length },
+              'outbox publish rate limited (429); backing off',
+            );
+            break;
+          }
+          result.failed += chunk.length;
           await db`update ingest.broadcast_outbox set
                      attempts = attempts + 1,
                      last_error = ${message},
@@ -190,6 +215,39 @@ export class OutboxPublisher {
       }
     }
     return result;
+  }
+
+  /** Unpublished rows: how many are still live (non-dead), how many are dead, and the earliest retry. */
+  async pendingSummary(): Promise<{ pending: number; dead: number; nextAttemptAt: Date | null }> {
+    const [r] = await this.deps.db<{ pending: number; dead: number; nextAttemptAt: Date | null }[]>`
+      select count(*) filter (where dead_at is null)::int as pending,
+             count(dead_at)::int as dead,
+             min(next_attempt_at) filter (where dead_at is null) as "nextAttemptAt"
+      from ingest.broadcast_outbox where published_at is null`;
+    return r ?? { pending: 0, dead: 0, nextAttemptAt: null };
+  }
+
+  /**
+   * Shutdown drain: loop drain -> pendingSummary until nothing live is pending
+   * or `timeoutMs` elapses, sleeping until the earliest retry (max 1 s) between
+   * rounds. Returns immediately when nothing is pending.
+   */
+  async drainUntilEmpty(timeoutMs: number): Promise<{ pending: number; dead: number }> {
+    const started = Date.now();
+    for (;;) {
+      await this.drain();
+      const p = await this.pendingSummary();
+      if (p.pending === 0 || Date.now() - started >= timeoutMs) return p;
+      const wait = Math.min(
+        1000,
+        Math.max(50, (p.nextAttemptAt?.getTime() ?? Date.now()) - Date.now()),
+      );
+      this.deps.log.warn(
+        { pending: p.pending, dead: p.dead, retryInMs: wait },
+        'outbox not fully published; waiting for backoff before exit',
+      );
+      await new Promise((r) => setTimeout(r, wait));
+    }
   }
 
   /** Startup drain, LISTEN outbox as a wake-up hint, and a 30 s safety timer. */

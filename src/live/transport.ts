@@ -14,6 +14,23 @@ export interface LiveTransport {
   publish(channel: string, messages: LiveMessage[]): Promise<void>;
 }
 
+/**
+ * The transport was rate-limited (HTTP 429). Retryable: the publisher backs
+ * off (honouring `retryAfterMs` when the server gave one) and never
+ * dead-letters a row for rate limiting alone.
+ */
+export class TransportRateLimitError extends Error {
+  constructor(
+    readonly channel: string,
+    readonly retryAfterMs: number | null,
+  ) {
+    super(
+      `broadcast ${channel}: rate limited (429)${retryAfterMs === null ? '' : `, retry after ${retryAfterMs} ms`}`,
+    );
+    this.name = 'TransportRateLimitError';
+  }
+}
+
 export type ClientHandler = (msg: LiveMessage) => void;
 
 /**
@@ -26,10 +43,15 @@ export class MemoryTransport implements LiveTransport {
   private readonly handlers = new Map<string, Set<ClientHandler>>();
   dropIf: ((channel: string, msg: LiveMessage) => boolean) | null = null;
   failIf: ((channel: string, msgs: LiveMessage[]) => boolean) | null = null;
+  /** Returns the Retry-After to report (ms, or null for none) to simulate a 429; `false` = not limited. */
+  rateLimitIf: ((channel: string, msgs: LiveMessage[]) => number | null | false) | null = null;
 
   async publish(channel: string, messages: LiveMessage[]): Promise<void> {
     if (this.failIf?.(channel, messages))
       throw new Error('MemoryTransport: injected publish failure');
+    const limited = this.rateLimitIf?.(channel, messages);
+    if (limited !== undefined && limited !== false)
+      throw new TransportRateLimitError(channel, limited);
     for (const message of messages) {
       this.published.push({ channel, message });
       if (this.dropIf?.(channel, message)) continue;

@@ -1,5 +1,14 @@
 import type { Logger } from '../logger.js';
-import type { LiveMessage, LiveTransport } from './transport.js';
+import { type LiveMessage, type LiveTransport, TransportRateLimitError } from './transport.js';
+
+/** `Retry-After` is either delay-seconds or an HTTP date; null when absent or unparsable. */
+export function retryAfterMs(header: string | null, now: number = Date.now()): number | null {
+  if (!header) return null;
+  const secs = Number(header.trim());
+  if (Number.isFinite(secs) && secs >= 0) return Math.round(secs * 1000);
+  const at = Date.parse(header);
+  return Number.isNaN(at) ? null : Math.max(0, at - now);
+}
 
 /**
  * Publishes through Supabase Realtime's REST broadcast endpoint with the
@@ -37,6 +46,10 @@ export class SupabaseBroadcastTransport implements LiveTransport {
       }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 10_000),
     });
+    if (res.status === 429) {
+      await res.text().catch(() => '');
+      throw new TransportRateLimitError(channel, retryAfterMs(res.headers.get('retry-after')));
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`broadcast ${channel}: HTTP ${res.status} ${text.slice(0, 200)}`);

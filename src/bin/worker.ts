@@ -28,6 +28,11 @@ import { SimulationUrlResolver } from '../providers/sportradar/urls.js';
  *     [--max-polls N] [--record-to <file.jsonl>]
  *   pnpm dev:worker --mode sim --league wnba --replay-file <file.jsonl> [--pace 0]
  *   [--lock-wait 60]  seconds to wait for the single-ingester lock (a killed worker's lock lingers briefly)
+ *   [--drain-timeout 60]  seconds the final drain may wait for backing-off outbox rows before exiting
+ *
+ * Exit codes: 0 ok; 75 (EX_TEMPFAIL) replay finished but unpublished non-dead
+ * outbox rows remain after the final drain (a restart publishes them); 64 usage;
+ * 2 lock held elsewhere; 1 error.
  *
  * Holds the single-ingester advisory lock on a session-mode connection, drains
  * the outbox on start and on NOTIFY/30 s, sends pulses, and exits when the
@@ -52,6 +57,7 @@ async function main() {
       pace: { type: 'string', default: '0' },
       'max-docs': { type: 'string' },
       'lock-wait': { type: 'string', default: '60' },
+      'drain-timeout': { type: 'string', default: '60' },
     },
     strict: true,
   });
@@ -202,15 +208,18 @@ async function main() {
     },
   });
 
+  // A signal stops the loop; the normal tail (final drain, closing pulse, run end) still runs.
+  let stoppedBy: string | null = null;
+  let wakeIdle: (() => void) | null = null;
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
       stopRequested = true;
-      void (async () => {
-        await endRun(db, run.id, 'aborted', signal);
-        await shutdown(signal);
-      })();
+      stoppedBy = signal;
+      log.warn({ signal }, 'stop requested; finishing the in-flight document, then draining');
+      wakeIdle?.();
     });
   }
+  const drainTimeoutMs = Number(args['drain-timeout']) * 1000;
 
   let finalStatus: string | null = null;
   let replayedDocs: number | null = null;
@@ -246,11 +255,12 @@ async function main() {
       finalStatus = replay.status;
       replayedDocs = replay.docs;
     }
-    if (watcher.gameId) await pulse.sendOnce(watcher.gameId);
     pulse.stop();
-    const drained = await publisher.drain();
+    // Final drain (bounded), then the closing pulse so its latestSeq is published state.
+    const left = await publisher.drainUntilEmpty(drainTimeoutMs);
+    if (watcher.gameId) await pulse.sendOnce(watcher.gameId);
     publisher.stop();
-    await endRun(db, run.id, 'ok');
+    await endRun(db, run.id, stoppedBy ? 'aborted' : 'ok', stoppedBy ?? undefined);
     log.info(
       {
         runId: run.id,
@@ -260,19 +270,33 @@ async function main() {
         batches: watcher.batches,
         changes: watcher.applied,
         stale: watcher.stale,
-        drained,
+        unpublished: left,
+        stoppedBy,
       },
       'replay finished',
     );
-    if (untilClosed || args['max-polls'] || args['replay-file']) {
+    if (untilClosed || args['max-polls'] || args['replay-file'] || stoppedBy) {
       shuttingDown = true;
       await session.end({ timeout: 2 });
       await db.end({ timeout: 2 });
+      if (left.pending > 0) {
+        log.error(
+          { pending: left.pending, dead: left.dead, drainTimeoutMs },
+          'exiting with unpublished outbox rows (EX_TEMPFAIL 75); a restart publishes them',
+        );
+        process.exit(75);
+      }
       process.exit(0);
     }
-    await new Promise<void>(() => {
-      /* keep publishing until signalled */
+    await new Promise<void>((resolve) => {
+      wakeIdle = resolve; // keep publishing until signalled
     });
+    const rest = await publisher.drainUntilEmpty(drainTimeoutMs);
+    publisher.stop();
+    shuttingDown = true;
+    await session.end({ timeout: 2 });
+    await db.end({ timeout: 2 });
+    process.exit(rest.pending > 0 ? 75 : 0);
   } catch (err) {
     log.error({ err }, 'replay failed');
     await endRun(db, run.id, 'error', (err as Error).message);
