@@ -47,7 +47,6 @@ async function replay(run: RunHandle) {
   });
   const out = await replayRecording(watcher, COPY, silentLog, {
     paceMs: 0,
-    untilClosed: true,
     isStopped: () => false,
     maxDocs: null,
   });

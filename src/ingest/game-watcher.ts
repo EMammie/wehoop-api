@@ -256,14 +256,14 @@ export interface ReplayOutcome {
  * as fast as possible). The file is consumed to EOF (or `maxDocs`): a recording
  * carries the final summary and boxscore AFTER the first `closed` pbp, and a
  * worker that stops on `closed` must still take them so final stats are never
- * left behind (plan §4). `untilClosed` only decides whether the worker exits
- * afterwards; it never cuts the file short.
+ * left behind (plan §4). Whether the worker exits afterwards is the worker's
+ * decision (`--until closed`); nothing here cuts the file short.
  */
 export async function replayRecording(
   watcher: GameWatcher,
   path: string,
   log: Logger,
-  opts: { paceMs: number; untilClosed: boolean; isStopped: () => boolean; maxDocs: number | null },
+  opts: { paceMs: number; isStopped: () => boolean; maxDocs: number | null },
 ): Promise<ReplayOutcome> {
   let status: string | null = null;
   let docs = 0;
@@ -289,9 +289,6 @@ export async function replayRecording(
     if (opts.maxDocs !== null && docs >= opts.maxDocs) break;
     if (opts.paceMs > 0) await new Promise((r) => setTimeout(r, opts.paceMs));
   }
-  log.info(
-    { docs, status, closedAtDoc: closedAt, untilClosed: opts.untilClosed },
-    'recording replay finished',
-  );
+  log.info({ docs, status, closedAtDoc: closedAt }, 'recording replay finished');
   return { status, docs };
 }

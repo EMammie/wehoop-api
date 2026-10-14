@@ -1,4 +1,5 @@
 import { parseArgs } from 'node:util';
+import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { createSessionDb, tryAcquireWorkerLock } from '../db/session-client.js';
@@ -29,6 +30,11 @@ import { SimulationUrlResolver } from '../providers/sportradar/urls.js';
  *   pnpm dev:worker --mode sim --league wnba --replay-file <file.jsonl> [--pace 0]
  *   [--lock-wait 60]  seconds to wait for the single-ingester lock (a killed worker's lock lingers briefly)
  *   [--drain-timeout 60]  seconds the final drain may wait for backing-off outbox rows before exiting
+ *
+ * Numeric flags must be integers (`--pace` >= 0, all others > 0); anything else
+ * is a usage error (exit 64). SIGINT/SIGTERM stop the loop after the in-flight
+ * document and run the normal tail (final drain, closing pulse); a SECOND signal
+ * during the final drain shortens its remaining window to 3 s.
  *
  * Exit codes: 0 ok; 75 (EX_TEMPFAIL) replay finished but unpublished non-dead
  * outbox rows remain after the final drain (a restart publishes them); 64 usage;
@@ -64,6 +70,23 @@ async function main() {
   const env = args.mode ? { ...process.env, MODE: args.mode } : process.env;
   const config = loadConfig(env);
   const log = createLogger({ level: config.logLevel });
+  /** Integer flags; `min` 0 for --pace, 1 otherwise. Usage error (64) on anything else. */
+  const intArg = (name: string, value: string | undefined, min: number): number | null => {
+    if (value === undefined) return null;
+    const parsed = z.coerce.number().int().min(min).safeParse(value);
+    if (!parsed.success) {
+      log.error({ flag: `--${name}`, value }, `--${name} must be an integer >= ${min}`);
+      process.exit(64);
+    }
+    return parsed.data;
+  };
+  const pollIntervalMs = intArg('poll-interval', args['poll-interval'], 1) ?? 3000;
+  const summaryEvery = intArg('summary-every', args['summary-every'], 1) ?? 10;
+  const maxPolls = intArg('max-polls', args['max-polls'], 1);
+  const paceMs = intArg('pace', args.pace, 0) ?? 0;
+  const maxDocs = intArg('max-docs', args['max-docs'], 1);
+  const lockWaitMs = (intArg('lock-wait', args['lock-wait'], 1) ?? 60) * 1000;
+  const drainTimeoutMs = (intArg('drain-timeout', args['drain-timeout'], 1) ?? 60) * 1000;
   const league = LeagueCodeSchema.parse(args.league);
   const adapter = adapterFor(league);
   if (config.mode !== 'sim' && !args['replay-file']) {
@@ -92,7 +115,6 @@ async function main() {
   });
   // After a kill -9 the previous worker's session lock lingers until Postgres notices the dead
   // socket; wait for it (bounded) instead of failing the restart.
-  const lockWaitMs = Number(args['lock-wait']) * 1000;
   const lockStarted = Date.now();
   let locked = await tryAcquireWorkerLock(session);
   while (!locked && Date.now() - lockStarted < lockWaitMs) {
@@ -209,17 +231,25 @@ async function main() {
   });
 
   // A signal stops the loop; the normal tail (final drain, closing pulse, run end) still runs.
+  // A second signal shortens whatever remains of the final drain window to 3 s.
   let stoppedBy: string | null = null;
   let wakeIdle: (() => void) | null = null;
+  let drainDeadline = Number.POSITIVE_INFINITY;
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
+      if (stoppedBy) {
+        drainDeadline = Math.min(drainDeadline, Date.now() + 3_000);
+        log.warn({ signal }, 'second signal; final drain window shortened to 3 s');
+        return;
+      }
       stopRequested = true;
       stoppedBy = signal;
       log.warn({ signal }, 'stop requested; finishing the in-flight document, then draining');
       wakeIdle?.();
     });
   }
-  const drainTimeoutMs = Number(args['drain-timeout']) * 1000;
+  const finalDrain = () =>
+    publisher.drainUntilEmpty(drainTimeoutMs, { deadline: () => drainDeadline });
 
   let finalStatus: string | null = null;
   let replayedDocs: number | null = null;
@@ -239,25 +269,24 @@ async function main() {
       });
       const source = new HttpDocumentSource(http, 'simulation', args['record-to'] ?? null);
       finalStatus = await pollLoop(watcher, source, log, {
-        pollIntervalMs: Number(args['poll-interval']),
-        summaryEvery: Math.max(1, Number(args['summary-every'])),
-        maxPolls: args['max-polls'] ? Number(args['max-polls']) : null,
+        pollIntervalMs,
+        summaryEvery,
+        maxPolls,
         untilClosed,
         isStopped: () => stopRequested,
       });
     } else if (args['replay-file']) {
       const replay = await replayRecording(watcher, args['replay-file'], log, {
-        paceMs: Number(args.pace),
-        untilClosed,
+        paceMs,
         isStopped: () => stopRequested,
-        maxDocs: args['max-docs'] ? Number(args['max-docs']) : null,
+        maxDocs,
       });
       finalStatus = replay.status;
       replayedDocs = replay.docs;
     }
     pulse.stop();
     // Final drain (bounded), then the closing pulse so its latestSeq is published state.
-    const left = await publisher.drainUntilEmpty(drainTimeoutMs);
+    const left = await finalDrain();
     if (watcher.gameId) await pulse.sendOnce(watcher.gameId);
     publisher.stop();
     await endRun(db, run.id, stoppedBy ? 'aborted' : 'ok', stoppedBy ?? undefined);
@@ -291,7 +320,7 @@ async function main() {
     await new Promise<void>((resolve) => {
       wakeIdle = resolve; // keep publishing until signalled
     });
-    const rest = await publisher.drainUntilEmpty(drainTimeoutMs);
+    const rest = await finalDrain();
     publisher.stop();
     shuttingDown = true;
     await session.end({ timeout: 2 });
