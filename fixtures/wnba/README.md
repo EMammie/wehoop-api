@@ -24,6 +24,10 @@ pretty-printed JSON exactly as returned.
 Observations worth knowing (all from this recording):
 - Events are revised after the fact without a bump of `updated` (e.g. a rebound gains its
   `statistics[]` attribution later). Rule 3's hash fallback exists for exactly this.
+- The pbp `deleted_events[]` entries carry only `id`, no `updated` (five markers in
+  `sim-93ee7c68-pbp-closed.json`). A marker without a revision is applied and recorded with
+  `play_events.deleted_revision_at = null`; the revision-carrying marker path is covered by unit
+  tests only until a feed that sends `updated` on markers is recorded.
 - Season `type` is `"CC"` (Commissioner's Cup), which the `season_type` enum does not yet cover;
   M1 leaves `games.season_id` null.
 - The pbp header `clock` is the clock of the latest event, not a live clock; `clock_running`

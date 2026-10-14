@@ -205,7 +205,8 @@ export async function pollLoop(
         source.observationSource,
       );
       status = out?.status ?? status;
-      if (polls % opts.summaryEvery === 1) {
+      // Polls 1, 1+N, 1+2N, ... (`polls % N === 1` never fires for N = 1).
+      if ((polls - 1) % opts.summaryEvery === 0) {
         const summary = await source.fetch('summary', SummaryDocumentSchema);
         await watcher.process(
           'summary',
