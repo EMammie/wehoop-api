@@ -531,7 +531,16 @@ describe('freshness §4 acceptance cases (rev 4.3)', () => {
       liveEvents,
     );
     expect(again).toMatchObject({ kind: 'accept', generation: 'new', advanceWatchRunId: true });
-    // not corroborated by: a different generation, a different score (a climbing replay), or an equal observedAt
+    const later = { ...first, observedAt: new Date(first.observedAt.getTime() + 30_000) };
+    // not corroborated when the generation's ambiguous rows ever carried another score (a climbing replay)
+    expect(
+      decideBatch(
+        stored({ clock: null, lastAmbiguous: { ...la, otherScoresSeen: true } }),
+        later,
+        liveEvents,
+      ),
+    ).toMatchObject({ kind: 'stale', reason: 'ambiguous_regression' });
+    // not corroborated by: a different generation, a different score, or an equal observedAt
     expect(
       decideBatch(
         stored({ clock: null, lastAmbiguous: { ...la, watchId: 9 } }),
