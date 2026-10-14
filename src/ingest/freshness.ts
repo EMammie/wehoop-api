@@ -96,6 +96,13 @@ export interface AmbiguousObservation {
   watchId: number;
   score: Score;
   observedAt: Date;
+  /**
+   * True when this generation's ambiguous rows for the game carry more than one
+   * distinct score: a restarted clockless replay climbs (S1, S2, S3, ...), a
+   * real correction repeats one score. A climbing generation never corroborates
+   * itself, even when its latest two scores happen to coincide.
+   */
+  otherScoresSeen: boolean;
 }
 
 export interface StoredGameForFreshness {
@@ -266,6 +273,7 @@ export function decideBatch(
         const la = stored.lastAmbiguous;
         const corroborated =
           la !== null &&
+          !la.otherScoresSeen &&
           la.watchId === watchId &&
           la.score.home === gameView.score.home &&
           la.score.away === gameView.score.away &&

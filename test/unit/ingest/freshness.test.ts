@@ -519,7 +519,12 @@ describe('freshness §4 acceptance cases (rev 4.3)', () => {
 
   it('2d: a repeated ambiguous observation with the same score and a later observedAt -> accepted (corroborated)', () => {
     const first = summaryOnly({ clock: null });
-    const la = { watchId: 11, score: { home: 8, away: 8 }, observedAt: first.observedAt };
+    const la = {
+      watchId: 11,
+      score: { home: 8, away: 8 },
+      observedAt: first.observedAt,
+      otherScoresSeen: false,
+    };
     const again = decideBatch(
       stored({ clock: null, lastAmbiguous: la }),
       { ...first, observedAt: new Date(first.observedAt.getTime() + 30_000) },
@@ -550,7 +555,12 @@ describe('freshness §4 acceptance cases (rev 4.3)', () => {
   });
 
   it('2d: an event-bearing batch after an ambiguous one advances the generation through rules 2a-2c as usual', () => {
-    const la = { watchId: 11, score: { home: 8, away: 8 }, observedAt: t('2026-06-30T23:20:10Z') };
+    const la = {
+      watchId: 11,
+      score: { home: 8, away: 8 },
+      observedAt: t('2026-06-30T23:20:10Z'),
+      otherScoresSeen: false,
+    };
     // a single push event (not complete, no gameView) of the same new generation
     const push = batch({
       watchId: 11,

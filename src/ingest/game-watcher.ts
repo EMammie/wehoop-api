@@ -148,7 +148,7 @@ export class GameWatcher {
       {
         league: this.deps.adapter.league,
         providerGameId: nd.providerGameId,
-        scheduledAt: nd.gameView?.scheduledAt ?? new Date().toISOString(),
+        scheduledAt: nd.gameView?.scheduledAt ?? null,
         status: nd.gameView?.status ?? null,
         coverage: nd.gameView?.coverage ?? null,
         homeTeamId: home ? (teamIds.get(home.providerTeamId) ?? null) : null,
@@ -255,7 +255,7 @@ export async function replayRecording(
 ): Promise<string | null> {
   let status: string | null = null;
   let docs = 0;
-  for await (const line of readRecording(path)) {
+  for await (const line of readRecording(path, { warn: (m) => log.warn(m) })) {
     if (opts.isStopped()) break;
     docs++;
     try {

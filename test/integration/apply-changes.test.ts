@@ -587,6 +587,26 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     expect(await cov()).toBe('boxscore');
     await ensureGame(db, { ...base, coverage: null });
     expect(await cov()).toBe('boxscore');
+    // scheduled_at: a document without `scheduled` keeps the stored one (insert without one uses now())
+    const sched = async () =>
+      (
+        await db<{ s: Date }[]>`select scheduled_at as s from public.games where id = ${created}`
+      )[0]?.s.toISOString();
+    expect(await sched()).toBe(T0.toISOString());
+    await ensureGame(db, { ...base, coverage: null, scheduledAt: null });
+    expect(await sched()).toBe(T0.toISOString());
+    await ensureGame(db, { ...base, coverage: null, scheduledAt: later(3600).toISOString() });
+    expect(await sched()).toBe(later(3600).toISOString());
+    const { id: noSched } = await ensureGame(db, {
+      ...base,
+      providerGameId: `test-nosched-${gameId}`,
+      coverage: null,
+      scheduledAt: null,
+    });
+    const [row] = await db<
+      { s: Date }[]
+    >`select scheduled_at as s from public.games where id = ${noSched}`;
+    expect(Math.abs(Date.now() - (row?.s.getTime() ?? 0))).toBeLessThan(60_000);
   });
 
   it('2d: after a restart a summary-only lower score is stale when its clock is earlier, a downward correction when at/past the stored clock', async () => {
@@ -661,6 +681,38 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     const [row] = await db<{ observation: { watchId: number; score: { home: number } } }[]>`
       select observation from ingest.stale_observations where game_id = ${gameId} and reason = 'ambiguous_regression'`;
     expect(row?.observation).toMatchObject({ watchId: gen2.watchId, score: { home: 8, away: 2 } });
+  });
+
+  it('2d: a clockless restarted replay climbing through ambiguous scores never corroborates itself, even when a score repeats', async () => {
+    const nd0 = pbpQ1();
+    const nd = { ...nd0, gameView: nd0.gameView ? { ...nd0.gameView, clock: null } : null };
+    const { gameId } = await seedGame(db, nd);
+    const gen1 = await replayRun(db, gameId);
+    await apply(deps, gameId, nd, observation(gen1, nd, T0));
+    const gen2 = await replayRun(db, gameId);
+    const sum = summaryQ1();
+    const at = (score: { home: number; away: number }) => ({
+      ...sum,
+      gameView: sum.gameView ? { ...sum.gameView, score, clock: null } : null,
+    });
+    for (const [i, score] of [
+      { home: 2, away: 0 },
+      { home: 4, away: 0 },
+      { home: 6, away: 2 },
+      { home: 6, away: 2 }, // the repeat would corroborate if the climb before it were ignored
+    ].entries()) {
+      const d = at(score);
+      expect(await apply(deps, gameId, d, observation(gen2, d, later(60 + i)))).toMatchObject({
+        outcome: 'stale',
+        reason: 'ambiguous_regression',
+      });
+    }
+    expect(await staleReasons(db, gameId)).toEqual({ ambiguous_regression: 4 });
+    expect(await counts(db, gameId)).toMatchObject({
+      home: 10,
+      away: 2,
+      watchRunId: String(gen1.watchId),
+    });
   });
 
   it('2d: an event-bearing batch after an ambiguous one advances the generation', async () => {

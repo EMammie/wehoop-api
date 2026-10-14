@@ -120,11 +120,20 @@ interface PeriodRow {
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 
-/** Shape of the bits of a stale_observations row rule 2(d) reads back (our own jsonb, parsed anyway). */
+/**
+ * The bits of the latest `ambiguous_regression` row rule 2(d) reads back (our own jsonb, parsed
+ * anyway). `watchId` is the jsonb text of the generation that logged it: a row without one is
+ * unusable and must fail here, never become 0. `distinctScores` counts the distinct scores logged
+ * as ambiguous by that same generation for this game.
+ */
 const AmbiguousRowSchema = z.object({
-  watchId: z.coerce.number().int(),
+  watchId: z
+    .string()
+    .regex(/^\d+$/)
+    .transform((v) => Number(v)),
   score: ScoreSchema,
   observedAt: z.date(),
+  distinctScores: z.int().positive(),
 });
 
 function viewJson(gv: GameView | null, extra: Record<string, unknown>): Record<string, unknown> {
@@ -149,7 +158,8 @@ export async function ensureGame(
   game: {
     league: LeagueCode;
     providerGameId: string;
-    scheduledAt: string;
+    /** Null when the document carries no `scheduled`: now() on insert, stored value kept on update. */
+    scheduledAt: string | null;
     status: GameStatus | null;
     coverage: string | null;
     homeTeamId: string | null;
@@ -162,6 +172,12 @@ export async function ensureGame(
   // 'unknown' exists only at row creation when the document carries no coverage; on update an
   // omitted or unrecognized coverage keeps the stored value (omission is not change).
   const coverage = coverageOf(game.coverage);
+  if (game.coverage !== null && coverage === null) {
+    log?.warn(
+      { providerGameId: game.providerGameId, coverage: game.coverage },
+      'unrecognized provider coverage; stored value kept',
+    );
+  }
   const status: GameStatus = game.status ?? 'scheduled';
   if (game.status === null) {
     log?.warn(
@@ -172,12 +188,12 @@ export async function ensureGame(
   const [row] = await db<{ id: string; created: boolean }[]>`
     insert into public.games (league, provider_game_id, scheduled_at, status, coverage,
                               home_team_id, away_team_id, venue, broadcasts)
-    values (${game.league}, ${game.providerGameId}, ${game.scheduledAt}, ${status}, ${coverage ?? 'unknown'},
+    values (${game.league}, ${game.providerGameId}, coalesce(${game.scheduledAt}::timestamptz, now()), ${status}, ${coverage ?? 'unknown'},
             ${game.homeTeamId}, ${game.awayTeamId},
             ${game.venue ? db.json(game.venue as never) : null},
             ${game.broadcasts ? db.json(game.broadcasts as never) : null})
     on conflict (league, provider_game_id) do update
-      set scheduled_at = excluded.scheduled_at,
+      set scheduled_at = coalesce(${game.scheduledAt}::timestamptz, public.games.scheduled_at),
           coverage = coalesce(${coverage}::public.coverage_level, public.games.coverage),
           home_team_id = coalesce(excluded.home_team_id, public.games.home_team_id),
           away_team_id = coalesce(excluded.away_team_id, public.games.away_team_id),
@@ -239,14 +255,25 @@ export async function applyChanges(
 
     // Rule 2d reads the most recent ambiguous observation for this game inside the transaction.
     let lastAmbiguous: AmbiguousObservation | null = null;
-    const [ambiguousRow] = await tx<{ watchId: unknown; score: unknown; observedAt: Date }[]>`
-      select observation->>'watchId' as "watchId", observation->'score' as score, observed_at as "observedAt"
-      from ingest.stale_observations
-      where game_id = ${gameId} and reason = 'ambiguous_regression'
-      order by observed_at desc, id desc limit 1`;
+    const [ambiguousRow] = await tx<
+      { watchId: unknown; score: unknown; observedAt: Date; distinctScores: number }[]
+    >`
+      select s1.observation->>'watchId' as "watchId", s1.observation->'score' as score,
+             s1.observed_at as "observedAt",
+             (select count(distinct s2.observation->'score')::int from ingest.stale_observations s2
+               where s2.game_id = s1.game_id and s2.reason = 'ambiguous_regression'
+                 and s2.observation->>'watchId' = s1.observation->>'watchId') as "distinctScores"
+      from ingest.stale_observations s1
+      where s1.game_id = ${gameId} and s1.reason = 'ambiguous_regression'
+      order by s1.observed_at desc, s1.id desc limit 1`;
     if (ambiguousRow) {
       const parsed = AmbiguousRowSchema.safeParse(ambiguousRow);
-      if (parsed.success) lastAmbiguous = parsed.data;
+      if (parsed.success) {
+        const { distinctScores, ...rest } = parsed.data;
+        lastAmbiguous = { ...rest, otherScoresSeen: distinctScores > 1 };
+      } else {
+        deps.log.warn({ gameId, issues: parsed.error.issues }, 'unusable ambiguous_regression row');
+      }
     }
 
     // 2 + 3 (gate).
@@ -463,9 +490,16 @@ export async function applyChanges(
     // 5. Observation write: clock + freshness metadata, never a seq. Omission is not change:
     // every field here is coalesced, so a document that omits it leaves the stored value in place.
     if (gv) {
+      const coverage = coverageOf(gv.coverage);
+      if (gv.coverage !== null && coverage === null) {
+        deps.log.warn(
+          { gameId, coverage: gv.coverage },
+          'unrecognized provider coverage; stored value kept',
+        );
+      }
       await tx`update public.games set
                  scheduled_at = coalesce(${gv.scheduledAt}, scheduled_at),
-                 coverage = coalesce(${coverageOf(gv.coverage)}::public.coverage_level, coverage),
+                 coverage = coalesce(${coverage}::public.coverage_level, coverage),
                  venue = coalesce(${gv.venue ? tx.json(gv.venue as never) : null}, venue),
                  broadcasts = coalesce(${gv.broadcasts ? tx.json(gv.broadcasts as never) : null}, broadcasts)
                where id = ${gameId}`;
