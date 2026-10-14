@@ -1,23 +1,28 @@
 import type { TransactionSql } from 'postgres';
+import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import type { LeagueCode } from '../leagues/codes.js';
 import type { Logger } from '../logger.js';
 import { contentHash } from '../model/content-hash.js';
 import { type GameChange, gameChangeFromRow, type PendingChange } from '../model/game-change.js';
-import type {
-  GameStatus,
-  LiveEventType,
-  PeriodRef,
-  PeriodType,
-  Score,
+import {
+  type GameStatus,
+  type LiveEventType,
+  type PeriodRef,
+  type PeriodType,
+  type Score,
+  ScoreSchema,
 } from '../model/live-event.js';
 import { deriveClockRunning } from './clock.js';
 import { diffEvents } from './diff.js';
 import type { FaultInjector } from './fault.js';
 import {
+  type AmbiguousObservation,
   type BatchDecision,
+  type BatchStaleReason,
   decideBatch,
   newestPosition,
+  type StaleReason,
   type StoredEventForFreshness,
 } from './freshness.js';
 import { teamIdsFor } from './identity.js';
@@ -57,7 +62,7 @@ export interface ApplyCounts {
 export type ApplyResult =
   | {
       outcome: 'stale';
-      reason: 'older_run' | 'run_regresses_state';
+      reason: BatchStaleReason;
       detail: string;
       changes: GameChange[];
       lastSeq: number;
@@ -114,6 +119,13 @@ interface PeriodRow {
 }
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
+
+/** Shape of the bits of a stale_observations row rule 2(d) reads back (our own jsonb, parsed anyway). */
+const AmbiguousRowSchema = z.object({
+  watchId: z.coerce.number().int(),
+  score: ScoreSchema,
+  observedAt: z.date(),
+});
 
 function viewJson(gv: GameView | null, extra: Record<string, unknown>): Record<string, unknown> {
   return {
@@ -225,6 +237,18 @@ export async function applyChanges(
       wallClock: iso(r.wallClock),
     }));
 
+    // Rule 2d reads the most recent ambiguous observation for this game inside the transaction.
+    let lastAmbiguous: AmbiguousObservation | null = null;
+    const [ambiguousRow] = await tx<{ watchId: unknown; score: unknown; observedAt: Date }[]>`
+      select observation->>'watchId' as "watchId", observation->'score' as score, observed_at as "observedAt"
+      from ingest.stale_observations
+      where game_id = ${gameId} and reason = 'ambiguous_regression'
+      order by observed_at desc, id desc limit 1`;
+    if (ambiguousRow) {
+      const parsed = AmbiguousRowSchema.safeParse(ambiguousRow);
+      if (parsed.success) lastAmbiguous = parsed.data;
+    }
+
     // 2 + 3 (gate).
     const decision: BatchDecision = decideBatch(
       {
@@ -233,6 +257,9 @@ export async function applyChanges(
         status: g.status,
         currentPeriodSequence: g.currentPeriodSequence,
         observedAt: g.observedAt,
+        score: { home: g.homePoints, away: g.awayPoints },
+        clock: g.clock,
+        lastAmbiguous,
       },
       {
         watchId: observation.watchId,
@@ -246,6 +273,8 @@ export async function applyChanges(
           wallClock: e.wallClock,
         })),
         deletedEvents: batch.deletedEvents,
+        eventCount: batch.events.length,
+        deletionCount: batch.deletedEvents.length,
       },
       storedForGate,
     );
@@ -290,9 +319,8 @@ export async function applyChanges(
       isComplete: observation.isComplete,
     });
 
-    const logStale = async (
-      reason: 'older_run' | 'run_regresses_state' | 'superseded_observation',
-    ) => {
+    // `observation` carries watchId and score, so rule 2d can read a previous ambiguous row without a join.
+    const logStale = async (reason: StaleReason) => {
       await tx`insert into ingest.stale_observations (game_id, run_id, source, observed_at, observation, stored, reason)
                values (${gameId}, ${observation.runId}, ${observation.source}, ${observation.observedAt},
                        ${tx.json(incomingView as never)}, ${tx.json(storedView as never)}, ${reason})`;

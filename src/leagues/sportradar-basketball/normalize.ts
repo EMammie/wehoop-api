@@ -57,16 +57,7 @@ export function mapPeriodType(provider: string | undefined): PeriodType {
   }
 }
 
-/** Clock "m:ss" / "mm:ss.d" → seconds, or null when unparsable (Elam periods have no clock). */
-export function clockToSeconds(clock: string | null | undefined): number | null {
-  if (!clock) return null;
-  const m = /^(\d+):(\d{1,2})(?:\.(\d+))?$/.exec(clock.trim());
-  if (!m) return null;
-  const mins = Number(m[1]);
-  const secs = Number(m[2]);
-  const frac = m[3] ? Number(`0.${m[3]}`) : 0;
-  return mins * 60 + secs + frac;
-}
+export { clockToSeconds } from '../../model/clock.js';
 
 type Header = {
   id: string;

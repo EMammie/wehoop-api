@@ -555,6 +555,107 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     expect(await cov()).toBe('boxscore');
   });
 
+  it('2d: after a restart a summary-only lower score is stale when its clock is earlier, a downward correction when at/past the stored clock', async () => {
+    const nd = pbpQ1(); // stored: inprogress Q1, 10-2 (home-away), clock 7:25
+    const { gameId } = await seedGame(db, nd);
+    const gen1 = await replayRun(db, gameId);
+    await apply(deps, gameId, nd, observation(gen1, nd, T0));
+    const before = await counts(db, gameId);
+    expect(before).toMatchObject({ home: 10, away: 2, clock: '7:25' });
+    const gen2 = await replayRun(db, gameId);
+    const sum = summaryQ1();
+    const summary = (score: { home: number; away: number }, clock: string | null) => ({
+      ...sum,
+      gameView: sum.gameView ? { ...sum.gameView, score, clock } : null,
+    });
+    const stale = summary({ home: 8, away: 2 }, '8:00');
+    const r1 = await apply(deps, gameId, stale, observation(gen2, stale, later(60)));
+    expect(r1).toMatchObject({ outcome: 'stale', reason: 'run_regresses_state' });
+    expect(r1.outcome === 'stale' && r1.detail).toMatch(/^2d/);
+    expect(await counts(db, gameId)).toMatchObject({
+      home: 10,
+      away: 2,
+      clock: '7:25',
+      watchRunId: String(gen1.watchId),
+    });
+    const correction = summary({ home: 8, away: 2 }, '7:10');
+    const r2 = await apply(deps, gameId, correction, observation(gen2, correction, later(61)));
+    expect(r2).toMatchObject({ outcome: 'applied', generationAdvanced: true, gameLevel: 'write' });
+    expect(r2.outcome === 'applied' && r2.changes.map((c) => c.type)).toContain('status');
+    expect(await counts(db, gameId)).toMatchObject({
+      home: 8,
+      away: 2,
+      clock: '7:10',
+      watchRunId: String(gen2.watchId),
+    });
+    expect(await staleReasons(db, gameId)).toEqual({ run_regresses_state: 1 });
+  });
+
+  it('2d: with no clock on either side the lower score is ambiguous_regression (no write, generation unchanged) until the same generation repeats it later', async () => {
+    const nd0 = pbpQ1();
+    const nd = { ...nd0, gameView: nd0.gameView ? { ...nd0.gameView, clock: null } : null };
+    const { gameId } = await seedGame(db, nd);
+    const gen1 = await replayRun(db, gameId);
+    await apply(deps, gameId, nd, observation(gen1, nd, T0));
+    expect((await counts(db, gameId)).clock).toBeNull();
+    const gen2 = await replayRun(db, gameId);
+    const sum = summaryQ1();
+    const lower = {
+      ...sum,
+      gameView: sum.gameView ? { ...sum.gameView, score: { home: 8, away: 2 }, clock: null } : null,
+    };
+    const r1 = await apply(deps, gameId, lower, observation(gen2, lower, later(60)));
+    expect(r1).toMatchObject({ outcome: 'stale', reason: 'ambiguous_regression' });
+    expect(await counts(db, gameId)).toMatchObject({
+      home: 10,
+      away: 2,
+      watchRunId: String(gen1.watchId),
+    });
+    const [g1] = await db<{ observedAt: Date }[]>`
+      select observed_at as "observedAt" from public.games where id = ${gameId}`;
+    expect(g1?.observedAt.toISOString()).toBe(T0.toISOString()); // no game-level write
+    expect(await staleReasons(db, gameId)).toEqual({ ambiguous_regression: 1 });
+    // a climbing replay would arrive with a different score; the same score later corroborates
+    const r2 = await apply(deps, gameId, lower, observation(gen2, lower, later(90)));
+    expect(r2).toMatchObject({ outcome: 'applied', generationAdvanced: true, gameLevel: 'write' });
+    expect(await counts(db, gameId)).toMatchObject({
+      home: 8,
+      away: 2,
+      watchRunId: String(gen2.watchId),
+    });
+    // the ambiguous row recorded the generation and the score it was waiting to corroborate
+    const [row] = await db<{ observation: { watchId: number; score: { home: number } } }[]>`
+      select observation from ingest.stale_observations where game_id = ${gameId} and reason = 'ambiguous_regression'`;
+    expect(row?.observation).toMatchObject({ watchId: gen2.watchId, score: { home: 8, away: 2 } });
+  });
+
+  it('2d: an event-bearing batch after an ambiguous one advances the generation', async () => {
+    const nd0 = pbpQ1();
+    const nd = { ...nd0, gameView: nd0.gameView ? { ...nd0.gameView, clock: null } : null };
+    const { gameId } = await seedGame(db, nd);
+    const gen1 = await replayRun(db, gameId);
+    await apply(deps, gameId, nd, observation(gen1, nd, T0));
+    const gen2 = await replayRun(db, gameId);
+    const sum = summaryQ1();
+    const lower = {
+      ...sum,
+      gameView: sum.gameView ? { ...sum.gameView, score: { home: 8, away: 2 }, clock: null } : null,
+    };
+    expect(await apply(deps, gameId, lower, observation(gen2, lower, later(60)))).toMatchObject({
+      outcome: 'stale',
+      reason: 'ambiguous_regression',
+    });
+    // the restarted replay's full pbp catches up to the stored newest position: 2c passes, generation advances
+    const r = await apply(deps, gameId, nd, observation(gen2, nd, later(61)));
+    expect(r).toMatchObject({ outcome: 'applied', generationAdvanced: true });
+    expect(r.outcome === 'applied' && r.changes).toEqual([]);
+    expect((await counts(db, gameId)).watchRunId).toBe(String(gen2.watchId));
+    // and from then on the summary's lower score is a same-generation correction
+    const r2 = await apply(deps, gameId, lower, observation(gen2, lower, later(62)));
+    expect(r2).toMatchObject({ outcome: 'applied', gameLevel: 'write' });
+    expect((await counts(db, gameId)).home).toBe(8);
+  });
+
   it('crash point (b): a fault just before commit rolls the whole batch back; the retry applies it once', async () => {
     const nd = pbpQ1();
     const { gameId } = await seedGame(db, nd);

@@ -1,8 +1,9 @@
-import type { GameStatus } from '../model/live-event.js';
+import { clockToSeconds } from '../model/clock.js';
+import type { GameStatus, Score } from '../model/live-event.js';
 import type { DeletionMarker, GameView } from './types.js';
 
 /**
- * Freshness policy (plan §4, rev 4.2). Pure functions; applyChanges calls them
+ * Freshness policy (plan §4, rev 4.3). Pure functions; applyChanges calls them
  * inside its transaction. Freshness is decided by WATCH GENERATION and
  * PER-ENTITY precedence, never by a progress scalar and never by hash
  * inequality alone.
@@ -90,12 +91,24 @@ export function newestPosition(positions: EventPosition[]): EventPosition | null
 /* Batch-level decision (rules 1, 2, and the game-level part of 3)            */
 /* ------------------------------------------------------------------------- */
 
+/** The most recent `ambiguous_regression` row for the game (read inside the transaction). */
+export interface AmbiguousObservation {
+  watchId: number;
+  score: Score;
+  observedAt: Date;
+}
+
 export interface StoredGameForFreshness {
   watchRunId: number | null;
   lastSeq: number;
   status: GameStatus;
   currentPeriodSequence: number | null;
   observedAt: Date | null;
+  /** games.home_points / away_points (rule 2d); null only when unknown. */
+  score: Score | null;
+  /** games.clock (rule 2d). */
+  clock: string | null;
+  lastAmbiguous: AmbiguousObservation | null;
 }
 
 export interface StoredEventForFreshness extends EventPosition {
@@ -111,14 +124,24 @@ export interface BatchInput {
   /** Positions of the incoming document's events (only meaningful when isComplete). */
   eventPositions: EventPosition[];
   deletedEvents: DeletionMarker[];
+  /** Events in the batch (a single push event counts; `isComplete` does not decide this). */
+  eventCount: number;
+  deletionCount: number;
 }
 
-export type StaleReason = 'older_run' | 'run_regresses_state' | 'superseded_observation';
+export type StaleReason =
+  | 'older_run'
+  | 'run_regresses_state'
+  | 'superseded_observation'
+  | 'ambiguous_regression';
+
+/** Reasons decideBatch itself can return (superseded_observation is a rule-3 outcome, not a rejection). */
+export type BatchStaleReason = Exclude<StaleReason, 'superseded_observation'>;
 
 export type Generation = 'none' | 'same' | 'new';
 
 export type BatchDecision =
-  | { kind: 'stale'; reason: 'older_run' | 'run_regresses_state'; detail: string }
+  | { kind: 'stale'; reason: BatchStaleReason; detail: string }
   | {
       kind: 'accept';
       generation: Generation;
@@ -213,6 +236,48 @@ export function decideBatch(
           };
         }
         // incomingNewest === null: events carry no position fields; not gated by 2c.
+      }
+    }
+    // 2d. Summary-only score regression: a lower score alone proves nothing (a waved-off basket
+    // lowers it too); the clock positions the observation inside the period.
+    if (
+      gameView &&
+      input.eventCount + input.deletionCount === 0 &&
+      stored.score !== null &&
+      (gameView.status === null || phaseOf(gameView.status) === storedPhase) &&
+      gameView.period !== null &&
+      stored.currentPeriodSequence !== null &&
+      gameView.period.sequence === stored.currentPeriodSequence &&
+      (gameView.score.home < stored.score.home || gameView.score.away < stored.score.away)
+    ) {
+      const incoming = clockToSeconds(gameView.clock);
+      const storedClock = clockToSeconds(stored.clock);
+      const scores = `score ${gameView.score.away}-${gameView.score.home} < stored ${stored.score.away}-${stored.score.home}`;
+      if (incoming !== null && storedClock !== null) {
+        if (incoming > storedClock) {
+          return {
+            kind: 'stale',
+            reason: 'run_regresses_state',
+            detail: `2d: ${scores} with clock ${gameView.clock} earlier in the period than stored ${stored.clock}`,
+          };
+        }
+        // Clock at or past the stored clock: a downward correction after a restart; accepted.
+      } else {
+        const la = stored.lastAmbiguous;
+        const corroborated =
+          la !== null &&
+          la.watchId === watchId &&
+          la.score.home === gameView.score.home &&
+          la.score.away === gameView.score.away &&
+          la.observedAt.getTime() < input.observedAt.getTime();
+        if (!corroborated) {
+          return {
+            kind: 'stale',
+            reason: 'ambiguous_regression',
+            detail: `2d: ${scores} without a clock position (incoming ${gameView.clock ?? 'none'}, stored ${stored.clock ?? 'none'}); held until corroborated`,
+          };
+        }
+        // Same generation, same lower score, later observedAt: a repeated correction, not a climb.
       }
     }
   }

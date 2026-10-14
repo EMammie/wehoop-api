@@ -1,4 +1,4 @@
-import { clockToSeconds } from '../leagues/sportradar-basketball/normalize.js';
+import { clockToSeconds } from '../model/clock.js';
 import type { GameStatus, LiveEventType } from '../model/live-event.js';
 
 /**

@@ -91,6 +91,9 @@ describe('full recorded game (closed documents)', () => {
       status: 'halftime' as const,
       currentPeriodSequence: 2,
       observedAt: new Date('2026-10-13T09:00:00Z'),
+      score: half.gameView?.score ?? null,
+      clock: half.gameView?.clock ?? null,
+      lastAmbiguous: null,
     };
     const storedEvents = half.batch.events.map((e) => ({
       providerEventId: e.providerEventId,
@@ -109,6 +112,8 @@ describe('full recorded game (closed documents)', () => {
         gameView: closed.gameView,
         eventPositions: pos(closed),
         deletedEvents: closed.batch.deletedEvents,
+        eventCount: closed.batch.events.length,
+        deletionCount: closed.batch.deletedEvents.length,
       },
       storedEvents,
     );
@@ -119,6 +124,9 @@ describe('full recorded game (closed documents)', () => {
       status: 'closed' as const,
       currentPeriodSequence: 4,
       observedAt: new Date('2026-10-13T10:00:00Z'),
+      score: closed.gameView?.score ?? null,
+      clock: closed.gameView?.clock ?? null,
+      lastAmbiguous: null,
     };
     const closedEvents = closed.batch.events.map((e) => ({
       providerEventId: e.providerEventId,
@@ -137,6 +145,8 @@ describe('full recorded game (closed documents)', () => {
         gameView: half.gameView,
         eventPositions: pos(half),
         deletedEvents: [],
+        eventCount: half.batch.events.length,
+        deletionCount: 0,
       },
       closedEvents,
     );

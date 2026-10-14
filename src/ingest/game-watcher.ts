@@ -66,17 +66,6 @@ export class GameWatcher {
   stale = 0;
   applied = 0;
   batches = 0;
-  skipped = 0;
-  /**
-   * A watch generation is opened only by an event-bearing batch (a complete
-   * pbp document that passed rule 2c, or a push event). Freshness rule 2 gates
-   * a bare gameView on phase and period only, so a summary polled by a
-   * restarted replay inside the same period would otherwise advance the
-   * generation and then write its lagging score as the newest observation.
-   * Until the generation is open, summary/boxscore documents are skipped
-   * (not evaluated, not logged as stale); the next one arrives 30 s later.
-   */
-  generationOpen = false;
 
   constructor(private readonly deps: WatcherDeps) {}
 
@@ -111,20 +100,10 @@ export class GameWatcher {
     observedAt: Date,
     source: ObservationSource,
   ): Promise<ProcessOutcome | null> {
+    // Every document goes through applyChanges: freshness (incl. rule 2d for summary-only
+    // documents after a restart) is decided inside the transaction, never here.
     const nd = this.normalize(feed, body);
     const gameId = await this.ensure(nd);
-    if (
-      !this.generationOpen &&
-      nd.batch.events.length === 0 &&
-      nd.batch.deletedEvents.length === 0
-    ) {
-      this.skipped++;
-      this.deps.log.info(
-        { feed },
-        'generation not yet opened by an event-bearing batch; document skipped',
-      );
-      return null;
-    }
     const result = await applyChanges(this.deps.apply, gameId, nd.batch, {
       source,
       runId: this.deps.run.id,
@@ -140,8 +119,6 @@ export class GameWatcher {
       this.deps.log.warn({ feed, reason: result.reason, detail: result.detail, status }, 'stale');
     } else {
       this.applied += result.changes.length;
-      if (nd.batch.events.length > 0 || nd.batch.deletedEvents.length > 0)
-        this.generationOpen = true;
       if (nd.gameView?.status && result.gameLevel === 'write') this.lastStatus = nd.gameView.status;
       this.deps.log.info(
         {
@@ -183,10 +160,6 @@ export class GameWatcher {
     );
     await this.deps
       .db`update ingest.ingestion_runs set game_id = ${id} where id = ${this.deps.run.id}`;
-    // A game with no durable history has nothing to regress: pregame documents may flow.
-    const [state] = await this.deps.db<{ lastSeq: string }[]>`
-      select last_seq::text as "lastSeq" from public.games where id = ${id}`;
-    if (Number(state?.lastSeq ?? 0) === 0) this.generationOpen = true;
     this.gameId = id;
     this.deps.log.info(
       { gameId: id, providerGameId: nd.providerGameId, created },

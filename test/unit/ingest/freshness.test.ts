@@ -57,17 +57,27 @@ const stored = (over: Partial<StoredGameForFreshness> = {}): StoredGameForFreshn
   status: 'inprogress',
   currentPeriodSequence: 1,
   observedAt: t('2026-06-30T23:20:00Z'),
+  score: { home: 10, away: 8 },
+  clock: '5:00',
+  lastAmbiguous: null,
   ...over,
 });
-const batch = (over: Partial<BatchInput> = {}): BatchInput => ({
-  watchId: 10,
-  observedAt: t('2026-06-30T23:20:10Z'),
-  isComplete: true,
-  gameView: view(),
-  eventPositions: [pos(1, 100), pos(1, 200)],
-  deletedEvents: [],
-  ...over,
-});
+/** eventCount / deletionCount default to the lengths of eventPositions / deletedEvents. */
+const batch = (over: Partial<BatchInput> = {}): BatchInput => {
+  const eventPositions = over.eventPositions ?? [pos(1, 100), pos(1, 200)];
+  const deletedEvents = over.deletedEvents ?? [];
+  return {
+    watchId: 10,
+    observedAt: t('2026-06-30T23:20:10Z'),
+    isComplete: true,
+    gameView: view(),
+    eventPositions,
+    deletedEvents,
+    eventCount: eventPositions.length,
+    deletionCount: deletedEvents.length,
+    ...over,
+  };
+};
 const liveEvents: StoredEventForFreshness[] = [storedEv('e1', 1, 100), storedEv('e2', 1, 200)];
 
 function nev(
@@ -448,6 +458,130 @@ describe('freshness §4 acceptance cases', () => {
 });
 
 describe('freshness §4 acceptance cases (rev 4.3)', () => {
+  // Rule 2d setup: stored 10-8 at 5:00 in Q1 by generation 10; generation 11 sends summary-only documents.
+  const summaryOnly = (over: Partial<GameView>) =>
+    batch({
+      watchId: 11,
+      isComplete: false,
+      eventPositions: [],
+      gameView: view({ score: { home: 8, away: 8 }, ...over }),
+    });
+
+  it("2d: a new generation's summary-only document inside the stored period with a lower score and more time on the clock -> run_regresses_state", () => {
+    const d = decideBatch(stored(), summaryOnly({ clock: '7:00' }), liveEvents);
+    expect(d).toMatchObject({ kind: 'stale', reason: 'run_regresses_state' });
+    expect((d as { detail: string }).detail).toMatch(/^2d/);
+    // the same document inside the SAME generation is never gated: a correction is a correction
+    expect(
+      decideBatch(stored(), { ...summaryOnly({ clock: '7:00' }), watchId: 10 }, liveEvents),
+    ).toMatchObject({ kind: 'accept', generation: 'same' });
+    // and a lower score in a later period is not 2d's business (2b and the period decide)
+    expect(
+      decideBatch(
+        stored(),
+        summaryOnly({ clock: '9:00', period: { number: 2, type: 'quarter', sequence: 2 } }),
+        liveEvents,
+      ),
+    ).toMatchObject({ kind: 'accept' });
+  });
+
+  it('2d: the same with the clock at or past the stored clock -> accepted and written as a downward correction after a restart', () => {
+    for (const clock of ['5:00', '4:59', '0:00.3']) {
+      expect(decideBatch(stored(), summaryOnly({ clock }), liveEvents)).toMatchObject({
+        kind: 'accept',
+        generation: 'new',
+        advanceWatchRunId: true,
+        gameLevel: 'write',
+      });
+    }
+  });
+
+  it('2d: the same with no clock on either side -> ambiguous_regression, nothing written, watch_run_id unchanged', () => {
+    const noClock = decideBatch(stored({ clock: null }), summaryOnly({ clock: null }), liveEvents);
+    expect(noClock).toMatchObject({ kind: 'stale', reason: 'ambiguous_regression' });
+    // one side unknown is enough to be ambiguous
+    expect(decideBatch(stored(), summaryOnly({ clock: null }), liveEvents)).toMatchObject({
+      kind: 'stale',
+      reason: 'ambiguous_regression',
+    });
+    expect(
+      decideBatch(stored({ clock: null }), summaryOnly({ clock: '7:00' }), liveEvents),
+    ).toMatchObject({ kind: 'stale', reason: 'ambiguous_regression' });
+    // a score at or above the stored one is not ambiguous
+    expect(
+      decideBatch(
+        stored({ clock: null }),
+        summaryOnly({ clock: null, score: { home: 10, away: 8 } }),
+        liveEvents,
+      ),
+    ).toMatchObject({ kind: 'accept', generation: 'new' });
+  });
+
+  it('2d: a repeated ambiguous observation with the same score and a later observedAt -> accepted (corroborated)', () => {
+    const first = summaryOnly({ clock: null });
+    const la = { watchId: 11, score: { home: 8, away: 8 }, observedAt: first.observedAt };
+    const again = decideBatch(
+      stored({ clock: null, lastAmbiguous: la }),
+      { ...first, observedAt: new Date(first.observedAt.getTime() + 30_000) },
+      liveEvents,
+    );
+    expect(again).toMatchObject({ kind: 'accept', generation: 'new', advanceWatchRunId: true });
+    // not corroborated by: a different generation, a different score (a climbing replay), or an equal observedAt
+    expect(
+      decideBatch(
+        stored({ clock: null, lastAmbiguous: { ...la, watchId: 9 } }),
+        { ...first, observedAt: new Date(first.observedAt.getTime() + 30_000) },
+        liveEvents,
+      ),
+    ).toMatchObject({ kind: 'stale', reason: 'ambiguous_regression' });
+    expect(
+      decideBatch(
+        stored({ clock: null, lastAmbiguous: { ...la, score: { home: 6, away: 8 } } }),
+        { ...first, observedAt: new Date(first.observedAt.getTime() + 30_000) },
+        liveEvents,
+      ),
+    ).toMatchObject({ kind: 'stale', reason: 'ambiguous_regression' });
+    expect(
+      decideBatch(stored({ clock: null, lastAmbiguous: la }), first, liveEvents),
+    ).toMatchObject({
+      kind: 'stale',
+      reason: 'ambiguous_regression',
+    });
+  });
+
+  it('2d: an event-bearing batch after an ambiguous one advances the generation through rules 2a-2c as usual', () => {
+    const la = { watchId: 11, score: { home: 8, away: 8 }, observedAt: t('2026-06-30T23:20:10Z') };
+    // a single push event (not complete, no gameView) of the same new generation
+    const push = batch({
+      watchId: 11,
+      isComplete: false,
+      gameView: null,
+      eventPositions: [pos(1, 210)],
+      observedAt: t('2026-06-30T23:20:40Z'),
+    });
+    expect(decideBatch(stored({ clock: null, lastAmbiguous: la }), push, liveEvents)).toMatchObject(
+      {
+        kind: 'accept',
+        generation: 'new',
+        advanceWatchRunId: true,
+      },
+    );
+    // a complete document at the stored newest position carrying the lower score: 2c passes, 2d does not apply
+    const complete = batch({
+      watchId: 11,
+      gameView: view({ score: { home: 8, away: 8 }, clock: null }),
+      observedAt: t('2026-06-30T23:20:40Z'),
+    });
+    expect(
+      decideBatch(stored({ clock: null, lastAmbiguous: la }), complete, liveEvents),
+    ).toMatchObject({
+      kind: 'accept',
+      generation: 'new',
+      advanceWatchRunId: true,
+      gameLevel: 'write',
+    });
+  });
+
   it('unknown provider status makes no phase claim: 2a is skipped, 2b still applies, the stored status is kept', () => {
     const unknown = view({ status: null, unknownStatus: 'weird' });
     // a new generation whose status we cannot map is not a phase regression
