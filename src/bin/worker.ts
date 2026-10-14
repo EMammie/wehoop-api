@@ -213,6 +213,7 @@ async function main() {
   }
 
   let finalStatus: string | null = null;
+  let replayedDocs: number | null = null;
   try {
     if (args.recording && sessionId) {
       const http = new SportradarHttp({
@@ -236,12 +237,14 @@ async function main() {
         isStopped: () => stopRequested,
       });
     } else if (args['replay-file']) {
-      finalStatus = await replayRecording(watcher, args['replay-file'], log, {
+      const replay = await replayRecording(watcher, args['replay-file'], log, {
         paceMs: Number(args.pace),
         untilClosed,
         isStopped: () => stopRequested,
         maxDocs: args['max-docs'] ? Number(args['max-docs']) : null,
       });
+      finalStatus = replay.status;
+      replayedDocs = replay.docs;
     }
     if (watcher.gameId) await pulse.sendOnce(watcher.gameId);
     pulse.stop();
@@ -253,6 +256,7 @@ async function main() {
         runId: run.id,
         gameId: watcher.gameId,
         finalStatus,
+        docs: replayedDocs,
         batches: watcher.batches,
         changes: watcher.applied,
         stale: watcher.stale,

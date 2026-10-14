@@ -246,15 +246,28 @@ export async function pollLoop(
   return status;
 }
 
-/** Replay a recording file through the watcher; `paceMs` between documents (0 = as fast as possible). */
+export interface ReplayOutcome {
+  status: string | null;
+  docs: number;
+}
+
+/**
+ * Replay a recording file through the watcher; `paceMs` between documents (0 =
+ * as fast as possible). The file is consumed to EOF (or `maxDocs`): a recording
+ * carries the final summary and boxscore AFTER the first `closed` pbp, and a
+ * worker that stops on `closed` must still take them so final stats are never
+ * left behind (plan §4). `untilClosed` only decides whether the worker exits
+ * afterwards; it never cuts the file short.
+ */
 export async function replayRecording(
   watcher: GameWatcher,
   path: string,
   log: Logger,
   opts: { paceMs: number; untilClosed: boolean; isStopped: () => boolean; maxDocs: number | null },
-): Promise<string | null> {
+): Promise<ReplayOutcome> {
   let status: string | null = null;
   let docs = 0;
+  let closedAt: number | null = null;
   for await (const line of readRecording(path, { warn: (m) => log.warn(m) })) {
     if (opts.isStopped()) break;
     docs++;
@@ -269,10 +282,16 @@ export async function replayRecording(
     } catch (err) {
       log.error({ err, feed: line.feed, docs }, 'recorded document failed');
     }
-    if (status === 'closed' && opts.untilClosed) break;
+    if (status === 'closed' && closedAt === null) {
+      closedAt = docs;
+      log.info({ docs }, 'game closed; consuming the remaining documents of the recording');
+    }
     if (opts.maxDocs !== null && docs >= opts.maxDocs) break;
     if (opts.paceMs > 0) await new Promise((r) => setTimeout(r, opts.paceMs));
   }
-  log.info({ docs, status }, 'recording replay finished');
-  return status;
+  log.info(
+    { docs, status, closedAtDoc: closedAt, untilClosed: opts.untilClosed },
+    'recording replay finished',
+  );
+  return { status, docs };
 }
