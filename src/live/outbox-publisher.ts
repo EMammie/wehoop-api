@@ -19,17 +19,29 @@ interface PendingRow {
 export interface DrainResult {
   published: number;
   failed: number;
+  /**
+   * Channels that had pending rows but whose head (lowest unpublished, non-dead
+   * seq) was not publishable now (`next_attempt_at` in the future). They
+   * contribute nothing to this batch and block only themselves.
+   */
   skippedChannels: number;
 }
 
 /**
  * Outbox publisher (plan §4). Exactly one per process (the lock holder).
- * Per channel, publishes in seq order; a channel whose lowest unpublished seq
- * is not in this batch (its head is backing off) is skipped entirely, so a
- * stuck head blocks that channel, never the system. At-least-once: a crash
- * after the HTTP send and before `published_at` re-sends the same GameChange
- * with the same id; clients dedupe on id/seq. No HTTP call happens inside a
- * transaction.
+ * Per channel, publishes in seq order. Each drain is head-first and fair:
+ *   1. `heads` = every channel's lowest unpublished, non-dead row;
+ *   2. only channels whose head is publishable now (`next_attempt_at <= now()`) take part;
+ *   3. up to `batchSize` rows are taken across those channels round-robin by
+ *      position (`row_number() over (partition by game_id order by seq)`,
+ *      ordered by that rank, then channel), so the limit is applied AFTER head
+ *      exclusion and a channel with a blocked head or a long backlog can never
+ *      fill the batch and starve the others;
+ *   4. per channel the contiguous prefix from the head is published, in chunks,
+ *      stopping at the first seq gap (a later row still backing off).
+ * At-least-once: a crash after the HTTP send and before `published_at` re-sends
+ * the same GameChange with the same id; clients dedupe on id/seq. No HTTP call
+ * happens inside a transaction.
  */
 export class OutboxPublisher {
   private timer: NodeJS.Timeout | null = null;
@@ -79,16 +91,40 @@ export class OutboxPublisher {
     const limit = this.deps.batchSize ?? 200;
     const chunkSize = this.deps.chunkSize ?? 50;
     const maxAttempts = this.deps.maxAttempts ?? 10;
+    const [blocked] = await db<{ n: number }[]>`
+      with heads as (
+        select distinct on (game_id) game_id, next_attempt_at
+        from ingest.broadcast_outbox
+        where published_at is null and dead_at is null
+        order by game_id, seq)
+      select count(*)::int as n from heads where next_attempt_at > now()`;
     const rows = await db<PendingRow[]>`
-      select o.change_id as "changeId", o.game_id as "gameId", o.seq::text as seq, o.attempts,
+      with heads as (
+        select distinct on (game_id) game_id, seq, next_attempt_at
+        from ingest.broadcast_outbox
+        where published_at is null and dead_at is null
+        order by game_id, seq),
+      ready as (select game_id from heads where next_attempt_at <= now()),
+      pending as (
+        select o.change_id, o.game_id, o.seq, o.attempts,
+               row_number() over (partition by o.game_id order by o.seq) as rn
+        from ingest.broadcast_outbox o
+        join ready r on r.game_id = o.game_id
+        where o.published_at is null and o.dead_at is null and o.next_attempt_at <= now())
+      select p.change_id as "changeId", p.game_id as "gameId", p.seq::text as seq, p.attempts,
              c.change_type as "changeType", c.provider_event_id as "providerEventId", c.body,
              c.created_at as "createdAt"
-      from ingest.broadcast_outbox o
-      join public.game_changes c on c.id = o.change_id
-      where o.published_at is null and o.dead_at is null and o.next_attempt_at <= now()
-      order by o.game_id, o.seq
+      from pending p
+      join public.game_changes c on c.id = p.change_id
+      order by p.rn, p.game_id, p.seq
       limit ${limit}`;
-    const result: DrainResult = { published: 0, failed: 0, skippedChannels: 0 };
+    const result: DrainResult = { published: 0, failed: 0, skippedChannels: blocked?.n ?? 0 };
+    if (result.skippedChannels > 0) {
+      log.warn(
+        { channels: result.skippedChannels },
+        'outbox: channels with a blocked head skipped',
+      );
+    }
     if (rows.length === 0) return result;
 
     const byGame = new Map<string, PendingRow[]>();
@@ -97,21 +133,21 @@ export class OutboxPublisher {
       list.push(r);
       byGame.set(r.gameId, list);
     }
-    const heads = await db<{ gameId: string; seq: string }[]>`
-      select game_id as "gameId", min(seq)::text as seq from ingest.broadcast_outbox
-      where published_at is null and dead_at is null and game_id = any(${[...byGame.keys()]})
-      group by game_id`;
-    const headSeq = new Map(heads.map((h) => [h.gameId, h.seq]));
 
-    for (const [gameId, list] of byGame) {
-      const first = list[0];
-      if (!first || headSeq.get(gameId) !== first.seq) {
-        result.skippedChannels++;
-        log.warn(
-          { gameId, head: headSeq.get(gameId), batchFirst: first?.seq },
-          'outbox: channel head not publishable, skipping channel',
-        );
-        continue;
+    for (const [gameId, rowsOfGame] of byGame) {
+      // rn ordering guarantees the head (rn = 1) is present; publish only the contiguous prefix.
+      const sorted = rowsOfGame.sort((a, b) => Number(a.seq) - Number(b.seq));
+      const list: PendingRow[] = [];
+      for (const r of sorted) {
+        const prev = list[list.length - 1];
+        if (prev && Number(r.seq) !== Number(prev.seq) + 1) {
+          log.warn(
+            { gameId, afterSeq: prev.seq, nextSeq: r.seq },
+            'outbox: seq gap inside a channel (a row still backing off); stopping at the prefix',
+          );
+          break;
+        }
+        list.push(r);
       }
       const channel = gameChannel(gameId);
       for (let i = 0; i < list.length; i += chunkSize) {

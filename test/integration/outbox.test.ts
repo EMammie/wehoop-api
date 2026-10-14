@@ -7,6 +7,7 @@ import {
   apply,
   counts,
   observation,
+  pbpClosed,
   pbpQ1,
   replayRun,
   seedGame,
@@ -83,6 +84,62 @@ describe('outbox publisher', () => {
       .filter((p) => p.channel === gameChannel(ga.gameId))
       .map((p) => (p.message.event === 'change' ? p.message.payload.seq : -1));
     expect(seqs).toEqual(seqs.map((_s, i) => i + 1));
+    expect(await pendingFor(ga.gameId)).toMatchObject({ pending: 0, dead: 0 });
+  });
+
+  it('fairness: a channel with a blocked head and 300 rows behind it never fills the batch; the other channel publishes fully in the first drain', async () => {
+    const big = pbpClosed();
+    const small = pbpQ1();
+    const ga = await seedGame(db, big);
+    const gb = await seedGame(db, small);
+    await apply(deps, ga.gameId, big, observation(await replayRun(db, ga.gameId), big, T0));
+    await apply(deps, gb.gameId, small, observation(await replayRun(db, gb.gameId), small, T0));
+    expect((await pendingFor(ga.gameId))?.pending).toBeGreaterThanOrEqual(300);
+    const bPending = (await pendingFor(gb.gameId))?.pending ?? 0;
+    expect(bPending).toBeGreaterThan(0);
+    // A's head is backing off for an hour
+    await db`update ingest.broadcast_outbox set next_attempt_at = now() + interval '1 hour'
+             where game_id = ${ga.gameId} and seq = (select min(seq) from ingest.broadcast_outbox where game_id = ${ga.gameId})`;
+    const transport = new MemoryTransport();
+    const publisher = new OutboxPublisher({ db, log: silentLog, transport, batchSize: 200 });
+    const r = await publisher.drainOnce();
+    expect(r.published).toBe(bPending);
+    expect(r.skippedChannels).toBe(1); // A: pending rows, head not publishable now
+    expect(await pendingFor(gb.gameId)).toMatchObject({ pending: 0 });
+    expect((await pendingFor(ga.gameId))?.published).toBe(0);
+    expect(transport.published.every((p) => p.channel === gameChannel(gb.gameId))).toBe(true);
+    // clean up: release A so the validator's global invariants (no stuck rows) hold
+    await db`update ingest.broadcast_outbox set next_attempt_at = now() where game_id = ${ga.gameId}`;
+    await publisher.drain();
+    expect(await pendingFor(ga.gameId)).toMatchObject({ pending: 0, dead: 0 });
+  });
+
+  it('fairness: with both heads ready, a 300-row channel and a 5-row channel both make progress in the first drain (the small one fully), each in seq order', async () => {
+    const big = pbpClosed();
+    const small = pbpQ1();
+    const ga = await seedGame(db, big);
+    const gb = await seedGame(db, small);
+    await apply(deps, ga.gameId, big, observation(await replayRun(db, ga.gameId), big, T0));
+    await apply(deps, gb.gameId, small, observation(await replayRun(db, gb.gameId), small, T0));
+    const aPending = (await pendingFor(ga.gameId))?.pending ?? 0;
+    const bPending = (await pendingFor(gb.gameId))?.pending ?? 0;
+    expect(aPending).toBeGreaterThanOrEqual(300);
+    const transport = new MemoryTransport();
+    const publisher = new OutboxPublisher({ db, log: silentLog, transport, batchSize: 200 });
+    const r = await publisher.drainOnce();
+    expect(r.published).toBe(200);
+    expect(r.skippedChannels).toBe(0);
+    expect((await pendingFor(gb.gameId))?.pending).toBe(0);
+    expect((await pendingFor(ga.gameId))?.published).toBe(200 - bPending);
+    const seqsOf = (gameId: string) =>
+      transport.published
+        .filter((p) => p.channel === gameChannel(gameId))
+        .map((p) => (p.message.event === 'change' ? p.message.payload.seq : -1));
+    expect(seqsOf(gb.gameId)).toEqual(seqsOf(gb.gameId).map((_s, i) => i + 1));
+    expect(seqsOf(ga.gameId)).toEqual(seqsOf(ga.gameId).map((_s, i) => i + 1));
+    // the rest drains in later batches
+    const rest = await publisher.drain();
+    expect(rest.published).toBe(aPending - (200 - bPending));
     expect(await pendingFor(ga.gameId)).toMatchObject({ pending: 0, dead: 0 });
   });
 

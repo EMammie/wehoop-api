@@ -46,6 +46,10 @@ export async function seedGame(
 export function pbpQ1(): NormalizedDocument {
   return wnbaAdapter.normalizePbp(PbpDocumentSchema.parse(fixture(`${R}-pbp-q1.json`)));
 }
+/** The whole recorded game (400+ events): a long backlog for outbox fairness tests. */
+export function pbpClosed(): NormalizedDocument {
+  return wnbaAdapter.normalizePbp(PbpDocumentSchema.parse(fixture(`${R}-pbp-closed.json`)));
+}
 export function pbpCreated(): NormalizedDocument {
   return wnbaAdapter.normalizePbp(PbpDocumentSchema.parse(fixture(`${R}-pbp-created.json`)));
 }
