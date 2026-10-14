@@ -29,6 +29,17 @@ describe('release:tag evidence check', () => {
     expect(v.problems).toHaveLength(2);
     expect(v.rows).toBe(4);
   });
+  it('a row passes only with the word PASS: a blank verdict or `pending` fails', () => {
+    const blank = checkEvidenceSummary(`${passing}| Crash point (a) |  |\n`);
+    expect(blank.ok).toBe(false);
+    expect(blank.problems).toEqual(['| Crash point (a) |  |']);
+    const pending = checkEvidenceSummary(`${passing}| Crash point (a) | pending |\n`);
+    expect(pending.ok).toBe(false);
+    expect(pending.problems).toHaveLength(1);
+    // "passed" is not the verdict word PASS
+    expect(checkEvidenceSummary(`${passing}| Crash point (a) | passed? |\n`).ok).toBe(false);
+  });
+
   it('fails without a table or with an empty table', () => {
     expect(checkEvidenceSummary('# nothing here').ok).toBe(false);
     expect(checkEvidenceSummary('| a | b |\n|---|---|\n').ok).toBe(false);

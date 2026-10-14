@@ -11,9 +11,10 @@ export interface EvidenceVerdict {
 }
 
 /**
- * The FINAL markdown table of the file (the summary). A row fails when any
- * cell contains `FAIL` or `NOT RUN` (case-insensitive, whole words). The header
- * and separator rows are ignored. No table at all is a failure.
+ * The FINAL markdown table of the file (the summary). A row passes only when it
+ * contains the word `PASS` and no `FAIL` / `NOT RUN` (case-insensitive, whole
+ * words); a blank or `pending` verdict is a failure. The header and separator
+ * rows are ignored. No table at all is a failure.
  */
 export function checkEvidenceSummary(text: string): EvidenceVerdict {
   const lines = text.split(/\r?\n/);
@@ -30,6 +31,6 @@ export function checkEvidenceSummary(text: string): EvidenceVerdict {
   if (current.length > 0) table = current;
   if (table.length === 0) return { ok: false, problems: ['no markdown table found'], rows: 0 };
   const rows = table.filter((l, i) => i > 0 && !/^\|[\s:|-]+\|$/.test(l));
-  const problems = rows.filter((r) => /\b(FAIL|NOT RUN)\b/i.test(r));
+  const problems = rows.filter((r) => !/\bPASS\b/i.test(r) || /\b(FAIL|NOT RUN)\b/i.test(r));
   return { ok: problems.length === 0 && rows.length > 0, problems, rows: rows.length };
 }
