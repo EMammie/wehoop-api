@@ -32,10 +32,15 @@ import type {
  * Unknown provider event types map to `other`; nothing here throws on content.
  */
 
-export function mapStatus(provider: string): GameStatus {
+/**
+ * Provider status → GameStatus, or null when the provider string is not one we
+ * know. The normalizer never invents a value: an unknown status is reported on
+ * the gameView as `unknownStatus` and applyChanges keeps the stored status.
+ */
+export function mapStatus(provider: string): GameStatus | null {
   const s = provider.toLowerCase().replace(/-/g, '_');
   const parsed = GameStatusSchema.safeParse(s);
-  return parsed.success ? parsed.data : 'scheduled';
+  return parsed.success ? parsed.data : null;
 }
 
 export function mapPeriodType(provider: string | undefined): PeriodType {
@@ -117,8 +122,10 @@ function currentPeriod(h: Header, periods: Array<PeriodRef & { score: Score }>):
 }
 
 function gameViewOf(h: Header, periods: Array<PeriodRef & { score: Score }>): GameView {
+  const status = mapStatus(h.status);
   return {
-    status: mapStatus(h.status),
+    status,
+    unknownStatus: status === null ? h.status : null,
     score: { home: h.home.points ?? 0, away: h.away.points ?? 0 },
     period: currentPeriod(h, periods),
     clock: h.clock ?? null,

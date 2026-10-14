@@ -26,7 +26,10 @@ export interface NormalizedEvent {
 
 /** The batch's own game-level view (plan §4). Absent for single push events. */
 export interface GameView {
-  status: GameStatus;
+  /** Null when the provider status is unknown: no phase claim, stored status kept. */
+  status: GameStatus | null;
+  /** The raw provider status string when `status` is null (logged, never stored). */
+  unknownStatus: string | null;
   score: Score;
   period: PeriodRef | null;
   clock: string | null;

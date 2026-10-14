@@ -165,8 +165,9 @@ export function decideBatch(
   if (gated) {
     const storedPhase = phaseOf(stored.status);
     if (gameView) {
-      const incomingPhase = phaseOf(gameView.status);
-      if (PHASE_RANK[incomingPhase] < PHASE_RANK[storedPhase]) {
+      // An unknown provider status makes no phase claim: 2a is skipped, 2b still applies.
+      const incomingPhase = gameView.status === null ? storedPhase : phaseOf(gameView.status);
+      if (gameView.status !== null && PHASE_RANK[incomingPhase] < PHASE_RANK[storedPhase]) {
         const rescheduled =
           storedPhase === 'post' && incomingPhase === 'pre' && stored.lastSeq === 0;
         if (!rescheduled) {

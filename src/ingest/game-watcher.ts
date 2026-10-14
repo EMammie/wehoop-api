@@ -142,7 +142,7 @@ export class GameWatcher {
       this.applied += result.changes.length;
       if (nd.batch.events.length > 0 || nd.batch.deletedEventIds.length > 0)
         this.generationOpen = true;
-      if (nd.gameView && result.gameLevel === 'write') this.lastStatus = nd.gameView.status;
+      if (nd.gameView?.status && result.gameLevel === 'write') this.lastStatus = nd.gameView.status;
       this.deps.log.info(
         {
           feed,
@@ -166,17 +166,21 @@ export class GameWatcher {
     const teamIds = await ensureTeams(this.deps.db, this.deps.adapter.league, nd.teams);
     const home = nd.teams.find((t) => t.isHome);
     const away = nd.teams.find((t) => !t.isHome);
-    const { id, created } = await ensureGame(this.deps.db, {
-      league: this.deps.adapter.league,
-      providerGameId: nd.providerGameId,
-      scheduledAt: nd.gameView?.scheduledAt ?? new Date().toISOString(),
-      status: nd.gameView?.status ?? 'scheduled',
-      coverage: nd.gameView?.coverage ?? null,
-      homeTeamId: home ? (teamIds.get(home.providerTeamId) ?? null) : null,
-      awayTeamId: away ? (teamIds.get(away.providerTeamId) ?? null) : null,
-      venue: nd.gameView?.venue ?? null,
-      broadcasts: nd.gameView?.broadcasts ?? null,
-    });
+    const { id, created } = await ensureGame(
+      this.deps.db,
+      {
+        league: this.deps.adapter.league,
+        providerGameId: nd.providerGameId,
+        scheduledAt: nd.gameView?.scheduledAt ?? new Date().toISOString(),
+        status: nd.gameView?.status ?? null,
+        coverage: nd.gameView?.coverage ?? null,
+        homeTeamId: home ? (teamIds.get(home.providerTeamId) ?? null) : null,
+        awayTeamId: away ? (teamIds.get(away.providerTeamId) ?? null) : null,
+        venue: nd.gameView?.venue ?? null,
+        broadcasts: nd.gameView?.broadcasts ?? null,
+      },
+      this.deps.log,
+    );
     await this.deps
       .db`update ingest.ingestion_runs set game_id = ${id} where id = ${this.deps.run.id}`;
     // A game with no durable history has nothing to regress: pregame documents may flow.

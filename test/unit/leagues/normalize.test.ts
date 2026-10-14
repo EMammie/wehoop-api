@@ -94,7 +94,11 @@ describe('Sportradar basketball normalizer', () => {
   it('maps statuses and period types, parses clocks', () => {
     expect(mapStatus('inprogress')).toBe('inprogress');
     expect(mapStatus('time-tbd')).toBe('time_tbd');
-    expect(mapStatus('weird')).toBe('scheduled');
+    expect(mapStatus('weird')).toBeNull(); // never invented: reported as unknownStatus instead
+    const weird = wnbaAdapter.normalizePbp(
+      PbpDocumentSchema.parse({ ...(fixture(`${R}-pbp-q1.json`) as object), status: 'weird' }),
+    );
+    expect(weird.gameView).toMatchObject({ status: null, unknownStatus: 'weird' });
     expect(mapPeriodType('REG')).toBe('quarter');
     expect(mapPeriodType('overtime')).toBe('overtime');
     expect(mapPeriodType('OT')).toBe('overtime');

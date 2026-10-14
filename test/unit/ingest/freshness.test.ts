@@ -36,6 +36,7 @@ const storedEv = (
 });
 const view = (over: Partial<GameView> = {}): GameView => ({
   status: 'inprogress',
+  unknownStatus: null,
   score: { home: 10, away: 8 },
   period: { number: 1, type: 'quarter', sequence: 1 },
   clock: '5:00',
@@ -380,6 +381,29 @@ describe('freshness §4 acceptance cases', () => {
     expect(
       decideBatch(stored(), batch({ watchId: 11, eventPositions: [pos(1, 100)] }), liveEvents),
     ).toMatchObject({ kind: 'stale' });
+  });
+});
+
+describe('freshness §4 acceptance cases (rev 4.3)', () => {
+  it('unknown provider status makes no phase claim: 2a is skipped, 2b still applies, the stored status is kept', () => {
+    const unknown = view({ status: null, unknownStatus: 'weird' });
+    // a new generation whose status we cannot map is not a phase regression
+    const d = decideBatch(stored(), batch({ watchId: 11, gameView: unknown }), liveEvents);
+    expect(d).toMatchObject({ kind: 'accept', generation: 'new', gameLevel: 'write' });
+    // but its period is still gated
+    const d2 = decideBatch(
+      stored({ currentPeriodSequence: 3 }),
+      batch({
+        watchId: 11,
+        gameView: view({ status: null, unknownStatus: 'weird' }),
+        eventPositions: [pos(3, 999)],
+      }),
+      liveEvents,
+    );
+    expect(d2).toMatchObject({ kind: 'stale', reason: 'run_regresses_state' });
+    expect((d2 as { detail: string }).detail).toMatch(/2b/);
+    // and phaseOf never sees a null: a stored status is always a real GameStatus
+    expect(phaseOf('inprogress')).toBe('live');
   });
 });
 

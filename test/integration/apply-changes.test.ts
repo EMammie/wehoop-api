@@ -302,6 +302,48 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     expect(await staleReasons(db, gameId)).toEqual({ superseded_observation: 1 });
   });
 
+  it('unknown provider status mid-game keeps inprogress, emits no status change, is reported on the batch', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    await apply(deps, gameId, nd, observation(run, nd, T0));
+    // the same document again with an unmappable status: nothing changes, the observation refreshes
+    const weird: NormalizedDocument = {
+      ...nd,
+      gameView: nd.gameView ? { ...nd.gameView, status: null, unknownStatus: 'weird' } : null,
+    };
+    const r = await apply(deps, gameId, weird, observation(run, weird, later(5)));
+    expect(r.outcome === 'applied' && r.gameLevel).toBe('write');
+    expect(r.outcome === 'applied' && r.changes).toEqual([]);
+    const [g] = await db<{ status: string; observedAt: Date }[]>`
+      select status::text as status, observed_at as "observedAt" from public.games where id = ${gameId}`;
+    expect(g?.status).toBe('inprogress');
+    expect(g?.observedAt?.toISOString()).toBe(later(5).toISOString());
+    // a later summary (new score) with an unmappable status: its status change still says inprogress
+    const sum = summaryQ1();
+    const weirdSum: NormalizedDocument = {
+      ...sum,
+      gameView: sum.gameView ? { ...sum.gameView, status: null, unknownStatus: 'weird' } : null,
+    };
+    const r2 = await apply(deps, gameId, weirdSum, observation(run, weirdSum, later(6)));
+    const statusChange = r2.outcome === 'applied' && r2.changes.find((c) => c.type === 'status');
+    expect(statusChange && statusChange.type === 'status' && statusChange.body.status).toBe(
+      'inprogress',
+    );
+    expect(
+      (
+        await db<
+          { status: string }[]
+        >`select status::text as status from public.games where id = ${gameId}`
+      )[0]?.status,
+    ).toBe('inprogress');
+    // and a brand-new row created from an unknown status defaults to scheduled, the only default there is
+    const created = await seedGame(db, { ...nd, gameView: weird.gameView });
+    const [row] = await db<{ status: string }[]>`
+      select status::text as status from public.games where id = ${created.gameId}`;
+    expect(row?.status).toBe('scheduled');
+  });
+
   it('crash point (b): a fault just before commit rolls the whole batch back; the retry applies it once', async () => {
     const nd = pbpQ1();
     const { gameId } = await seedGame(db, nd);

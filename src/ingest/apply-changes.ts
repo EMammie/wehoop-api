@@ -113,6 +113,7 @@ const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 function viewJson(gv: GameView | null, extra: Record<string, unknown>): Record<string, unknown> {
   return {
     status: gv?.status ?? null,
+    unknownStatus: gv?.unknownStatus ?? null,
     score: gv?.score ?? null,
     periodSequence: gv?.period?.sequence ?? null,
     clock: gv?.clock ?? null,
@@ -120,26 +121,39 @@ function viewJson(gv: GameView | null, extra: Record<string, unknown>): Record<s
   };
 }
 
-/** Create the games row if it does not exist. Status is taken from the document only on insert. */
+/**
+ * Create the games row if it does not exist. Status is taken from the document
+ * only on insert; a document with an unknown provider status creates the row as
+ * `scheduled` (logged). This is the ONLY place a default status exists: on
+ * update an unknown status keeps the stored one (plan §4 rule 3).
+ */
 export async function ensureGame(
   db: Db,
   game: {
     league: LeagueCode;
     providerGameId: string;
     scheduledAt: string;
-    status: GameStatus;
+    status: GameStatus | null;
     coverage: string | null;
     homeTeamId: string | null;
     awayTeamId: string | null;
     venue: Record<string, unknown> | null;
     broadcasts: unknown[] | null;
   },
+  log?: Logger,
 ): Promise<{ id: string; created: boolean }> {
   const coverage = coverageOf(game.coverage);
+  const status: GameStatus = game.status ?? 'scheduled';
+  if (game.status === null) {
+    log?.warn(
+      { providerGameId: game.providerGameId },
+      'unknown provider status at game creation; row defaults to scheduled',
+    );
+  }
   const [row] = await db<{ id: string; created: boolean }[]>`
     insert into public.games (league, provider_game_id, scheduled_at, status, coverage,
                               home_team_id, away_team_id, venue, broadcasts)
-    values (${game.league}, ${game.providerGameId}, ${game.scheduledAt}, ${game.status}, ${coverage},
+    values (${game.league}, ${game.providerGameId}, ${game.scheduledAt}, ${status}, ${coverage},
             ${game.homeTeamId}, ${game.awayTeamId},
             ${game.venue ? db.json(game.venue as never) : null},
             ${game.broadcasts ? db.json(game.broadcasts as never) : null})
@@ -230,6 +244,7 @@ export async function applyChanges(
     const storedView = viewJson(
       {
         status: g.status,
+        unknownStatus: null,
         score: { home: g.homePoints, away: g.awayPoints },
         period:
           g.currentPeriodSequence === null
@@ -287,6 +302,16 @@ export async function applyChanges(
       };
     }
 
+    if (
+      observation.gameView?.unknownStatus !== null &&
+      observation.gameView?.unknownStatus !== undefined
+    ) {
+      deps.log.warn(
+        { gameId, providerStatus: observation.gameView.unknownStatus, stored: g.status },
+        'unknown provider status; stored status kept',
+      );
+    }
+
     if (decision.advanceWatchRunId && observation.watchId !== null) {
       await tx`update public.games set watch_run_id = ${observation.watchId} where id = ${gameId}`;
     }
@@ -332,9 +357,11 @@ export async function applyChanges(
                 sequence: g.currentPeriodSequence,
               },
       };
+      // An unknown provider status (null) keeps the stored status: omission is not change.
+      const status = gv.status ?? g.status;
       const candidate = decision.restrictedGameLevel
-        ? { ...storedStatus, status: gv.status }
-        : { status: gv.status, score: gv.score, period: gv.period };
+        ? { ...storedStatus, status }
+        : { status, score: gv.score, period: gv.period };
       if (contentHash(candidate) !== contentHash(storedStatus)) {
         nextStatus = candidate;
         changes.push({ type: 'status', body: candidate });
@@ -412,7 +439,7 @@ export async function applyChanges(
         const newestIncoming = newestEventType(batch.events);
         const clockRunning = deriveClockRunning(
           { status: g.status, clock: g.clock, clockRunning: g.clockRunning },
-          { status: gv.status, clock: gv.clock, clockRunning: gv.clockRunning },
+          { status: gv.status ?? g.status, clock: gv.clock, clockRunning: gv.clockRunning },
           newestIncoming,
         );
         await tx`update public.games set
@@ -435,7 +462,7 @@ export async function applyChanges(
       const [bumped] = await tx<{ lastSeq: string }[]>`
         update public.games set
           last_seq = last_seq + ${n},
-          status = ${nextStatus ? nextStatus.status : g.status},
+          status = coalesce(${nextStatus?.status ?? null}::public.game_status, status),
           home_points = ${nextStatus ? nextStatus.score.home : g.homePoints},
           away_points = ${nextStatus ? nextStatus.score.away : g.awayPoints},
           current_period = ${nextStatus ? (nextStatus.period?.number ?? null) : g.currentPeriod},
