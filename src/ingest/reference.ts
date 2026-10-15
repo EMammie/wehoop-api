@@ -245,6 +245,11 @@ export class ReferenceIngester {
       },
       log,
     );
+    // Generation-less (watchId null): rule 3 only, and restricted to status while the game is
+    // pre-phase or has no durable state, so the score below is never written. It is the schedule's
+    // own claim (0-0 when the entry carries none) and reaches only the stale_observations log; a
+    // closed entry for a never-watched game therefore leaves a closed 0-0 row with a null
+    // stats_final_at until a watcher's closing document arrives.
     const gameView: GameView = {
       status,
       unknownStatus: status === null ? g.status : null,
