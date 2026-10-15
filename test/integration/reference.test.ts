@@ -128,11 +128,16 @@ describe('ReferenceIngester', () => {
 
   it('tournament list + tournament schedule: OOT games attach to their tournament and OOT season', async () => {
     const suffix = randomUUID();
+    // The tournament and game ids are suffixed so the rows never collide with the validator's
+    // worker replay of the same fixture. The season id (04cb26c7…, 2025 OOT) is NOT: seasons are
+    // unique per (league, year, type) and ensureSeason refuses a second provider id for a season
+    // it already holds (identity-merge.test.ts), so a suffixed season id would be a deliberate
+    // clash and leave season_id null whenever the real replay ran first. Both paths must share
+    // the one season row, exactly as they would in production.
     const ids = [
       '28d4af13-bfa1-4c95-9f1b-30af6fd5b7ee',
       '506e7bd0-ec4e-49aa-b55c-bddd8ed41003',
       '06dbbc3b-b5e2-444c-b70b-06465e267135',
-      '04cb26c7-b1d2-4e19-8fe4-c0a30814aa5c',
     ];
     const list = suffixed(fixture('docs-tournament-list-2025-OOT.json', 'unrivaled'), ids, suffix);
     const sched = suffixed(

@@ -34,6 +34,7 @@ import {
 import {
   applyPlayerProfile,
   ensurePlayers,
+  ensurePlayerTeamSeason,
   ensureSeason,
   ensureTeams,
   ensureTournament,
@@ -72,6 +73,8 @@ export interface ReferenceOutcome {
   tournaments: number;
   /** Canonical player rows folded into another by a profile's references. */
   merged: number;
+  /** Profile references held for reconciliation (ingest.player_merge_holds) instead of linked or merged. */
+  held: number;
   /** Game-level batches rejected or superseded by the freshness policy. */
   stale: number;
 }
@@ -84,6 +87,7 @@ const EMPTY: Omit<ReferenceOutcome, 'feed'> = {
   standings: 0,
   tournaments: 0,
   merged: 0,
+  held: 0,
   stale: 0,
 };
 
@@ -387,9 +391,13 @@ export class ReferenceIngester {
 
   private async playerProfile(body: unknown, out: ReferenceOutcome) {
     const doc = PlayerProfileDocumentSchema.parse(body);
-    const result = await applyPlayerProfile(this.deps.db, this.deps.league, doc, this.deps.log);
+    const run = await this.runHandle();
+    const result = await applyPlayerProfile(this.deps.db, this.deps.league, doc, this.deps.log, {
+      runId: run.id,
+    });
     out.players++;
     out.merged += result.mergedFrom.length;
+    out.held += result.held.length;
     out.seasonLines += result.seasonLines;
   }
 
@@ -446,10 +454,7 @@ export class ReferenceIngester {
     for (const p of doc.players) {
       const playerId = playerIds.get(p.id);
       if (!playerId || (!p.total && !p.average)) continue;
-      await db`insert into public.player_team_seasons (player_id, team_id, season_id, jersey)
-               values (${playerId}, ${teamId}, ${seasonId}, ${p.jersey_number ?? null})
-               on conflict (player_id, team_id, season_id) do update
-                 set jersey = coalesce(excluded.jersey, public.player_team_seasons.jersey)`;
+      await ensurePlayerTeamSeason(db, { playerId, teamId, seasonId, jersey: p.jersey_number });
       lines.push({ playerId, seasonId, teamId, total: p.total ?? {}, average: p.average ?? null });
     }
     out.seasonLines += await applyPlayerSeasonStats(db, lines);
@@ -513,9 +518,7 @@ export class ReferenceIngester {
         byKey.set(key, { playerId, teamId, total: r.total ?? {}, average: r.average ?? null });
     }
     for (const l of byKey.values()) {
-      await db`insert into public.player_team_seasons (player_id, team_id, season_id)
-               values (${l.playerId}, ${l.teamId}, ${seasonId})
-               on conflict (player_id, team_id, season_id) do nothing`;
+      await ensurePlayerTeamSeason(db, { playerId: l.playerId, teamId: l.teamId, seasonId });
     }
     out.seasonLines += await applyPlayerSeasonStats(
       db,

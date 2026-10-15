@@ -268,3 +268,58 @@ where not exists (
     and e.external_id = ps.provider_player_id
     and e.player_id = ps.player_id
 );
+
+-- check: game_player_stats_pk_is_provider_keyed | expect: 1
+select count(*)
+from pg_constraint c
+where c.conrelid = 'public.game_player_stats'::regclass
+  and c.contype = 'p'
+  and (select array_agg(a.attname::text order by a.attnum)
+       from pg_attribute a where a.attrelid = c.conrelid and a.attnum = any(c.conkey))
+      = array['game_id', 'provider_player_id'];
+
+-- check: game_player_stats_one_row_per_provider_id_per_game | expect: 0
+select count(*) from (
+  select game_id, provider_player_id from public.game_player_stats group by 1, 2 having count(*) > 1
+) d;
+
+-- check: game_player_stats_never_point_at_tombstones | expect: 0
+select count(*)
+from public.game_player_stats s
+join public.players p on p.id = s.player_id
+where p.merged_into is not null;
+
+-- check: tombstones_have_merge_provenance | expect: 0
+select count(*)
+from public.players l
+where l.merged_into is not null
+  and not exists (select 1 from ingest.player_merges m where m.loser_id = l.id);
+
+-- check: merge_losers_are_tombstones | expect: 0
+select count(*)
+from ingest.player_merges m
+join public.players l on l.id = m.loser_id
+where l.merged_into is null;
+
+-- check: merge_survivors_are_or_resolve_to_the_current_survivor | expect: 0
+select count(*)
+from ingest.player_merges m
+join public.players l on l.id = m.loser_id
+join public.players s on s.id = m.survivor_id
+where l.merged_into <> m.survivor_id
+  and coalesce(s.merged_into, s.id) <> l.merged_into;
+
+-- check: open_hold_candidates_are_distinct_canonical_rows | expect: 0
+select count(*)
+from ingest.player_merge_holds h
+where h.status = 'open'
+  and h.reason = 'conflicting_profiles'
+  and cardinality(h.candidate_ids) = 2
+  and (select coalesce(merged_into, id) from public.players where id = h.candidate_ids[1])
+      = (select coalesce(merged_into, id) from public.players where id = h.candidate_ids[2]);
+
+-- check: merge_tables_closed_to_clients | expect: 0
+select (has_table_privilege('anon', 'ingest.player_merges', 'SELECT')::int
+      + has_table_privilege('anon', 'ingest.player_merge_holds', 'SELECT')::int
+      + has_table_privilege('authenticated', 'ingest.player_merges', 'SELECT')::int
+      + has_table_privilege('authenticated', 'ingest.player_merge_holds', 'SELECT')::int);

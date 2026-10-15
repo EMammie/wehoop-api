@@ -57,7 +57,8 @@ function bostonPair(suffix: string): {
   };
 }
 
-async function snapshotOf(playerId: string) {
+async function snapshotOf(playerId: string | null) {
+  if (!playerId) throw new Error('profile was held: no player id');
   const [p] = await db<{ id: string; mergedInto: string | null }[]>`
     select id, merged_into as "mergedInto" from public.players where id = ${playerId}`;
   const ids = await externalIdsOf(db, playerId);

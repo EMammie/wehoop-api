@@ -2,10 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/api/server.js';
 import { loadConfig } from '../../src/config.js';
+import { applyPlayerSeasonStats } from '../../src/ingest/apply-changes.js';
 import {
   applyPlayerProfile,
   ensurePlayers,
+  ensurePlayerTeamSeason,
   ensureSeason,
+  ensureTeams,
   resolveCanonical,
 } from '../../src/ingest/identity.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
@@ -32,16 +35,22 @@ import { fixture } from '../helpers/fixtures.js';
 /**
  * Identity merges against game state (plan §3, ratified 2026-10-14: canonical
  * uuids never enter a body or a content hash, so a merge never rewrites
- * history). The merge loser owns play_events and game_player_stats rows; the
- * repoint lives in apply-changes.ts (CLAUDE.md non-negotiable 2); after the
- * merge the identical summary is a no-op and a fold of /changes still equals
- * the snapshot.
+ * history; plan §2 rev 4.4: game_player_stats is keyed on the provider id, so
+ * a merge repoints and never drops a row, and a client that folded the
+ * provider-keyed changes agrees with a fresh snapshot). Every merge leaves a
+ * provenance row in ingest.player_merges; references identity.ts will not act
+ * on are held in ingest.player_merge_holds.
+ *
+ * The WNBA documents are the recorded simulation fixtures with every player
+ * id suffixed per test; the "profiles" claiming two WNBA ids are one person
+ * are synthetic test documents, not provider data.
  */
 const db = testDb();
 const deps = { db, log: silentLog };
 const app = createApp({ db, config: loadConfig({ ...process.env, MODE: 'sim' }), log: silentLog });
 const T0 = new Date('2026-07-01T01:00:00Z');
 const later = (s: number) => new Date(T0.getTime() + s * 1000);
+type League = 'wnba' | 'ncaawb' | 'unrivaled';
 
 beforeAll(async () => {
   await db`select 1`;
@@ -68,8 +77,8 @@ function suffixedDocs(suffix: string) {
   };
 }
 
-const gamePlayer = (league: string, providerPlayerId: string, fullName: string) =>
-  ensurePlayers(db, league as 'wnba' | 'ncaawb' | 'unrivaled', [
+const gamePlayer = (league: League, providerPlayerId: string, fullName: string) =>
+  ensurePlayers(db, league, [
     {
       providerPlayerId,
       providerTeamId: null,
@@ -97,8 +106,53 @@ async function ownership(playerId: string) {
   return row;
 }
 
+interface MergeRow {
+  survivorId: string;
+  loserId: string;
+  league: string;
+  triggerFeed: string;
+  triggerDocumentId: string | null;
+  triggerSource: string;
+  triggerReference: Record<string, unknown>;
+  repoint: Record<string, unknown>;
+  conflicts: Array<{ table: string; row: Record<string, unknown> }>;
+}
+async function mergeRowFor(loser: string): Promise<MergeRow | undefined> {
+  const [row] = await db<MergeRow[]>`
+    select survivor_id as "survivorId", loser_id as "loserId", league::text as league, trigger_feed as "triggerFeed",
+           trigger_document_id as "triggerDocumentId", trigger_source as "triggerSource",
+           trigger_reference as "triggerReference", repoint, conflicts
+    from ingest.player_merges where loser_id = ${loser}`;
+  return row;
+}
+
+interface HoldRow {
+  reason: string;
+  triggerDocumentId: string;
+  triggerReference: Record<string, unknown>;
+  candidateIds: string[];
+  status: string;
+}
+async function holdsFor(documentId: string): Promise<HoldRow[]> {
+  return db<HoldRow[]>`
+    select reason, trigger_document_id as "triggerDocumentId", trigger_reference as "triggerReference",
+           candidate_ids as "candidateIds", status
+    from ingest.player_merge_holds where trigger_document_id = ${documentId} order by reason`;
+}
+
+async function snapshotAndChanges(gameId: string, after = 0) {
+  const snapRes = await app.request(`/v1/games/${gameId}/snapshot`);
+  expect(snapRes.status).toBe(200);
+  const snap = SnapshotSchema.parse(await snapRes.json());
+  const page = ChangesPageSchema.parse(
+    await (await app.request(`/v1/games/${gameId}/changes?after=${after}&limit=500`)).json(),
+  );
+  expect(page.hasMore).toBe(false);
+  return { snap, page };
+}
+
 describe('identity merge against game state', () => {
-  it("a merge repoints the loser's play_events and game_player_stats to the survivor; the identical summary is then a no-op and fold == snapshot", async () => {
+  it("a merge repoints the loser's play_events and game_player_stats to the survivor, records its provenance, and the identical summary is then a no-op with fold == snapshot", async () => {
     const suffix = randomUUID();
     const { pbp, sum } = suffixedDocs(suffix);
     // A player with both a play attribution and a box line in the Q1 fixtures.
@@ -134,16 +188,37 @@ describe('identity merge against game state', () => {
     const changesBefore = (await counts(db, gameId)).changes;
 
     // An Unrivaled profile for the older row references the WNBA id: two existing rows -> merge.
+    const ref = { source_id: P, scope: 'WNBA', id_type: 'league_profile' };
     const res = await applyPlayerProfile(
       db,
       'unrivaled',
-      profile(unrId, line.fullName, [{ source_id: P, scope: 'WNBA', id_type: 'league_profile' }]),
+      profile(unrId, line.fullName, [ref]),
       silentLog,
     );
     expect(res.playerId).toBe(survivor);
     expect(res.mergedFrom).toEqual([loser]);
-    expect(res.dropped).toEqual({ gamePlayerStats: 0, playerSeasonStats: 0, playerTeamSeasons: 0 });
+    expect(res.held).toEqual([]);
+    expect(res.merges).toHaveLength(1);
+    expect(res.merges[0]?.conflicts).toEqual([]);
+    expect(res.merges[0]?.repoint).toEqual({
+      playEvents: loserOwned.events,
+      gamePlayerStats: { repointed: 1 },
+      playerSeasonStats: { repointed: 0, dropped: 0 },
+      playerTeamSeasons: { repointed: 0, dropped: 0 },
+    });
     expect(await resolveCanonical(db, loser)).toBe(survivor);
+    // Provenance: which document, which references[] entry, who survived, what moved.
+    expect(await mergeRowFor(loser)).toEqual({
+      survivorId: survivor,
+      loserId: loser,
+      league: 'unrivaled',
+      triggerFeed: 'player_profile',
+      triggerDocumentId: unrId,
+      triggerSource: 'reference',
+      triggerReference: ref,
+      repoint: res.merges[0]?.repoint,
+      conflicts: [],
+    });
     // Everything the loser owned now belongs to the survivor; the row keeps its provider id and hash.
     expect(await ownership(loser)).toEqual({ events: 0, lines: 0, mergedInto: survivor });
     const survivorOwned = await ownership(survivor);
@@ -163,17 +238,20 @@ describe('identity merge against game state', () => {
     expect(r3.counts.touchedStats).toBe(sum.batch.playerStats.length + sum.batch.teamStats.length);
     expect((await counts(db, gameId)).changes).toBe(changesBefore);
 
+    // Re-applying the profile: no second merge row, no hold, nothing new.
+    const again = await applyPlayerProfile(
+      db,
+      'unrivaled',
+      profile(unrId, line.fullName, [ref]),
+      silentLog,
+    );
+    expect(again).toMatchObject({ playerId: survivor, mergedFrom: [], merges: [], held: [] });
+
     // The snapshot keys the line on the provider id and a fold of /changes reproduces it.
-    const snapRes = await app.request(`/v1/games/${gameId}/snapshot`);
-    expect(snapRes.status).toBe(200);
-    const snap = SnapshotSchema.parse(await snapRes.json());
+    const { snap, page } = await snapshotAndChanges(gameId);
     const snapLine = snap.playerStats.find((p) => p.providerPlayerId === P);
     expect(snapLine).toMatchObject({ providerPlayerId: P, fullName: line.fullName });
     expect(Object.keys(snapLine ?? {})).not.toContain('playerId');
-    const page = ChangesPageSchema.parse(
-      await (await app.request(`/v1/games/${gameId}/changes?limit=500`)).json(),
-    );
-    expect(page.hasMore).toBe(false);
     const folded = stateFromSnapshot({
       ...snap,
       events: [],
@@ -186,52 +264,187 @@ describe('identity merge against game state', () => {
     expect(canonicalState(folded)).toBe(canonicalState(stateFromSnapshot(snap)));
   });
 
-  it("a merge whose loser already has a line in a game the survivor also has one in drops the loser's row and reports it; the next summary skips the duplicate line", async () => {
+  it('two provider ids merged into one person keep two provider-keyed rows: [A,B] then [B,A] after the merge yields zero changes, a connected client and a fresh snapshot agree, and each line still changes independently', async () => {
     const suffix = randomUUID();
     const { sum } = suffixedDocs(suffix);
     const [p, q] = sum.batch.playerStats;
     if (!p || !q) throw new Error('fixture has fewer than two player lines');
+    const A = p.providerPlayerId;
+    const B = q.providerPlayerId;
     const { gameId } = await seedGame(db, sum);
     const run = await replayRun(db, gameId);
     const r1 = await apply(deps, gameId, sum, observation(run, sum, T0));
     expect(r1.outcome).toBe('applied');
     const changesBefore = (await counts(db, gameId)).changes;
-    // A (nonsense) profile claiming both WNBA ids are one person.
+    // A client connected before the merge: snapshot + the stream so far.
+    const { snap: snapBefore } = await snapshotAndChanges(gameId);
+    const client = stateFromSnapshot(snapBefore);
+    expect(client.playerStats.size).toBe(sum.batch.playerStats.length);
+
+    // A synthetic profile claiming both WNBA ids are one person (two game-sourced rows -> merge).
+    const docId = `unr-${suffix}`;
     const res = await applyPlayerProfile(
       db,
       'unrivaled',
-      profile(`unr-${suffix}`, p.fullName, [
-        { source_id: p.providerPlayerId, scope: 'WNBA', id_type: 'league_profile' },
-        { source_id: q.providerPlayerId, scope: 'WNBA', id_type: 'league_profile' },
+      profile(docId, p.fullName, [
+        { source_id: A, scope: 'WNBA', id_type: 'league_profile' },
+        { source_id: B, scope: 'WNBA', id_type: 'league_profile' },
       ]),
       silentLog,
     );
     expect(res.mergedFrom).toHaveLength(1);
-    expect(res.dropped).toEqual({ gamePlayerStats: 1, playerSeasonStats: 0, playerTeamSeasons: 0 });
-    const rows = await db<{ providerPlayerId: string }[]>`
-      select provider_player_id as "providerPlayerId" from public.game_player_stats
-      where game_id = ${gameId} and player_id = ${res.playerId}`;
-    expect(rows).toHaveLength(1); // the survivor's line, whichever row was older
-    const kept = rows[0]?.providerPlayerId;
-    expect([p.providerPlayerId, q.providerPlayerId]).toContain(kept);
-    // Re-apply: the kept line is confirmed, the other now resolves to the same player and is skipped.
-    const ordered = {
+    expect(res.held).toEqual([]);
+    // Nothing dropped: both rows stay, both now point at the survivor.
+    expect(res.merges[0]?.conflicts).toEqual([]);
+    expect(res.merges[0]?.repoint.gamePlayerStats).toEqual({ repointed: 1 });
+    const rows = await db<{ providerPlayerId: string; playerId: string }[]>`
+      select provider_player_id as "providerPlayerId", player_id as "playerId" from public.game_player_stats
+      where game_id = ${gameId} and provider_player_id in (${A}, ${B}) order by provider_player_id`;
+    expect(rows.map((r) => r.providerPlayerId).sort()).toEqual([A, B].sort());
+    expect(new Set(rows.map((r) => r.playerId))).toEqual(new Set([res.playerId]));
+    expect((await counts(db, gameId)).changes).toBe(changesBefore);
+
+    // Item 1: the same facts in the opposite order, observed later -> zero changes.
+    const reversed = {
+      ...sum,
+      batch: { ...sum.batch, playerStats: [q, p, ...sum.batch.playerStats.slice(2)] },
+    };
+    const r2 = await apply(deps, gameId, reversed, observation(run, reversed, later(5)));
+    if (r2.outcome !== 'applied') throw new Error('expected applied');
+    expect(r2.changes).toEqual([]);
+    expect(r2.counts.duplicateLines).toBe(0);
+    expect(r2.counts.touchedStats).toBe(sum.batch.playerStats.length + sum.batch.teamStats.length);
+    expect((await counts(db, gameId)).changes).toBe(changesBefore);
+
+    // Each provider line is its own entity: a correction to B changes B only, in either order.
+    const bumped = {
       ...sum,
       batch: {
         ...sum.batch,
-        playerStats: [...sum.batch.playerStats].sort((a, b) =>
-          a.providerPlayerId === kept ? -1 : b.providerPlayerId === kept ? 1 : 0,
-        ),
+        playerStats: [
+          { ...q, stats: { ...q.stats, points: (q.stats.points ?? 0) + 1 } },
+          p,
+          ...sum.batch.playerStats.slice(2),
+        ],
       },
     };
-    const r2 = await apply(deps, gameId, ordered, observation(run, ordered, later(5)));
-    if (r2.outcome !== 'applied') throw new Error('expected applied');
-    expect(r2.changes).toEqual([]);
-    expect(r2.counts.duplicatePlayers).toBe(1);
-    expect((await counts(db, gameId)).changes).toBe(changesBefore);
+    const r3 = await apply(deps, gameId, bumped, observation(run, bumped, later(10)));
+    if (r3.outcome !== 'applied') throw new Error('expected applied');
+    expect(r3.changes.map((c) => c.type)).toEqual(['stats_player']);
+    const only = r3.changes[0];
+    expect(only?.type === 'stats_player' && only.body.providerPlayerId).toBe(B);
+    expect((await counts(db, gameId)).changes).toBe(changesBefore + 1);
+
+    // Item 2: the connected client folds what came after its snapshot; a fresh snapshot agrees.
+    const { snap: snapAfter, page } = await snapshotAndChanges(gameId, snapBefore.seq);
+    expect(page.changes).toHaveLength(1);
+    for (const ch of page.changes) applyChange(client, ch);
+    expect(canonicalState(client)).toBe(canonicalState(stateFromSnapshot(snapAfter)));
+    expect(snapAfter.playerStats.map((l) => l.providerPlayerId)).toContain(A);
+    expect(snapAfter.playerStats.map((l) => l.providerPlayerId)).toContain(B);
+    // and the boxscore view shows both lines under one canonical player
+    const view = await db<{ providerPlayerId: string }[]>`
+      select provider_player_id as "providerPlayerId" from public.v_boxscore
+      where game_id = ${gameId} and player_id = ${res.playerId ?? ''} order by 1`;
+    expect(view.map((v) => v.providerPlayerId).sort()).toEqual([A, B].sort());
   });
 
-  it('a second merge flattens earlier tombstones onto the new survivor (chains stay depth 1)', async () => {
+  it('a document that repeats one provider id applies the first line and skips the repeat (counted), deterministically', async () => {
+    const suffix = randomUUID();
+    const { sum } = suffixedDocs(suffix);
+    const [p] = sum.batch.playerStats;
+    if (!p) throw new Error('fixture has no player line');
+    const { gameId } = await seedGame(db, sum);
+    const run = await replayRun(db, gameId);
+    const doubled = {
+      ...sum,
+      batch: {
+        ...sum.batch,
+        playerStats: [
+          ...sum.batch.playerStats,
+          { ...p, stats: { ...p.stats, points: (p.stats.points ?? 0) + 5 } },
+        ],
+      },
+    };
+    const r1 = await apply(deps, gameId, doubled, observation(run, doubled, T0));
+    if (r1.outcome !== 'applied') throw new Error('expected applied');
+    expect(r1.counts.duplicateLines).toBe(1);
+    expect(r1.changes.filter((c) => c.type === 'stats_player')).toHaveLength(
+      sum.batch.playerStats.length,
+    );
+    const r2 = await apply(deps, gameId, doubled, observation(run, doubled, later(5)));
+    if (r2.outcome !== 'applied') throw new Error('expected applied');
+    expect(r2.changes).toEqual([]);
+    expect(r2.counts.duplicateLines).toBe(1);
+  });
+
+  it('a merge whose loser owns a season line and a team season the survivor also owns keeps their full content in ingest.player_merges.conflicts', async () => {
+    const suffix = randomUUID();
+    const A = `wa-${suffix}`;
+    const B = `wb-${suffix}`;
+    const older = (await gamePlayer('wnba', A, 'Season Collision')).get(A) ?? '';
+    const younger = (await gamePlayer('wnba', B, 'Season Collision')).get(B) ?? '';
+    const [next] = await db<{ year: number }[]>`
+      select coalesce(max(year), 2000)::int + 1 as year from public.seasons where league = 'wnba'`;
+    const seasonId = await ensureSeason(
+      db,
+      'wnba',
+      { providerSeasonId: `s-${suffix}`, year: next?.year ?? 2001, type: 'REG' },
+      silentLog,
+    );
+    if (!seasonId) throw new Error('season not created');
+    const teamId =
+      (
+        await ensureTeams(db, 'wnba', [
+          { providerTeamId: `t-${suffix}`, name: 'T', market: null, alias: null },
+        ])
+      ).get(`t-${suffix}`) ?? '';
+    for (const [playerId, points, jersey] of [
+      [older, 10, '1'],
+      [younger, 20, '2'],
+    ] as const) {
+      await ensurePlayerTeamSeason(db, { playerId, teamId, seasonId, jersey });
+      await applyPlayerSeasonStats(db, [
+        { playerId, seasonId, teamId, total: { games_played: 1, points }, average: null },
+      ]);
+    }
+    const res = await applyPlayerProfile(
+      db,
+      'wnba',
+      profile(A, 'Season Collision', [{ source_id: B, scope: 'WNBA', id_type: 'league_profile' }]),
+      silentLog,
+    );
+    expect(res).toMatchObject({ playerId: older, mergedFrom: [younger], held: [] });
+    const merge = await mergeRowFor(younger);
+    expect(merge?.triggerSource).toBe('reference');
+    expect(merge?.repoint).toEqual({
+      playEvents: 0,
+      gamePlayerStats: { repointed: 0 },
+      playerSeasonStats: { repointed: 0, dropped: 1 },
+      playerTeamSeasons: { repointed: 0, dropped: 1 },
+    });
+    expect(merge?.conflicts.map((c) => c.table).sort()).toEqual([
+      'player_season_stats',
+      'player_team_seasons',
+    ]);
+    const line = merge?.conflicts.find((c) => c.table === 'player_season_stats')?.row;
+    expect(line).toMatchObject({
+      player_id: younger,
+      season_id: seasonId,
+      team_id: teamId,
+      points: 20,
+    });
+    const roster = merge?.conflicts.find((c) => c.table === 'player_team_seasons')?.row;
+    expect(roster).toMatchObject({ player_id: younger, jersey: '2' });
+    // the survivor's own line is the one kept
+    const [kept] = await db<{ points: number; jersey: string | null }[]>`
+      select pss.points, pts.jersey from public.player_season_stats pss
+      join public.player_team_seasons pts on pts.player_id = pss.player_id and pts.team_id = pss.team_id and pts.season_id = pss.season_id
+      where pss.player_id = ${older} and pss.season_id = ${seasonId}`;
+    expect(kept).toEqual({ points: 10, jersey: '1' });
+  });
+
+  it('a second merge flattens earlier tombstones onto the new survivor (chains stay depth 1) and each merge has its own provenance row', async () => {
     const suffix = randomUUID();
     const x = (await gamePlayer('wnba', `w-${suffix}`, 'Chain Test')).get(`w-${suffix}`) ?? '';
     const y = (await gamePlayer('ncaawb', `n-${suffix}`, 'Chain Test')).get(`n-${suffix}`) ?? '';
@@ -273,6 +486,9 @@ describe('identity merge against game state', () => {
         select player_id as "playerId" from public.player_external_ids where external_id = ${ext}`;
       expect(e?.playerId).toBe(x);
     }
+    // provenance: Z's row names Y as the survivor at the time, Y's names X; the current resolution is merged_into
+    expect(await mergeRowFor(z)).toMatchObject({ survivorId: y, triggerDocumentId: `n-${suffix}` });
+    expect(await mergeRowFor(y)).toMatchObject({ survivorId: x, triggerDocumentId: `w-${suffix}` });
   });
 
   it('ensureSeason: the same (league, year, type) under another provider id is a clash and is not linked', async () => {
@@ -303,5 +519,147 @@ describe('identity merge against game state', () => {
     const [row] = await db<{ n: number }[]>`
       select count(*)::int as n from public.seasons where league = 'unrivaled' and year = ${year} and type = 'REG'`;
     expect(row?.n).toBe(1);
+  });
+});
+
+describe('references identity.ts refuses to act on are held, never merged', () => {
+  it('unknown scope and unknown id type: held with the reference entry, not linked; re-applying adds no second open hold', async () => {
+    const suffix = randomUUID();
+    const docId = `w-${suffix}`;
+    const refs = [
+      { source_id: `nba-${suffix}`, scope: 'NBA', id_type: 'league_profile' },
+      { source_id: '7', scope: 'WNBA', id_type: 'jersey' },
+      { source_id: `n-${suffix}`, scope: 'NCAAW', id_type: 'league_profile' },
+    ];
+    const res = await applyPlayerProfile(db, 'wnba', profile(docId, 'Held One', refs), silentLog);
+    expect(res.playerId).toBeTruthy();
+    expect(res.held.map((h) => h.reason).sort()).toEqual(['unknown_id_type', 'unknown_scope']);
+    expect(res.externalIds.map((e) => `${e.league}:${e.externalId}`).sort()).toEqual([
+      `ncaawb:n-${suffix}`,
+      `wnba:w-${suffix}`,
+    ]);
+    const holds = await holdsFor(docId);
+    expect(holds).toEqual([
+      {
+        reason: 'unknown_id_type',
+        triggerDocumentId: docId,
+        triggerReference: refs[1],
+        candidateIds: [],
+        status: 'open',
+      },
+      {
+        reason: 'unknown_scope',
+        triggerDocumentId: docId,
+        triggerReference: refs[0],
+        candidateIds: [],
+        status: 'open',
+      },
+    ]);
+    const again = await applyPlayerProfile(db, 'wnba', profile(docId, 'Held One', refs), silentLog);
+    expect(again.held).toHaveLength(2);
+    expect(await holdsFor(docId)).toHaveLength(2);
+  });
+
+  it('conflicting profiles: a reference to a row that already carries another provider profile of the same league is held, nothing merges', async () => {
+    const suffix = randomUUID();
+    const w1 = `w1-${suffix}`;
+    const w2 = `w2-${suffix}`;
+    const n = `n-${suffix}`;
+    // Two WNBA profiles: W1 alone, W2 referencing NCAAW id N.
+    const r1 = await applyPlayerProfile(db, 'wnba', profile(w1, 'Conflict A', []), silentLog);
+    const r2 = await applyPlayerProfile(
+      db,
+      'wnba',
+      profile(w2, 'Conflict B', [{ source_id: n, scope: 'NCAAW', id_type: 'league_profile' }]),
+      silentLog,
+    );
+    expect(r1.playerId).not.toBe(r2.playerId);
+    // The NCAAW profile N claims WNBA W1: the provider now says one person has WNBA profiles W1 and W2.
+    const ref = { source_id: w1, scope: 'WNBA', id_type: 'league_profile' };
+    const r3 = await applyPlayerProfile(db, 'ncaawb', profile(n, 'Conflict B', [ref]), silentLog);
+    expect(r3.playerId).toBe(r2.playerId); // lands on the row its own id resolves to
+    expect(r3.mergedFrom).toEqual([]);
+    expect(r3.held).toHaveLength(1);
+    expect(r3.held[0]).toMatchObject({
+      reason: 'conflicting_profiles',
+      reference: ref,
+      candidateIds: [r2.playerId, r1.playerId],
+    });
+    expect(await holdsFor(n)).toMatchObject([
+      { reason: 'conflicting_profiles', triggerReference: ref, status: 'open' },
+    ]);
+    // both rows are still canonical and keep their ids
+    const canon = await db<{ id: string; mergedInto: string | null }[]>`
+      select id, merged_into as "mergedInto" from public.players where id in (${r1.playerId ?? ''}, ${r2.playerId ?? ''})`;
+    expect(canon.every((c) => c.mergedInto === null)).toBe(true);
+    const [w1Row] = await db<{ playerId: string }[]>`
+      select player_id as "playerId" from public.player_external_ids where league = 'wnba' and external_id = ${w1}`;
+    expect(w1Row?.playerId).toBe(r1.playerId);
+    expect(await mergeRowFor(r1.playerId ?? '')).toBeUndefined();
+    expect(await mergeRowFor(r2.playerId ?? '')).toBeUndefined();
+  });
+
+  it('an id already stored under another id_type is held (id_type_mismatch), not linked under the new type', async () => {
+    const suffix = randomUUID();
+    const ext = `ext-${suffix}`;
+    // A WNBA profile stores `ext` as an external id.
+    const a = await applyPlayerProfile(
+      db,
+      'wnba',
+      profile(`wa-${suffix}`, 'Type A', [{ source_id: ext, scope: 'WNBA', id_type: 'external' }]),
+      silentLog,
+    );
+    // Another profile claims the same string is a WNBA league_profile id.
+    const ref = { source_id: ext, scope: 'WNBA', id_type: 'league_profile' };
+    const b = await applyPlayerProfile(
+      db,
+      'unrivaled',
+      profile(`u-${suffix}`, 'Type B', [ref]),
+      silentLog,
+    );
+    expect(b.playerId).not.toBe(a.playerId);
+    expect(b.mergedFrom).toEqual([]);
+    expect(b.held).toMatchObject([
+      { reason: 'id_type_mismatch', reference: ref, candidateIds: [a.playerId] },
+    ]);
+    const [stored] = await db<{ playerId: string; idType: string }[]>`
+      select player_id as "playerId", id_type as "idType" from public.player_external_ids
+      where league = 'wnba' and external_id = ${ext}`;
+    expect(stored).toEqual({ playerId: a.playerId, idType: 'external' });
+  });
+
+  it('an id owned by a tombstone (a data inconsistency) is held as tombstone_owner and never followed', async () => {
+    const suffix = randomUUID();
+    const s = (await gamePlayer('wnba', `s-${suffix}`, 'Tomb Survivor')).get(`s-${suffix}`) ?? '';
+    const t = (await gamePlayer('wnba', `t-${suffix}`, 'Tomb Loser')).get(`t-${suffix}`) ?? '';
+    await applyPlayerProfile(
+      db,
+      'wnba',
+      profile(`s-${suffix}`, 'Tomb Survivor', [
+        { source_id: `t-${suffix}`, scope: 'WNBA', id_type: 'league_profile' },
+      ]),
+      silentLog,
+    );
+    expect(await resolveCanonical(db, t)).toBe(s);
+    // Plant an external id on the tombstone directly (no code path does this); remove it after.
+    const stray = `stray-${suffix}`;
+    await db`insert into public.player_external_ids (provider, league, external_id, player_id, id_type, source)
+             values ('sportradar', 'ncaawb', ${stray}, ${t}, 'league_profile', 'manual')`;
+    try {
+      const ref = { source_id: stray, scope: 'NCAAW', id_type: 'league_profile' };
+      const res = await applyPlayerProfile(
+        db,
+        'unrivaled',
+        profile(`u-${suffix}`, 'Tomb Ref', [ref]),
+        silentLog,
+      );
+      expect(res.mergedFrom).toEqual([]);
+      expect(res.held).toMatchObject([
+        { reason: 'tombstone_owner', reference: ref, candidateIds: [t, s] },
+      ]);
+      expect(res.playerId).not.toBe(s);
+    } finally {
+      await db`delete from public.player_external_ids where league = 'ncaawb' and external_id = ${stray}`;
+    }
   });
 });

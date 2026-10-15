@@ -74,10 +74,13 @@ export interface ApplyCounts {
   /** Player stats lines whose player could not be resolved to a canonical id (skipped, logged). */
   unresolvedPlayers: number;
   /**
-   * Player stats lines whose provider id resolves to a canonical player another line of the same
-   * batch already covered (two provider ids merged into one person): the later line is skipped.
+   * Lines of one document that repeat a provider player id an earlier line of the same document
+   * already carried (a provider anomaly): the first line is the one applied, the repeat is
+   * skipped. Two DIFFERENT provider ids that resolve to one canonical player are not duplicates:
+   * rows, bodies and hashes are provider-keyed, so each keeps its own row and feed order is
+   * irrelevant.
    */
-  duplicatePlayers: number;
+  duplicateLines: number;
 }
 
 export type ApplyResult =
@@ -440,7 +443,7 @@ export async function applyChanges(
       ignoredOlderStats: 0,
       touchedStats: 0,
       unresolvedPlayers: 0,
-      duplicatePlayers: 0,
+      duplicateLines: 0,
     };
     const eventWrites = diff.writes.map((w) => ({ action: w.action, ev: w.event, hash: w.hash }));
     const deletions: Array<{ row: StoredEventRow; revision: string | null }> = [];
@@ -560,10 +563,13 @@ export async function applyChanges(
                where game_id = ${gameId} and team_id = ${teamId}`;
     }
 
-    // Player stats: same precedence. The row is keyed by canonical player id (PK), the body and
-    // its hash by provider ids only (plan §3): an identity merge repoints player_id and leaves the
-    // hash alone, so the next identical summary is a no-op. The hash covers the whole line (roster
-    // facts included), so a change of starter/on_court is a change like any other.
+    // Player stats: same precedence. The row, the body and its hash are all keyed on the PROVIDER
+    // player id (plan §3): game_player_stats has PK (game_id, provider_player_id) and player_id is
+    // the canonical id resolved at write time. An identity merge repoints player_id and leaves
+    // the row, so the next identical summary is a no-op, two provider ids merged into one person
+    // keep two rows (exactly what the change stream gave every client), and the order a feed
+    // lists players in cannot change the outcome. The hash covers the whole line (roster facts
+    // included), so a change of starter/on_court is a change like any other.
     const playerWrites: Array<{
       playerId: string;
       teamId: string;
@@ -573,12 +579,12 @@ export async function applyChanges(
     const playerTouches: string[] = [];
     if (batch.playerStats.length > 0) {
       const existing = await tx<
-        { playerId: string; contentHash: string | null; observedAt: Date | null }[]
+        { providerPlayerId: string; contentHash: string | null; observedAt: Date | null }[]
       >`
-        select player_id as "playerId", content_hash as "contentHash", observed_at as "observedAt"
+        select provider_player_id as "providerPlayerId", content_hash as "contentHash", observed_at as "observedAt"
         from public.game_player_stats where game_id = ${gameId}`;
-      const existingByPlayer = new Map(existing.map((e) => [e.playerId, e]));
-      const seenPlayers = new Set<string>();
+      const existingByProviderId = new Map(existing.map((e) => [e.providerPlayerId, e]));
+      const seenLines = new Set<string>();
       for (const line of batch.playerStats) {
         const playerId = playerIds.get(line.providerPlayerId);
         const teamId = teamIds.get(line.providerTeamId);
@@ -594,17 +600,17 @@ export async function applyChanges(
           );
           continue;
         }
-        if (seenPlayers.has(playerId)) {
-          // Two provider ids of this document resolve to one canonical player (a merge collision,
-          // see repointPlayerReferences): one row per (game, player), the first line wins.
-          counts.duplicatePlayers++;
+        if (seenLines.has(line.providerPlayerId)) {
+          // The same provider id twice in one document: one row per (game, provider id), the
+          // first line is the one applied; the outcome is deterministic for the document.
+          counts.duplicateLines++;
           deps.log.warn(
-            { gameId, playerId, providerPlayerId: line.providerPlayerId },
-            'player stats line skipped: another line of this batch resolves to the same player',
+            { gameId, providerPlayerId: line.providerPlayerId },
+            'player stats line skipped: this document already carried that provider id',
           );
           continue;
         }
-        seenPlayers.add(playerId);
+        seenLines.add(line.providerPlayerId);
         const body: StatsPlayerBody = {
           providerPlayerId: line.providerPlayerId,
           providerTeamId: line.providerTeamId,
@@ -618,7 +624,7 @@ export async function applyChanges(
           stats: line.stats,
         };
         const hash = contentHash(body);
-        const action = decideStats(existingByPlayer.get(playerId), {
+        const action = decideStats(existingByProviderId.get(line.providerPlayerId), {
           contentHash: hash,
           observedAt: observation.observedAt,
         });
@@ -628,7 +634,7 @@ export async function applyChanges(
             break;
           case 'touch':
             counts.touchedStats++;
-            playerTouches.push(playerId);
+            playerTouches.push(line.providerPlayerId);
             break;
           default:
             playerWrites.push({ playerId, teamId, body, hash });
@@ -636,9 +642,9 @@ export async function applyChanges(
         }
       }
     }
-    for (const playerId of playerTouches) {
+    for (const providerPlayerId of playerTouches) {
       await tx`update public.game_player_stats set observed_at = ${observation.observedAt}, updated_at = now()
-               where game_id = ${gameId} and player_id = ${playerId}`;
+               where game_id = ${gameId} and provider_player_id = ${providerPlayerId}`;
     }
 
     // 5. Observation write: clock + freshness metadata, never a seq. Omission is not change:
@@ -803,18 +809,18 @@ export async function applyChanges(
       for (const w of playerWrites) {
         const b = w.body;
         const st = b.stats;
-        await tx`insert into public.game_player_stats (game_id, player_id, team_id, provider_player_id, starter, played,
+        await tx`insert into public.game_player_stats (game_id, player_id, team_id, provider_player_id, full_name, starter, played,
                    on_court, minutes, points, fgm, fga, tpm, tpa, ftm, fta, off_rebounds, def_rebounds, rebounds, assists,
                    steals, blocks, turnovers, personal_fouls, plus_minus, efficiency, extra, content_hash, observed_at,
                    jersey, position, not_playing_reason)
-                 values (${gameId}, ${w.playerId}, ${w.teamId}, ${b.providerPlayerId}, ${b.starter}, ${b.played},
+                 values (${gameId}, ${w.playerId}, ${w.teamId}, ${b.providerPlayerId}, ${b.fullName}, ${b.starter}, ${b.played},
                    ${b.onCourt}, ${st.minutes}, ${st.points}, ${st.fgm}, ${st.fga}, ${st.tpm}, ${st.tpa}, ${st.ftm},
                    ${st.fta}, ${st.offRebounds}, ${st.defRebounds}, ${st.rebounds}, ${st.assists}, ${st.steals},
                    ${st.blocks}, ${st.turnovers}, ${st.personalFouls}, ${st.plusMinus}, ${st.efficiency},
                    ${tx.json(st.extra as never)}, ${w.hash}, ${observation.observedAt}, ${b.jersey}, ${b.position},
                    ${b.notPlayingReason})
-                 on conflict (game_id, player_id) do update set team_id = excluded.team_id,
-                   provider_player_id = excluded.provider_player_id, starter = excluded.starter,
+                 on conflict (game_id, provider_player_id) do update set team_id = excluded.team_id,
+                   player_id = excluded.player_id, full_name = excluded.full_name, starter = excluded.starter,
                    played = excluded.played, on_court = excluded.on_court, minutes = excluded.minutes,
                    points = excluded.points, fgm = excluded.fgm, fga = excluded.fga, tpm = excluded.tpm, tpa = excluded.tpa,
                    ftm = excluded.ftm, fta = excluded.fta, off_rebounds = excluded.off_rebounds,
@@ -1053,22 +1059,42 @@ export async function applyStandings(db: Db | Tx, lines: StandingLine[]): Promis
 }
 
 /* ------------------------------------------------------------------------- */
-/* Identity merge: FK repoint (the stats tables and play_events are written    */
-/* here only, CLAUDE.md non-negotiable 2)                                      */
+/* Identity merge: FK repoint of the tables this module owns (play_events,     */
+/* game_player_stats, player_season_stats; CLAUDE.md non-negotiable 2).       */
+/* player_team_seasons is roster data and is repointed by identity.ts.        */
 /* ------------------------------------------------------------------------- */
+
+/** A row a merge had to drop because the survivor already owned its key, with its full content. */
+export interface MergeConflict {
+  table: 'player_season_stats' | 'player_team_seasons';
+  row: Record<string, unknown>;
+}
 
 export interface RepointCounts {
   playEvents: number;
-  gamePlayerStats: { repointed: number; dropped: number };
+  /** Provider-keyed rows: repointed only, never dropped. */
+  gamePlayerStats: { repointed: number };
   playerSeasonStats: { repointed: number; dropped: number };
   playerTeamSeasons: { repointed: number; dropped: number };
 }
 
+export interface RepointResult {
+  counts: Omit<RepointCounts, 'playerTeamSeasons'>;
+  /** Content of every dropped row, for ingest.player_merges.conflicts. */
+  conflicts: MergeConflict[];
+}
+
 /**
  * Move every row that references `loser` to `survivor` inside the caller's
- * merge transaction (identity.ts mergePlayers). Rows whose key would collide
- * with one the survivor already owns (same game / season line / team season)
- * are dropped in favour of the survivor's and counted; the caller logs them.
+ * merge transaction (identity.ts mergePlayers).
+ * - play_events and game_player_stats are repointed in place. game_player_stats
+ *   is keyed on (game_id, provider_player_id), so two provider ids merged into
+ *   one person keep their two rows: the snapshot and a client that folded the
+ *   provider-keyed stats_player changes stay in agreement, and no durable
+ *   change is needed because nothing client-visible moved.
+ * - player_season_stats is keyed on (player_id, season_id, team_id): a loser
+ *   line whose key the survivor already owns is returned in full (to_jsonb) and
+ *   then dropped; the caller persists it as merge provenance.
  * game_changes is never touched: stats bodies are provider-keyed (plan §3), so
  * the merge rewrites no history and the next identical document is a no-op.
  */
@@ -1076,31 +1102,26 @@ export async function repointPlayerReferences(
   tx: Tx,
   loser: string,
   survivor: string,
-): Promise<RepointCounts> {
+): Promise<RepointResult> {
   const playEvents =
     await tx`update public.play_events set player_id = ${survivor}, updated_at = now()
                               where player_id = ${loser}`;
   const gps =
-    await tx`update public.game_player_stats s set player_id = ${survivor}, updated_at = now()
-                       where s.player_id = ${loser}
-                         and not exists (select 1 from public.game_player_stats t
-                                         where t.game_id = s.game_id and t.player_id = ${survivor})`;
-  const gpsDropped = await tx`delete from public.game_player_stats where player_id = ${loser}`;
+    await tx`update public.game_player_stats set player_id = ${survivor}, updated_at = now()
+                       where player_id = ${loser}`;
   const pss =
     await tx`update public.player_season_stats s set player_id = ${survivor}, updated_at = now()
                        where s.player_id = ${loser}
                          and not exists (select 1 from public.player_season_stats t
                                          where t.player_id = ${survivor} and t.season_id = s.season_id and t.team_id = s.team_id)`;
-  const pssDropped = await tx`delete from public.player_season_stats where player_id = ${loser}`;
-  const pts = await tx`update public.player_team_seasons s set player_id = ${survivor}
-                       where s.player_id = ${loser}
-                         and not exists (select 1 from public.player_team_seasons t
-                                         where t.player_id = ${survivor} and t.team_id = s.team_id and t.season_id = s.season_id)`;
-  const ptsDropped = await tx`delete from public.player_team_seasons where player_id = ${loser}`;
+  const pssDropped = await tx<{ row: Record<string, unknown> }[]>`
+    delete from public.player_season_stats s where s.player_id = ${loser} returning to_jsonb(s) as row`;
   return {
-    playEvents: playEvents.count,
-    gamePlayerStats: { repointed: gps.count, dropped: gpsDropped.count },
-    playerSeasonStats: { repointed: pss.count, dropped: pssDropped.count },
-    playerTeamSeasons: { repointed: pts.count, dropped: ptsDropped.count },
+    counts: {
+      playEvents: playEvents.count,
+      gamePlayerStats: { repointed: gps.count },
+      playerSeasonStats: { repointed: pss.count, dropped: pssDropped.length },
+    },
+    conflicts: pssDropped.map((d) => ({ table: 'player_season_stats', row: d.row })),
   };
 }

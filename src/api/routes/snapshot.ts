@@ -97,11 +97,14 @@ export async function loadSnapshot(
                'benchPts', s.bench_pts, 'biggestLead', s.biggest_lead) as stats
       from public.game_team_stats s join public.teams t on t.id = s.team_id
       where s.game_id = ${gameId} order by s.is_home desc`;
-    // provider_player_id is the id the line was keyed on (never a lookup through
-    // player_external_ids, which can hold several ids per league after a merge).
+    // One row per (game, provider_player_id), the key the stats_player bodies and the client
+    // reducer use. Every body field is read from the row itself (full_name included): after an
+    // identity merge two provider ids share player_id, and players.full_name would be the
+    // survivor's name for both, which is not what the stream said. Never a lookup through
+    // player_external_ids, which can hold several ids per league after a merge.
     const playerStats = await tx<Record<string, unknown>[]>`
       select ps.provider_player_id as "providerPlayerId", t.provider_team_id as "providerTeamId",
-             p.full_name as "fullName", ps.jersey, ps.position, ps.starter, ps.played, ps.on_court as "onCourt",
+             ps.full_name as "fullName", ps.jersey, ps.position, ps.starter, ps.played, ps.on_court as "onCourt",
              ps.not_playing_reason as "notPlayingReason",
              jsonb_build_object(
                'minutes', ps.minutes, 'points', ps.points, 'fgm', ps.fgm, 'fga', ps.fga, 'tpm', ps.tpm, 'tpa', ps.tpa,
@@ -111,10 +114,9 @@ export async function loadSnapshot(
                'efficiency', ps.efficiency, 'extra', coalesce(ps.extra, '{}'::jsonb)) as stats
       from public.game_player_stats ps
       join public.games g on g.id = ps.game_id
-      join public.players p on p.id = ps.player_id
       join public.teams t on t.id = ps.team_id
       where ps.game_id = ${gameId}
-      order by (ps.team_id = g.home_team_id) desc, ps.starter desc nulls last, p.full_name`;
+      order by (ps.team_id = g.home_team_id) desc, ps.starter desc nulls last, ps.full_name, ps.provider_player_id`;
     const events = await tx<{ providerEventId: string; body: unknown }[]>`
       select provider_event_id as "providerEventId", payload as body
       from public.play_events where game_id = ${gameId} and deleted_at is null
