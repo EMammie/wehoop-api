@@ -22,6 +22,11 @@ import { fixture } from '../helpers/fixtures.js';
  * and /v1/players/:id returns all three"). The committed Boston fixtures are
  * used with every provider id suffixed per test run, so the test never collides
  * with the validator's replay of the real fixtures in the same database.
+ *
+ * PARTLY SYNTHETIC: the WNBA profile is a Sportradar docs sample, but the
+ * Unrivaled profile that links the three ids is hand-assembled
+ * (fixtures/unrivaled/README.md); these tests prove the code path against
+ * that assembled shape, not against a document the provider served.
  */
 const db = testDb();
 const app = createApp({ db, config: loadConfig({ ...process.env, MODE: 'sim' }), log: silentLog });

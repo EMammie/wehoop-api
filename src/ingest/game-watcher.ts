@@ -118,7 +118,8 @@ export class GameWatcher {
     const nd = this.normalize(feed, body, { storedCoverage: await this.storedCoverage() });
     const gameId = await this.ensure(nd);
     // Identity before state: every player the document names gets a canonical row, so
-    // applyChanges can stamp play_events.player_id and emit stats_player with uuids.
+    // applyChanges can resolve play_events.player_id / game_player_stats.player_id (bodies
+    // stay provider-keyed).
     if (nd.players.length > 0)
       await ensurePlayers(this.deps.db, this.deps.adapter.league, nd.players);
     const result = await applyChanges(this.deps.apply, gameId, nd.batch, {

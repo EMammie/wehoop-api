@@ -12,7 +12,8 @@ import { fixture } from '../../helpers/fixtures.js';
  * the Sportradar docs samples (no simulation recording exists for the product,
  * and no trial key was used): every id and number comes from a docs sample or
  * the league rule stated per file in fixtures/unrivaled/README.md. The Elam
- * target field name in particular is the plan's, not a captured one.
+ * target field name in particular is the plan's, not a captured one, and the
+ * target 84 is derived, so that example is PARTLY SYNTHETIC.
  */
 const pbp = (name: string) =>
   unrivaledAdapter.normalizePbp(PbpDocumentSchema.parse(fixture(name, 'unrivaled')));

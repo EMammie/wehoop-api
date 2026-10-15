@@ -17,8 +17,12 @@ import { counts, replayRun, silentLog, testDb } from '../helpers/db.js';
 /**
  * The hand-assembled Unrivaled replay (fixtures/unrivaled/README.md) through
  * the worker path: Elam period row + target, null clock with clock_running
- * false, stats_player with canonical ids, player_id on play rows, and a
+ * false, provider-keyed stats_player bodies, player_id on play rows, and a
  * snapshot/changes fold that agrees. The game id is rewritten per run.
+ *
+ * PARTLY SYNTHETIC: the Elam target 84 is derived (leading score after Q3 + 11
+ * on the docs sample's own numbers) under the plan's field name; no captured
+ * response confirms the field or the value.
  */
 const FIXTURE = new URL('../../fixtures/unrivaled/docs-838316ea-replay.jsonl', import.meta.url)
   .pathname;

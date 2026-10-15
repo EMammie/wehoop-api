@@ -91,4 +91,4 @@ captured responses.
 | `docs-standings-2022-REG.json` | `wnba-standings` | `calc_rank`, `rank.clinched` |
 | `docs-hierarchy.json` | `wnba-league-hierarchy` | `conferences[] > teams[]` with colors and venue |
 | `docs-seasonal-stats-6f017f37.json` | `wnba-seasonal-statistics` | team + player season lines |
-| `docs-identity-replay.jsonl` | replay file: the Boston profile, then the hierarchy | `pnpm dev:worker --mode sim --league wnba --replay-file fixtures/wnba/docs-identity-replay.jsonl --pace 0` |
+| `docs-identity-replay.jsonl` | replay file: the Boston profile, then the hierarchy. The profile is a real docs sample; the three-id example it is part of is **partly synthetic** because its Unrivaled half is hand-assembled (`fixtures/unrivaled/README.md`) | `pnpm dev:worker --mode sim --league wnba --replay-file fixtures/wnba/docs-identity-replay.jsonl --pace 0` |
