@@ -30,27 +30,43 @@ export interface LeagueCapabilities {
  * reference feeds (schedule, profiles, standings, ...) share one ingester
  * (ingest/reference.ts) because their shapes are identical across products.
  */
+/** What the watcher knows about the game before the document is normalized. */
+export interface NormalizeContext {
+  /**
+   * `games.coverage` as stored (`full`, `extended_boxscore`, `boxscore`, `unknown`), or null when
+   * the game has no row yet. A document that omits `coverage` is gated by this, never by `full`.
+   */
+  storedCoverage: string | null;
+}
+
 export interface LeagueAdapter {
   readonly league: LeagueCode;
   readonly capabilities: LeagueCapabilities;
   /** Sportradar product (quota bucket). */
   readonly product: string;
-  normalizePbp(doc: PbpDocument): NormalizedDocument;
-  normalizeSummary(doc: SummaryDocument): NormalizedDocument;
-  normalizeBoxscore(doc: BoxscoreDocument): NormalizedDocument;
+  normalizePbp(doc: PbpDocument, ctx?: NormalizeContext): NormalizedDocument;
+  normalizeSummary(doc: SummaryDocument, ctx?: NormalizeContext): NormalizedDocument;
+  normalizeBoxscore(doc: BoxscoreDocument, ctx?: NormalizeContext): NormalizedDocument;
 }
 
 export const FULL_COVERAGE: CoverageProfile = { events: true, stats: 'live' };
+export const SCORE_ONLY_COVERAGE: CoverageProfile = { events: false, stats: 'final' };
 
-/** Default coverage mapping: anything but `full` is score-only with final stats. */
+/**
+ * Default coverage mapping: only `full` carries live plays and stats. Anything
+ * else, including an unknown or absent coverage, is score-only with final
+ * stats: a game whose coverage nobody has stated never emits live stats.
+ */
 export function defaultCoverageFor(coverage: string | null): CoverageProfile {
-  switch (coverage) {
-    case 'full':
-    case null:
-      return FULL_COVERAGE;
-    default:
-      return { events: false, stats: 'final' };
-  }
+  return coverage === 'full' ? FULL_COVERAGE : SCORE_ONLY_COVERAGE;
+}
+
+/** The coverage a document is gated by: its own `coverage`, else the stored one, never `full` by default. */
+export function effectiveCoverage(
+  documentCoverage: string | null | undefined,
+  ctx: NormalizeContext | undefined,
+): string | null {
+  return documentCoverage ?? ctx?.storedCoverage ?? null;
 }
 
 /**

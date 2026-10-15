@@ -2,7 +2,13 @@ import type { NormalizedDocument } from '../../ingest/types.js';
 import type { BoxscoreDocument } from '../../providers/sportradar/schemas/boxscore.js';
 import type { PbpDocument } from '../../providers/sportradar/schemas/pbp.js';
 import type { SummaryDocument } from '../../providers/sportradar/schemas/summary.js';
-import { applyCoverage, defaultCoverageFor, type LeagueAdapter } from '../adapter.js';
+import {
+  applyCoverage,
+  defaultCoverageFor,
+  effectiveCoverage,
+  type LeagueAdapter,
+  type NormalizeContext,
+} from '../adapter.js';
 import {
   normalizeBoxscoreDocument,
   normalizePbpDocument,
@@ -14,8 +20,9 @@ import {
  * the trial product. Coverage varies per game (plan §2, §9): `full` games carry
  * play-by-play; `extended_boxscore` / `boxscore` games are score-only while
  * live (status, score, period) and get their stats once the game is final.
- * The coverage of the document itself decides, so a watcher never has to know
- * the game's coverage before its first document.
+ * The document's own `coverage` decides; a document that omits it is gated by
+ * the stored `games.coverage` the watcher passes in, and with neither known the
+ * game is score-only (never `full` by default).
  */
 export const ncaawbAdapter: LeagueAdapter = {
   league: 'ncaawb',
@@ -26,13 +33,17 @@ export const ncaawbAdapter: LeagueAdapter = {
     pushStats: false,
     coverageFor: defaultCoverageFor,
   },
-  normalizePbp(doc: PbpDocument): NormalizedDocument {
-    return applyCoverage(normalizePbpDocument(doc), defaultCoverageFor(doc.coverage ?? null));
+  normalizePbp(doc: PbpDocument, ctx?: NormalizeContext): NormalizedDocument {
+    return applyCoverage(normalizePbpDocument(doc), profile(doc.coverage, ctx));
   },
-  normalizeSummary(doc: SummaryDocument): NormalizedDocument {
-    return applyCoverage(normalizeSummaryDocument(doc), defaultCoverageFor(doc.coverage ?? null));
+  normalizeSummary(doc: SummaryDocument, ctx?: NormalizeContext): NormalizedDocument {
+    return applyCoverage(normalizeSummaryDocument(doc), profile(doc.coverage, ctx));
   },
-  normalizeBoxscore(doc: BoxscoreDocument): NormalizedDocument {
-    return applyCoverage(normalizeBoxscoreDocument(doc), defaultCoverageFor(doc.coverage ?? null));
+  normalizeBoxscore(doc: BoxscoreDocument, ctx?: NormalizeContext): NormalizedDocument {
+    return applyCoverage(normalizeBoxscoreDocument(doc), profile(doc.coverage, ctx));
   },
 };
+
+function profile(documentCoverage: string | null | undefined, ctx: NormalizeContext | undefined) {
+  return defaultCoverageFor(effectiveCoverage(documentCoverage, ctx));
+}

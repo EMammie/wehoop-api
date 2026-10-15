@@ -1,6 +1,6 @@
 import type { ZodType } from 'zod';
 import type { Db } from '../db/client.js';
-import type { LeagueAdapter } from '../leagues/adapter.js';
+import type { LeagueAdapter, NormalizeContext } from '../leagues/adapter.js';
 import type { PulseSender } from '../live/pulse.js';
 import type { Logger } from '../logger.js';
 import type { FetchedDocument, SportradarHttp } from '../providers/sportradar/http.js';
@@ -83,16 +83,28 @@ export class GameWatcher {
     }
   }
 
-  normalize(feed: Feed, body: unknown): NormalizedDocument {
+  normalize(feed: Feed, body: unknown, ctx?: NormalizeContext): NormalizedDocument {
     const parsed = this.parse(feed, body);
     switch (parsed.feed) {
       case 'pbp':
-        return this.deps.adapter.normalizePbp(parsed.doc);
+        return this.deps.adapter.normalizePbp(parsed.doc, ctx);
       case 'summary':
-        return this.deps.adapter.normalizeSummary(parsed.doc);
+        return this.deps.adapter.normalizeSummary(parsed.doc, ctx);
       case 'boxscore':
-        return this.deps.adapter.normalizeBoxscore(parsed.doc);
+        return this.deps.adapter.normalizeBoxscore(parsed.doc, ctx);
     }
+  }
+
+  /**
+   * The stored `games.coverage` for this watcher's game (null before its row exists), read
+   * fresh each time: a document that omits `coverage` is gated by what the schedule or an
+   * earlier document stated, never by `full`.
+   */
+  private async storedCoverage(): Promise<string | null> {
+    if (!this.gameId) return null;
+    const [row] = await this.deps.db<{ coverage: string }[]>`
+      select coverage::text as coverage from public.games where id = ${this.gameId}`;
+    return row?.coverage ?? null;
   }
 
   async process(
@@ -103,7 +115,7 @@ export class GameWatcher {
   ): Promise<ProcessOutcome | null> {
     // Every document goes through applyChanges: freshness (incl. rule 2d for summary-only
     // documents after a restart) is decided inside the transaction, never here.
-    const nd = this.normalize(feed, body);
+    const nd = this.normalize(feed, body, { storedCoverage: await this.storedCoverage() });
     const gameId = await this.ensure(nd);
     // Identity before state: every player the document names gets a canonical row, so
     // applyChanges can stamp play_events.player_id and emit stats_player with uuids.

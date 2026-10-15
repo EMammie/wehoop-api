@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { applyCoverage, defaultCoverageFor } from '../../../src/leagues/adapter.js';
+import {
+  applyCoverage,
+  defaultCoverageFor,
+  effectiveCoverage,
+} from '../../../src/leagues/adapter.js';
 import { ncaawbAdapter } from '../../../src/leagues/ncaawb/adapter.js';
 import { PbpDocumentSchema } from '../../../src/providers/sportradar/schemas/pbp.js';
 import { SummaryDocumentSchema } from '../../../src/providers/sportradar/schemas/summary.js';
@@ -20,11 +24,46 @@ const withCoverage = (name: string, coverage: string, status?: string) => {
 };
 
 describe('NCAAWB coverage profiles', () => {
-  it('maps coverage strings to profiles', () => {
+  it('maps coverage strings to profiles; unknown or absent coverage is never full', () => {
     expect(defaultCoverageFor('full')).toEqual({ events: true, stats: 'live' });
-    expect(defaultCoverageFor(null)).toEqual({ events: true, stats: 'live' });
+    expect(defaultCoverageFor(null)).toEqual({ events: false, stats: 'final' });
+    expect(defaultCoverageFor('unknown')).toEqual({ events: false, stats: 'final' });
     expect(defaultCoverageFor('extended_boxscore')).toEqual({ events: false, stats: 'final' });
     expect(defaultCoverageFor('boxscore')).toEqual({ events: false, stats: 'final' });
+  });
+
+  it('a document that omits coverage is gated by the stored games.coverage, never by full', () => {
+    expect(effectiveCoverage('full', { storedCoverage: 'extended_boxscore' })).toBe('full');
+    expect(effectiveCoverage(undefined, { storedCoverage: 'extended_boxscore' })).toBe(
+      'extended_boxscore',
+    );
+    expect(effectiveCoverage(null, { storedCoverage: 'full' })).toBe('full');
+    expect(effectiveCoverage(undefined, undefined)).toBeNull();
+    const raw = fixture('sim-d9b71fe0-summary-q1.json', 'ncaawb') as Record<string, unknown>;
+    delete raw.coverage;
+    const doc = SummaryDocumentSchema.parse(raw);
+    expect(doc.coverage).toBeUndefined();
+    // stored extended_boxscore: score-only while live
+    const gated = ncaawbAdapter.normalizeSummary(doc, { storedCoverage: 'extended_boxscore' });
+    expect(gated.batch.playerStats).toEqual([]);
+    expect(gated.batch.teamStats).toEqual([]);
+    expect(gated.gameView?.coverage).toBeNull(); // omission is not change: the stored value stays
+    // stored full: live stats
+    expect(
+      ncaawbAdapter.normalizeSummary(doc, { storedCoverage: 'full' }).batch.playerStats.length,
+    ).toBeGreaterThan(10);
+    // nothing known on either side: score-only
+    expect(ncaawbAdapter.normalizeSummary(doc).batch.playerStats).toEqual([]);
+    expect(
+      ncaawbAdapter.normalizeSummary(doc, { storedCoverage: 'unknown' }).batch.playerStats,
+    ).toEqual([]);
+    // the document's own coverage wins over the stored one
+    const full = fixture('sim-d9b71fe0-pbp-q1.json', 'ncaawb');
+    expect(
+      ncaawbAdapter.normalizePbp(PbpDocumentSchema.parse(full), {
+        storedCoverage: 'extended_boxscore',
+      }).batch.events.length,
+    ).toBeGreaterThan(5);
   });
 
   it('full coverage: the recorded pbp yields events and a complete document', () => {
