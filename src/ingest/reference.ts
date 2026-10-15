@@ -291,17 +291,29 @@ export class ReferenceIngester {
       this.deps.log,
     );
     if (!seasonId) return;
-    const lines: StandingLine[] = [];
-    const teams: TeamFacts[] = [];
-    const add = (t: StandingTeam, conference: string, division: string | null) => {
-      teams.push({
-        providerTeamId: t.id,
-        name: t.name,
-        market: t.market ?? null,
-        alias: t.alias ?? null,
+    const entries: Array<{ team: StandingTeam; conference: string; division: string | null }> = [];
+    for (const c of doc.conferences) {
+      for (const team of c.teams ?? []) entries.push({ team, conference: c.name, division: null });
+      for (const d of c.divisions ?? [])
+        for (const team of d.teams) entries.push({ team, conference: c.name, division: d.name });
+    }
+    const teamIds = await ensureTeams(
+      this.deps.db,
+      this.deps.league,
+      entries.map(({ team, conference, division }) => ({
+        providerTeamId: team.id,
+        name: team.name,
+        market: team.market ?? null,
+        alias: team.alias ?? null,
         conference,
         division,
-      });
+      })),
+    );
+    out.teams += teamIds.size;
+    const lines: StandingLine[] = [];
+    for (const { team: t, conference, division } of entries) {
+      const teamId = teamIds.get(t.id);
+      if (!teamId) continue;
       const conf = t.records?.find((r) => r.record_type === 'conference');
       const {
         id: _id,
@@ -322,7 +334,7 @@ export class ReferenceIngester {
       } = t;
       lines.push({
         seasonId,
-        teamId: '', // resolved below
+        teamId,
         conference,
         division,
         wins: t.wins,
@@ -339,19 +351,8 @@ export class ReferenceIngester {
         extra: Object.keys(extra).length > 0 ? extra : null,
         asOf: observedAt,
       });
-    };
-    for (const c of doc.conferences) {
-      for (const t of c.teams ?? []) add(t, c.name, null);
-      for (const d of c.divisions ?? []) for (const t of d.teams) add(t, c.name, d.name);
     }
-    const teamIds = await ensureTeams(this.deps.db, this.deps.league, teams);
-    out.teams += teamIds.size;
-    const resolved = lines.flatMap((l, i) => {
-      const providerTeamId = teams[i]?.providerTeamId;
-      const teamId = providerTeamId ? teamIds.get(providerTeamId) : undefined;
-      return teamId ? [{ ...l, teamId }] : [];
-    });
-    out.standings += await applyStandings(this.deps.db, resolved);
+    out.standings += await applyStandings(this.deps.db, lines);
   }
 
   private async hierarchy(body: unknown, out: ReferenceOutcome) {
