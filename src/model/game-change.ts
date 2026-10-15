@@ -27,11 +27,16 @@ const envelope = {
 
 export const EventDeleteBodySchema = z.object({ providerEventId: z.string() });
 
-/** Durable game-level state: status, score and the current period. */
+/**
+ * Durable game-level state: status, score and the current period. Unrivaled
+ * adds the Elam target once the target-score phase begins; it is omitted
+ * (never null) for every other game, so M1 bodies decode unchanged.
+ */
 export const StatusBodySchema = z.object({
   status: GameStatusSchema,
   score: ScoreSchema,
   period: PeriodRefSchema.nullable(),
+  elamTargetScore: z.int().positive().optional(),
 });
 
 /** Full line score replacement: one row per period played so far. */
@@ -71,13 +76,50 @@ export const StatsTeamBodySchema = z.object({
   stats: TeamStatsSchema,
 });
 
-/** Player stats arrive with identity resolution in M2; the body shape is reserved here. */
+/** One player's box line. Typed on the game_player_stats columns; everything else in `extra`. */
+export const PlayerStatsSchema = z.object({
+  minutes: z.string().nullable(),
+  points: z.int().nullable(),
+  fgm: z.int().nullable(),
+  fga: z.int().nullable(),
+  tpm: z.int().nullable(),
+  tpa: z.int().nullable(),
+  ftm: z.int().nullable(),
+  fta: z.int().nullable(),
+  offRebounds: z.int().nullable(),
+  defRebounds: z.int().nullable(),
+  rebounds: z.int().nullable(),
+  assists: z.int().nullable(),
+  steals: z.int().nullable(),
+  blocks: z.int().nullable(),
+  turnovers: z.int().nullable(),
+  personalFouls: z.int().nullable(),
+  plusMinus: z.int().nullable(),
+  efficiency: z.int().nullable(),
+  extra: z.record(z.string(), z.unknown()),
+});
+export type PlayerStats = z.infer<typeof PlayerStatsSchema>;
+
+/**
+ * Player stats (M2). `playerId` / `teamId` are the canonical uuids resolved by
+ * identity.ts; `providerPlayerId` is kept so a client holding a provider id
+ * from a LiveEvent body can join without a lookup.
+ */
 export const StatsPlayerBodySchema = z.object({
   playerId: z.uuid(),
   teamId: z.uuid(),
   providerPlayerId: z.string(),
-  stats: z.record(z.string(), z.unknown()),
+  providerTeamId: z.string(),
+  fullName: z.string(),
+  jersey: z.string().nullable(),
+  position: z.string().nullable(),
+  starter: z.boolean().nullable(),
+  played: z.boolean().nullable(),
+  onCourt: z.boolean().nullable(),
+  notPlayingReason: z.string().nullable(),
+  stats: PlayerStatsSchema,
 });
+export type StatsPlayerBody = z.infer<typeof StatsPlayerBodySchema>;
 
 export const GameChangeSchema = z.discriminatedUnion('type', [
   z.object({

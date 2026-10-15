@@ -196,7 +196,12 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     const before = await counts(db, gameId);
     const del: NormalizedDocument = {
       ...doc,
-      batch: { events: [], deletedEvents: [{ providerEventId, updatedAt: null }], teamStats: [] },
+      batch: {
+        events: [],
+        deletedEvents: [{ providerEventId, updatedAt: null }],
+        teamStats: [],
+        playerStats: [],
+      },
       gameView: null,
       isComplete: false,
     };
@@ -286,7 +291,12 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
       new Date(Date.parse(target.providerUpdatedAt ?? '') + plusSeconds * 1000).toISOString();
     const markerDoc = (updatedAt: string | null): NormalizedDocument => ({
       ...nd,
-      batch: { events: [], deletedEvents: [{ providerEventId: id, updatedAt }], teamStats: [] },
+      batch: {
+        events: [],
+        deletedEvents: [{ providerEventId: id, updatedAt }],
+        teamStats: [],
+        playerStats: [],
+      },
       gameView: null,
       isComplete: false,
     });
@@ -355,7 +365,12 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
       ...nd,
       gameView: null,
       isComplete: false,
-      batch: { events: [], deletedEvents: [{ providerEventId: id, updatedAt }], teamStats: [] },
+      batch: {
+        events: [],
+        deletedEvents: [{ providerEventId: id, updatedAt }],
+        teamStats: [],
+        playerStats: [],
+      },
     });
     const applyDoc = (doc: NormalizedDocument, at: number) =>
       apply(deps, gameId, doc, observation(run, doc, later(at)));
@@ -383,6 +398,7 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
         events: [{ ...target, providerUpdatedAt: revision }],
         deletedEvents: [],
         teamStats: [],
+        playerStats: [],
       },
     });
     expect((await applyDoc(event(rev(30)), 4)).changes).toEqual([]);

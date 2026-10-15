@@ -10,9 +10,10 @@ import {
   pollLoop,
   replayRecording,
 } from '../ingest/game-watcher.js';
+import { ReferenceIngester } from '../ingest/reference.js';
 import { endRun, startRun } from '../ingest/runs.js';
 import { LeagueCodeSchema } from '../leagues/codes.js';
-import { adapterFor } from '../leagues/wnba/adapter.js';
+import { adapterFor } from '../leagues/registry.js';
 import { OutboxPublisher } from '../live/outbox-publisher.js';
 import { PulseSender } from '../live/pulse.js';
 import { SupabaseBroadcastTransport } from '../live/supabase-broadcast.js';
@@ -280,6 +281,13 @@ async function main() {
         paceMs,
         isStopped: () => stopRequested,
         maxDocs,
+        reference: new ReferenceIngester({
+          db,
+          log,
+          league,
+          source: 'fixture',
+          runSource: 'fixture',
+        }),
       });
       finalStatus = replay.status;
       replayedDocs = replay.docs;

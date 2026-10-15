@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { GameChangeSchema, TeamStatsSchema } from './game-change.js';
+import { GameChangeSchema, StatsPlayerBodySchema, TeamStatsSchema } from './game-change.js';
 import { GameStatusSchema, LiveEventSchema, PeriodRefSchema, ScoreSchema } from './live-event.js';
 
 /**
@@ -23,10 +23,11 @@ export const SnapshotSchema = z.object({
     clockRunning: z.boolean().nullable(),
     clockAsOf: z.iso.datetime({ offset: true }).nullable(),
     observedAt: z.iso.datetime({ offset: true }).nullable(),
+    elamTargetScore: z.int().positive().nullable(),
   }),
   periods: z.array(PeriodRefSchema.extend({ score: ScoreSchema })),
   teamStats: z.array(z.object({ teamId: z.uuid(), isHome: z.boolean(), stats: TeamStatsSchema })),
-  playerStats: z.array(z.record(z.string(), z.unknown())),
+  playerStats: z.array(StatsPlayerBodySchema),
   events: z.array(z.object({ providerEventId: z.string(), body: LiveEventSchema })),
   seq: z.int().nonnegative(),
   retainedFrom: z.int().positive(),

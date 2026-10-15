@@ -47,6 +47,8 @@ const base = {
   period: PeriodRefSchema,
   clock: z.string().nullable(),
   clockDecimal: z.string().optional(),
+  /** Unrivaled Elam phase: the count-up clock ("+m:ss") the provider reports next to `clock`. */
+  clockDirectional: z.string().optional(),
   wallClock: z.iso.datetime({ offset: true }).nullable(),
   score: ScoreSchema,
   providerTeamId: z.string().optional(),
@@ -75,6 +77,8 @@ export const LiveEventSchema = z.discriminatedUnion('type', [
     providerAssistId: z.string().optional(),
     providerBlockId: z.string().optional(),
     location: ShotLocationSchema.optional(),
+    /** Unrivaled: the final made basket that reached the Elam target (`statistics[].winning_basket`). */
+    winningBasket: z.boolean().optional(),
   }),
   z.object({
     ...base,
@@ -83,6 +87,8 @@ export const LiveEventSchema = z.discriminatedUnion('type', [
     attempt: z.int().positive().optional(),
     of: z.int().positive().optional(),
     freeThrowType: z.string().optional(),
+    /** Unrivaled weighted free throws: the point value of this single attempt (2 or 3). */
+    points: z.int().positive().optional(),
   }),
   z.object({
     ...base,

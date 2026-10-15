@@ -13,8 +13,8 @@ import {
 import { endRun, startRun } from '../ingest/runs.js';
 import type { NormalizedBatch } from '../ingest/types.js';
 import { type LeagueCode, LeagueCodeSchema } from '../leagues/codes.js';
+import { adapterFor } from '../leagues/registry.js';
 import { normalizeEvent } from '../leagues/sportradar-basketball/normalize.js';
-import { adapterFor } from '../leagues/wnba/adapter.js';
 import { createLogger, type Logger } from '../logger.js';
 import type { PeriodType } from '../model/live-event.js';
 import { SportradarHttp } from '../providers/sportradar/http.js';
@@ -248,9 +248,19 @@ async function main() {
         type: pe.periodType ?? 'quarter',
         sequence: pe.periodSequence ?? 0,
       };
-      batch = { events: [normalizeEvent(mutated, period)], deletedEvents: [], teamStats: [] };
+      batch = {
+        events: [normalizeEvent(mutated, period)],
+        deletedEvents: [],
+        teamStats: [],
+        playerStats: [],
+      };
     } else {
-      batch = { events: [], deletedEvents: [{ providerEventId, updatedAt: null }], teamStats: [] };
+      batch = {
+        events: [],
+        deletedEvents: [{ providerEventId, updatedAt: null }],
+        teamStats: [],
+        playerStats: [],
+      };
     }
     const result = await applyChanges({ db, log }, g.id, batch, {
       source: 'fixture',

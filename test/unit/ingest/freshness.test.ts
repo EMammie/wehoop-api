@@ -44,12 +44,15 @@ const view = (over: Partial<GameView> = {}): GameView => ({
   clockDecimal: '5:00',
   clockRunning: null,
   clockExtra: null,
+  elamTargetScore: null,
   periods: [],
   providerUpdatedAt: null,
   scheduledAt: null,
   coverage: 'full',
   venue: null,
   broadcasts: null,
+  title: null,
+  season: null,
   ...over,
 });
 const stored = (over: Partial<StoredGameForFreshness> = {}): StoredGameForFreshness => ({

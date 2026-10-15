@@ -7,15 +7,16 @@ import type { FetchedDocument, SportradarHttp } from '../providers/sportradar/ht
 import { BoxscoreDocumentSchema } from '../providers/sportradar/schemas/boxscore.js';
 import { PbpDocumentSchema } from '../providers/sportradar/schemas/pbp.js';
 import { SummaryDocumentSchema } from '../providers/sportradar/schemas/summary.js';
-import type { Feed } from '../providers/sportradar/urls.js';
+import { type Feed, isGameFeed } from '../providers/sportradar/urls.js';
 import { type ApplyDeps, type ApplyResult, applyChanges, ensureGame } from './apply-changes.js';
-import { ensureTeams } from './identity.js';
+import { ensurePlayers, ensureSeason, ensureTeams } from './identity.js';
 import {
   appendRecordedDocument,
   type RecordedDocument,
   readRecording,
   toRecordedDocument,
 } from './recording.js';
+import type { ReferenceIngester } from './reference.js';
 import type { RunHandle } from './runs.js';
 import type { NormalizedDocument, ObservationSource } from './types.js';
 
@@ -104,6 +105,10 @@ export class GameWatcher {
     // documents after a restart) is decided inside the transaction, never here.
     const nd = this.normalize(feed, body);
     const gameId = await this.ensure(nd);
+    // Identity before state: every player the document names gets a canonical row, so
+    // applyChanges can stamp play_events.player_id and emit stats_player with uuids.
+    if (nd.players.length > 0)
+      await ensurePlayers(this.deps.db, this.deps.adapter.league, nd.players);
     const result = await applyChanges(this.deps.apply, gameId, nd.batch, {
       source,
       runId: this.deps.run.id,
@@ -143,6 +148,14 @@ export class GameWatcher {
     const teamIds = await ensureTeams(this.deps.db, this.deps.adapter.league, nd.teams);
     const home = nd.teams.find((t) => t.isHome);
     const away = nd.teams.find((t) => !t.isHome);
+    const seasonId = nd.gameView?.season
+      ? await ensureSeason(
+          this.deps.db,
+          this.deps.adapter.league,
+          nd.gameView.season,
+          this.deps.log,
+        )
+      : null;
     const { id, created } = await ensureGame(
       this.deps.db,
       {
@@ -155,6 +168,8 @@ export class GameWatcher {
         awayTeamId: away ? (teamIds.get(away.providerTeamId) ?? null) : null,
         venue: nd.gameView?.venue ?? null,
         broadcasts: nd.gameView?.broadcasts ?? null,
+        seasonId,
+        title: nd.gameView?.title ?? null,
       },
       this.deps.log,
     );
@@ -249,6 +264,8 @@ export async function pollLoop(
 export interface ReplayOutcome {
   status: string | null;
   docs: number;
+  /** Reference documents (schedule, profiles, ...) routed to the ReferenceIngester. */
+  referenceDocs: number;
 }
 
 /**
@@ -263,22 +280,36 @@ export async function replayRecording(
   watcher: GameWatcher,
   path: string,
   log: Logger,
-  opts: { paceMs: number; isStopped: () => boolean; maxDocs: number | null },
+  opts: {
+    paceMs: number;
+    isStopped: () => boolean;
+    maxDocs: number | null;
+    /** Handles non-game feeds in the file (schedule, tournament, profile, ...); without one they are skipped. */
+    reference?: ReferenceIngester | null;
+  },
 ): Promise<ReplayOutcome> {
   let status: string | null = null;
   let docs = 0;
+  let referenceDocs = 0;
   let closedAt: number | null = null;
   for await (const line of readRecording(path, { warn: (m) => log.warn(m) })) {
     if (opts.isStopped()) break;
     docs++;
     try {
-      const out = await watcher.process(
-        line.feed,
-        line.body,
-        new Date(line.requestedAt),
-        'fixture',
-      );
-      status = out?.status ?? status;
+      if (isGameFeed(line.feed)) {
+        const out = await watcher.process(
+          line.feed,
+          line.body,
+          new Date(line.requestedAt),
+          'fixture',
+        );
+        status = out?.status ?? status;
+      } else if (opts.reference) {
+        referenceDocs++;
+        await opts.reference.process(line.feed, line.body, new Date(line.requestedAt));
+      } else {
+        log.warn({ feed: line.feed, docs }, 'reference document skipped (no ingester)');
+      }
     } catch (err) {
       log.error({ err, feed: line.feed, docs }, 'recorded document failed');
     }
@@ -289,6 +320,6 @@ export async function replayRecording(
     if (opts.maxDocs !== null && docs >= opts.maxDocs) break;
     if (opts.paceMs > 0) await new Promise((r) => setTimeout(r, opts.paceMs));
   }
-  log.info({ docs, status, closedAtDoc: closedAt }, 'recording replay finished');
-  return { status, docs };
+  log.info({ docs, referenceDocs, status, closedAtDoc: closedAt }, 'recording replay finished');
+  return { status, docs, referenceDocs };
 }

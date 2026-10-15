@@ -1,5 +1,5 @@
 import { canonicalJson } from './content-hash.js';
-import type { GameChange, TeamStats } from './game-change.js';
+import type { GameChange, StatsPlayerBody, TeamStats } from './game-change.js';
 import type { GameStatus, LiveEvent, PeriodRef, Score } from './live-event.js';
 import type { Snapshot } from './snapshot.js';
 
@@ -15,6 +15,7 @@ export interface GameState {
   periods: Array<PeriodRef & { score: Score }>;
   events: Map<string, LiveEvent>;
   teamStats: Map<string, { isHome: boolean; stats: TeamStats }>;
+  playerStats: Map<string, StatsPlayerBody>;
 }
 
 export function stateFromSnapshot(s: Snapshot): GameState {
@@ -25,6 +26,7 @@ export function stateFromSnapshot(s: Snapshot): GameState {
     periods: s.periods.map((p) => ({ ...p })),
     events: new Map(s.events.map((e) => [e.providerEventId, e.body])),
     teamStats: new Map(s.teamStats.map((t) => [t.teamId, { isHome: t.isHome, stats: t.stats }])),
+    playerStats: new Map(s.playerStats.map((p) => [p.playerId, p])),
   };
 }
 
@@ -49,6 +51,7 @@ export function applyChange(state: GameState, c: GameChange): GameState {
       state.teamStats.set(c.body.teamId, { isHome: c.body.isHome, stats: c.body.stats });
       break;
     case 'stats_player':
+      state.playerStats.set(c.body.playerId, c.body);
       break;
   }
   return state;
@@ -67,5 +70,8 @@ export function canonicalState(state: GameState): string {
     teamStats: [...state.teamStats.entries()]
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([teamId, v]) => ({ teamId, ...v })),
+    playerStats: [...state.playerStats.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([, v]) => v),
   });
 }

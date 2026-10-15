@@ -60,6 +60,7 @@ class FakeServer implements ChangesApi {
       periods: [],
       events: new Map(),
       teamStats: new Map(),
+      playerStats: new Map(),
     };
     for (const c of this.stream) applyChange(s, c);
     return s;
@@ -84,6 +85,7 @@ class FakeServer implements ChangesApi {
         clockRunning: null,
         clockAsOf: null,
         observedAt: null,
+        elamTargetScore: null,
       },
       periods: s.periods,
       teamStats: [],

@@ -17,6 +17,10 @@ export const EventStatisticSchema = z
     shot_type_desc: z.string().optional(),
     shot_distance: z.number().optional(),
     three_point_shot: z.boolean().optional(),
+    /** Unrivaled: the final made basket that reached the Elam target. */
+    winning_basket: z.boolean().optional(),
+    /** Unrivaled weighted free throws: the point value of a single attempt (2 or 3). */
+    free_throw_points: z.int().optional(),
     rebound_type: z.string().optional(),
     turnover_type: z.string().optional(),
     foul_type: z.string().optional(),
@@ -49,6 +53,10 @@ export const PbpEventSchema = z
     sequence: z.number().optional(),
     clock: z.string().optional(),
     clock_decimal: z.string().optional(),
+    /** Unrivaled: "standard" during regulation, "elam" during the target-score phase. */
+    clock_type: z.string().optional(),
+    /** Unrivaled: Elam-only, "+m:ss" counting up; absent during regulation. */
+    clock_directional: z.string().optional(),
     updated: IsoDateTime.optional(),
     created: IsoDateTime.optional(),
     wall_clock: IsoDateTime.optional(),

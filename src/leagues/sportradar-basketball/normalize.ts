@@ -1,11 +1,13 @@
 import type { z } from 'zod';
 import type {
+  DocumentPlayer,
   GameView,
   NormalizedDocument,
   NormalizedEvent,
+  NormalizedPlayerStats,
   NormalizedTeamStats,
 } from '../../ingest/types.js';
-import type { TeamStats } from '../../model/game-change.js';
+import type { PlayerStats, TeamStats } from '../../model/game-change.js';
 import {
   type GameStatus,
   GameStatusSchema,
@@ -15,14 +17,16 @@ import {
   type Score,
 } from '../../model/live-event.js';
 import type { BoxscoreDocument } from '../../providers/sportradar/schemas/boxscore.js';
-import type { ScoringPeriodSchema } from '../../providers/sportradar/schemas/common.js';
+import type { ScoringPeriodSchema, SeasonRef } from '../../providers/sportradar/schemas/common.js';
 import type {
   EventStatistic,
   PbpDocument,
   PbpEvent,
 } from '../../providers/sportradar/schemas/pbp.js';
 import type {
+  PlayerStatistics,
   SummaryDocument,
+  SummaryPlayer,
   TeamStatistics,
 } from '../../providers/sportradar/schemas/summary.js';
 
@@ -63,12 +67,18 @@ type Header = {
   id: string;
   status: string;
   scheduled: string;
+  title?: string | undefined;
   coverage?: string | undefined;
   clock?: string | undefined;
   clock_decimal?: string | undefined;
+  clock_type?: string | undefined;
+  clock_directional?: string | undefined;
+  elam_target_score?: number | undefined;
+  target_score?: number | undefined;
   quarter?: number | undefined;
   venue?: Record<string, unknown> | undefined;
   broadcasts?: unknown[] | undefined;
+  season?: SeasonRef | undefined;
   home: {
     id: string;
     name: string;
@@ -112,23 +122,51 @@ function currentPeriod(h: Header, periods: Array<PeriodRef & { score: Score }>):
   return { number: p.number, type: p.type, sequence: p.sequence };
 }
 
-function gameViewOf(h: Header, periods: Array<PeriodRef & { score: Score }>): GameView {
+/**
+ * The two Unrivaled-only clock fields (plan §9: `clock_extra` until a real
+ * fixture fixes the names). Read from the header when present, else from the
+ * newest event of the document; null when neither carries them.
+ */
+function clockExtraOf(h: Header, newestEvent: PbpEvent | null): Record<string, unknown> | null {
+  const type = h.clock_type ?? newestEvent?.clock_type;
+  const directional = h.clock_directional ?? newestEvent?.clock_directional;
+  if (type === undefined && directional === undefined) return null;
+  return {
+    ...(type !== undefined ? { clockType: type } : {}),
+    ...(directional !== undefined ? { clockDirectional: directional } : {}),
+  };
+}
+
+function gameViewOf(
+  h: Header,
+  periods: Array<PeriodRef & { score: Score }>,
+  newestEvent: PbpEvent | null = null,
+): GameView {
   const status = mapStatus(h.status);
+  const period = currentPeriod(h, periods);
+  // Elam (plan §2): the game clock is off, so the game-level clock is null and
+  // clock_running is false; the provider's count-up stays in clock_extra.
+  const elam = period?.type === 'elam';
   return {
     status,
     unknownStatus: status === null ? h.status : null,
     score: { home: h.home.points ?? 0, away: h.away.points ?? 0 },
-    period: currentPeriod(h, periods),
-    clock: h.clock ?? null,
-    clockDecimal: h.clock_decimal ?? null,
-    clockRunning: null,
-    clockExtra: null,
+    period,
+    clock: elam ? null : (h.clock ?? null),
+    clockDecimal: elam ? null : (h.clock_decimal ?? null),
+    clockRunning: elam ? false : null,
+    clockExtra: clockExtraOf(h, newestEvent),
+    elamTargetScore: h.elam_target_score ?? h.target_score ?? null,
     periods,
     providerUpdatedAt: null,
     scheduledAt: h.scheduled,
     coverage: h.coverage ?? null,
     venue: h.venue ?? null,
     broadcasts: h.broadcasts ?? null,
+    title: h.title ?? null,
+    season: h.season
+      ? { providerSeasonId: h.season.id, year: h.season.year, type: h.season.type }
+      : null,
   };
 }
 
@@ -164,6 +202,41 @@ export function lineScoreFromScoring(
 }
 
 /* ------------------------------------------------------------------------- */
+/* Players named by a document                                                */
+/* ------------------------------------------------------------------------- */
+
+/** Collects players by provider id; later mentions fill in blanks, never overwrite. */
+export class PlayerCollector {
+  private readonly byId = new Map<string, DocumentPlayer>();
+
+  add(p: {
+    id: string;
+    full_name?: string | undefined;
+    first_name?: string | undefined;
+    last_name?: string | undefined;
+    jersey_number?: string | undefined;
+    position?: string | undefined;
+    teamId?: string | undefined;
+  }): void {
+    const existing = this.byId.get(p.id);
+    const merged: DocumentPlayer = {
+      providerPlayerId: p.id,
+      providerTeamId: existing?.providerTeamId ?? p.teamId ?? null,
+      fullName: existing?.fullName ?? p.full_name ?? null,
+      firstName: existing?.firstName ?? p.first_name ?? null,
+      lastName: existing?.lastName ?? p.last_name ?? null,
+      jersey: existing?.jersey ?? p.jersey_number ?? null,
+      position: existing?.position ?? p.position ?? null,
+    };
+    this.byId.set(p.id, merged);
+  }
+
+  list(): DocumentPlayer[] {
+    return [...this.byId.values()];
+  }
+}
+
+/* ------------------------------------------------------------------------- */
 /* Events                                                                     */
 /* ------------------------------------------------------------------------- */
 
@@ -189,6 +262,9 @@ const TIMEOUT_KINDS: Record<string, 'team' | 'official' | 'tv' | 'challenge'> = 
   challengetimeout: 'challenge',
 };
 
+/** Unrivaled's 3-on-3 lineup swaps (`lineupchangeone`, `lineupchangethree`) are lineup changes too. */
+const LINEUP_CHANGE_TYPES = new Set(['lineupchange', 'lineupchangeone', 'lineupchangethree']);
+
 function stat(ev: PbpEvent, type: string): EventStatistic | undefined {
   return ev.statistics?.find((s) => s.type === type);
 }
@@ -200,12 +276,17 @@ function lineupFor(ev: PbpEvent, teamId: string | undefined): string[] {
   return (side?.players ?? []).map((p) => p.id).sort();
 }
 
-export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent {
+export function normalizeEvent(
+  ev: PbpEvent,
+  period: PeriodRef,
+  players?: PlayerCollector,
+): NormalizedEvent {
   const teamId = ev.attribution?.id;
   const base = {
     period,
     clock: ev.clock ?? null,
     ...(ev.clock_decimal !== undefined ? { clockDecimal: ev.clock_decimal } : {}),
+    ...(ev.clock_directional !== undefined ? { clockDirectional: ev.clock_directional } : {}),
     wallClock: ev.wall_clock ?? null,
     score: { home: ev.home_points ?? 0, away: ev.away_points ?? 0 },
     ...(teamId ? { providerTeamId: teamId } : {}),
@@ -219,7 +300,7 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
 
   if (t === 'opentip') {
     body = { ...base, type: 'tip_off' };
-  } else if (t === 'lineupchange') {
+  } else if (LINEUP_CHANGE_TYPES.has(t)) {
     body = { ...base, type: 'lineup_change', providerOnCourtPlayerIds: lineupFor(ev, teamId) };
   } else if (t === 'startperiod') {
     body = { ...base, type: 'period_start' };
@@ -243,6 +324,7 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
       ...(fg?.shot_distance !== undefined ? { distance: fg.shot_distance } : {}),
       ...(assist ? { providerAssistId: assist } : {}),
       ...(block ? { providerBlockId: block } : {}),
+      ...(fg?.winning_basket === true ? { winningBasket: true } : {}),
       ...(ev.location
         ? {
             location: {
@@ -257,6 +339,7 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
     const ft = stat(ev, 'freethrow');
     playerId = ft?.player?.id;
     const m = /free throw (\d+) of (\d+)/i.exec(ev.description ?? '');
+    const ftPoints = ft?.free_throw_points ?? ft?.points;
     body = {
       ...base,
       ...(playerId ? { providerPlayerId: playerId } : {}),
@@ -264,6 +347,7 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
       made: t === 'freethrowmade',
       ...(m ? { attempt: Number(m[1]), of: Number(m[2]) } : {}),
       ...(ft?.free_throw_type !== undefined ? { freeThrowType: ft.free_throw_type } : {}),
+      ...(ftPoints !== undefined && ftPoints > 0 ? { points: ftPoints } : {}),
     };
   } else if (t === 'rebound') {
     const rb = stat(ev, 'rebound');
@@ -308,6 +392,15 @@ export function normalizeEvent(ev: PbpEvent, period: PeriodRef): NormalizedEvent
     body = { ...base, type: 'other', providerEventType: t };
   }
 
+  if (players) {
+    for (const s of ev.statistics ?? []) {
+      if (s.player) players.add({ ...s.player, teamId: s.team?.id ?? teamId });
+    }
+    for (const side of [ev.on_court?.home, ev.on_court?.away]) {
+      for (const p of side?.players ?? []) players.add({ ...p, teamId: side?.id });
+    }
+  }
+
   return {
     providerEventId: ev.id,
     providerNumber: ev.number ?? null,
@@ -343,14 +436,20 @@ export function normalizePbpDocument(doc: PbpDocument): NormalizedDocument {
     }))
     .sort((a, b) => a.sequence - b.sequence);
   const events: NormalizedEvent[] = [];
+  const players = new PlayerCollector();
+  let newest: PbpEvent | null = null;
   for (const p of doc.periods) {
     const ref: PeriodRef = { number: p.number, type: mapPeriodType(p.type), sequence: p.sequence };
-    for (const ev of p.events) events.push(normalizeEvent(ev, ref));
+    for (const ev of p.events) {
+      events.push(normalizeEvent(ev, ref, players));
+      newest = ev;
+    }
   }
   return {
     providerGameId: doc.id,
     teams: teamsOf(doc),
-    gameView: gameViewOf(doc, periods),
+    players: players.list(),
+    gameView: gameViewOf(doc, periods, newest),
     isComplete: true,
     batch: {
       events,
@@ -359,6 +458,7 @@ export function normalizePbpDocument(doc: PbpDocument): NormalizedDocument {
         updatedAt: d.updated ?? null,
       })),
       teamStats: [],
+      playerStats: [],
     },
   };
 }
@@ -417,37 +517,110 @@ export function teamStatsFrom(stats: TeamStatistics | undefined): TeamStats {
   };
 }
 
+const PLAYER_TYPED_KEYS = new Set([
+  'minutes',
+  'points',
+  'field_goals_made',
+  'field_goals_att',
+  'three_points_made',
+  'three_points_att',
+  'free_throws_made',
+  'free_throws_att',
+  'offensive_rebounds',
+  'defensive_rebounds',
+  'rebounds',
+  'assists',
+  'steals',
+  'blocks',
+  'turnovers',
+  'personal_fouls',
+  'pls_min',
+  'efficiency',
+  'periods',
+]);
+
+export function playerStatsFrom(stats: PlayerStatistics | undefined): PlayerStats {
+  const n = (v: number | undefined) => (v === undefined ? null : v);
+  const extra: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(stats ?? {})) if (!PLAYER_TYPED_KEYS.has(k)) extra[k] = v;
+  return {
+    minutes: stats?.minutes ?? null,
+    points: n(stats?.points),
+    fgm: n(stats?.field_goals_made),
+    fga: n(stats?.field_goals_att),
+    tpm: n(stats?.three_points_made),
+    tpa: n(stats?.three_points_att),
+    ftm: n(stats?.free_throws_made),
+    fta: n(stats?.free_throws_att),
+    offRebounds: n(stats?.offensive_rebounds),
+    defRebounds: n(stats?.defensive_rebounds),
+    rebounds: n(stats?.rebounds),
+    assists: n(stats?.assists),
+    steals: n(stats?.steals),
+    blocks: n(stats?.blocks),
+    turnovers: n(stats?.turnovers),
+    personalFouls: n(stats?.personal_fouls),
+    plusMinus: n(stats?.pls_min),
+    efficiency: stats?.efficiency === undefined ? null : Math.round(stats.efficiency),
+    extra,
+  };
+}
+
+function playerLine(p: SummaryPlayer, providerTeamId: string): NormalizedPlayerStats {
+  return {
+    providerPlayerId: p.id,
+    providerTeamId,
+    fullName: p.full_name ?? `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim(),
+    jersey: p.jersey_number ?? null,
+    position: p.position ?? null,
+    starter: p.starter ?? null,
+    played: p.played ?? null,
+    onCourt: p.on_court ?? null,
+    notPlayingReason: p.not_playing_reason ?? null,
+    stats: playerStatsFrom(p.statistics),
+  };
+}
+
 export function normalizeSummaryDocument(doc: SummaryDocument): NormalizedDocument {
   const periods = lineScoreFromScoring(doc.home.scoring, doc.away.scoring);
   const teamStats: NormalizedTeamStats[] = [];
-  if (doc.home.statistics)
-    teamStats.push({
-      providerTeamId: doc.home.id,
-      isHome: true,
-      stats: teamStatsFrom(doc.home.statistics),
-    });
-  if (doc.away.statistics)
-    teamStats.push({
-      providerTeamId: doc.away.id,
-      isHome: false,
-      stats: teamStatsFrom(doc.away.statistics),
-    });
+  const playerStats: NormalizedPlayerStats[] = [];
+  const players = new PlayerCollector();
+  for (const side of [doc.home, doc.away]) {
+    const isHome = side === doc.home;
+    if (side.statistics)
+      teamStats.push({ providerTeamId: side.id, isHome, stats: teamStatsFrom(side.statistics) });
+    for (const p of side.players ?? []) {
+      players.add({ ...p, teamId: side.id });
+      // A roster line without statistics (pregame) is identity only, not a box line.
+      if (p.statistics) playerStats.push(playerLine(p, side.id));
+    }
+  }
   return {
     providerGameId: doc.id,
     teams: teamsOf(doc),
+    players: players.list(),
     gameView: gameViewOf(doc, periods),
     isComplete: false,
-    batch: { events: [], deletedEvents: [], teamStats },
+    batch: { events: [], deletedEvents: [], teamStats, playerStats },
   };
 }
 
 export function normalizeBoxscoreDocument(doc: BoxscoreDocument): NormalizedDocument {
   const periods = lineScoreFromScoring(doc.home.scoring, doc.away.scoring);
+  const players = new PlayerCollector();
+  for (const side of [doc.home, doc.away]) {
+    const leaders = side.leaders;
+    for (const list of [leaders?.points, leaders?.rebounds, leaders?.assists]) {
+      for (const p of list ?? []) players.add({ ...p, teamId: side.id });
+    }
+  }
   return {
     providerGameId: doc.id,
     teams: teamsOf(doc),
+    players: players.list(),
     gameView: gameViewOf(doc, periods),
     isComplete: false,
-    batch: { events: [], deletedEvents: [], teamStats: [] },
+    batch: { events: [], deletedEvents: [], teamStats: [], playerStats: [] },
   };
 }
