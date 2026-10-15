@@ -514,7 +514,13 @@ interface ExternalRef {
   raw: Record<string, unknown>;
 }
 
-/** A profile-level id claim: one person may own at most one of these per (league, id_type). */
+/**
+ * A profile-level id claim: one person may own at most one profile-owned
+ * `league_profile` id per league and at most one `sport_profile` id overall.
+ * `league` is where the row stores the id: for a sport-wide id that is the
+ * league of the profile that carried it, which is why sport ids are compared
+ * without it.
+ */
 interface ProfileClaim {
   league: LeagueCode;
   idType: 'league_profile' | 'sport_profile';
@@ -525,7 +531,11 @@ function claimConflicts(a: ProfileClaim[], b: ProfileClaim[]): ProfileClaim[] {
   const out: ProfileClaim[] = [];
   for (const x of a)
     for (const y of b)
-      if (x.league === y.league && x.idType === y.idType && x.externalId !== y.externalId)
+      if (
+        x.idType === y.idType &&
+        x.externalId !== y.externalId &&
+        (x.idType === 'sport_profile' || x.league === y.league)
+      )
         out.push(y);
   return out;
 }
