@@ -44,6 +44,7 @@ export const ncaawbAdapter: LeagueAdapter = {
   },
 };
 
+/** The capability and the normalizers share one mapping: the document's coverage, else the stored one. */
 function profile(documentCoverage: string | null | undefined, ctx: NormalizeContext | undefined) {
-  return defaultCoverageFor(effectiveCoverage(documentCoverage, ctx));
+  return ncaawbAdapter.capabilities.coverageFor(effectiveCoverage(documentCoverage, ctx));
 }
