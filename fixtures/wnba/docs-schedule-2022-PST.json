@@ -1,0 +1,116 @@
+{
+  "league": {
+    "id": "59c24590-0adb-4b3d-80a8-10450f83f4a1",
+    "name": "WNBA",
+    "alias": "WNBA"
+  },
+  "season": {
+    "id": "31e71734-dc44-4f69-ab41-9adf934e0b7a",
+    "year": 2022,
+    "type": "PST"
+  },
+  "games": [
+    {
+      "id": "02eb3caa-50f7-4937-b766-1b53654311c0",
+      "status": "closed",
+      "title": "Game 1",
+      "coverage": "full",
+      "scheduled": "2025-10-21T23:30:00+00:00",
+      "home_points": 91,
+      "away_points": 98,
+      "track_on_court": true,
+      "sr_id": "sr:match:35373519",
+      "is_all_star_game": true,
+      "time_zones": {
+        "venue": "US/Central",
+        "home": "US/Central",
+        "away": "US/Eastern"
+      },
+      "venue": {
+        "id": "fa4fcd34-792a-4cdc-a7df-a41e9d54a2b0",
+        "name": "Wintrust Arena",
+        "capacity": 10387,
+        "address": "200 East Cermak Road",
+        "city": "Chicago",
+        "state": "IL",
+        "zip": "60616",
+        "country": "USA",
+        "sr_id": "sr:venue:22190"
+      },
+      "broadcasts": [
+        {
+          "network": "ESPN2",
+          "type": "TV",
+          "locale": "National",
+          "channel": "209"
+        }
+      ],
+      "home": {
+        "name": "Chicago Sky",
+        "alias": "CHI",
+        "id": "3c409388-ab73-4c7f-953d-3a71062240f6",
+        "seed": 2,
+        "sr_id": "sr:team:35546"
+      },
+      "away": {
+        "name": "New York Liberty",
+        "alias": "NYL",
+        "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+        "seed": 7,
+        "sr_id": "sr:team:3446"
+      }
+    },
+    {
+      "id": "f3db498c-85ae-4857-af45-1db173c8d173",
+      "status": "closed",
+      "title": "Game 4",
+      "coverage": "full",
+      "scheduled": "2022-09-18T20:00:00Z",
+      "home_points": 71,
+      "away_points": 78,
+      "track_on_court": true,
+      "sr_id": "sr:match:36107267",
+      "time_zones": {
+        "venue": "US/Eastern",
+        "home": "US/Eastern",
+        "away": "US/Pacific"
+      },
+      "venue": {
+        "id": "7bdc8cea-2fc4-4320-b461-5659f6d08091",
+        "name": "Mohegan Sun Arena",
+        "capacity": 9323,
+        "address": "1 Mohegan Sun Boulevard",
+        "city": "Uncasville",
+        "state": "CT",
+        "zip": "06382",
+        "country": "USA",
+        "sr_id": "sr:venue:20505"
+      },
+      "broadcasts": [
+        {
+          "network": "ESPN",
+          "type": "TV",
+          "locale": "National",
+          "channel": "206"
+        },
+        {
+          "network": "Sportsnet",
+          "type": "TV",
+          "locale": "International"
+        }
+      ],
+      "home": {
+        "name": "Connecticut Sun",
+        "alias": "CON",
+        "id": "a015b02d-845c-40c1-8ef4-844984f47e4d",
+        "sr_id": "sr:team:35547"
+      },
+      "away": {
+        "name": "Las Vegas Aces",
+        "alias": "LVA",
+        "id": "171b097d-01db-4ae8-9d56-035689402ec6",
+        "sr_id": "sr:team:35550"
+      }
+    }
+  ]
+}

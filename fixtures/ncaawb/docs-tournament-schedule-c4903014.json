@@ -1,0 +1,168 @@
+{
+  "id": "c4903014-8c00-4083-a70c-bedcd501cda3",
+  "name": "NCAA Women's Division I Basketball Tournament",
+  "location": "Dallas, TX, USA",
+  "status": "closed",
+  "league": {
+    "id": "affab7b6-647e-4304-bbe2-1f9d68cd0cea",
+    "name": "NCAA WOMEN",
+    "alias": "NCAAW"
+  },
+  "season": {
+    "id": "53f19b98-5b7f-413d-810f-58ddfcbf9a0f",
+    "year": 2022,
+    "type": "PST"
+  },
+  "rounds": [
+    {
+      "id": "027db377-482c-4d0b-8113-2e574a872d10",
+      "sequence": 6,
+      "name": "Final Four",
+      "games": [
+        {
+          "id": "a8d901bc-bbab-480a-a22b-3b9cc1e33b7f",
+          "status": "closed",
+          "title": "Final Four - Game 1",
+          "coverage": "full",
+          "scheduled": "2023-04-01T01:47:00+00:00",
+          "home_points": 73,
+          "away_points": 77,
+          "neutral_site": true,
+          "conference_game": false,
+          "track_on_court": false,
+          "time_zones": {
+            "venue": "US/Central",
+            "home": "US/Eastern",
+            "away": "US/Central"
+          },
+          "venue": {
+            "id": "401ba62f-19b5-5bfc-84d6-021772943311",
+            "name": "American Airlines Center",
+            "capacity": 19200,
+            "address": "2500 Victory Avenue",
+            "city": "Dallas",
+            "state": "TX",
+            "zip": "75219",
+            "country": "USA",
+            "location": {
+              "lat": "32.79087",
+              "lng": "-96.810338"
+            }
+          },
+          "broadcasts": [
+            {
+              "network": "ESPN",
+              "type": "TV",
+              "locale": "National",
+              "channel": "206"
+            }
+          ],
+          "home": {
+            "name": "South Carolina Gamecocks",
+            "alias": "SCAR",
+            "id": "7f4f0451-6b78-4082-9503-ce851e549b0c",
+            "seed": 1,
+            "source": {
+              "id": "df834ada-1be7-4075-93c5-f122e189643e",
+              "title": "Greenville 1 - Elite Eight - Game 1",
+              "status": "closed",
+              "coverage": "full",
+              "home_team": "7f4f0451-6b78-4082-9503-ce851e549b0c",
+              "away_team": "c612ba6e-aa21-48f8-a5d8-0a9e0a9c3320",
+              "scheduled": "2023-03-27T23:00:00+00:00",
+              "outcome": "win"
+            }
+          },
+          "away": {
+            "name": "Iowa Hawkeyes",
+            "alias": "IOWA",
+            "id": "7269c5c7-6614-41d8-9415-7ca3243f6612",
+            "seed": 2,
+            "source": {
+              "id": "7d22568c-622c-4f8d-a2ed-7ae94487a347",
+              "title": "Seattle 4 - Elite Eight - Game 1",
+              "status": "closed",
+              "coverage": "full",
+              "home_team": "7269c5c7-6614-41d8-9415-7ca3243f6612",
+              "away_team": "5784e2b2-9317-46bd-a478-f0147b92ae3e",
+              "scheduled": "2023-03-27T01:00:00+00:00",
+              "outcome": "win"
+            }
+          }
+        },
+        {
+          "id": "f13934ae-4cf6-473a-89be-455f804d9e14",
+          "status": "closed",
+          "title": "Final Four - Game 2",
+          "coverage": "full",
+          "scheduled": "2023-03-31T23:00:00+00:00",
+          "home_points": 72,
+          "away_points": 79,
+          "neutral_site": true,
+          "conference_game": false,
+          "track_on_court": false,
+          "time_zones": {
+            "venue": "US/Central",
+            "home": "US/Eastern",
+            "away": "US/Central"
+          },
+          "venue": {
+            "id": "401ba62f-19b5-5bfc-84d6-021772943311",
+            "name": "American Airlines Center",
+            "capacity": 19200,
+            "address": "2500 Victory Avenue",
+            "city": "Dallas",
+            "state": "TX",
+            "zip": "75219",
+            "country": "USA",
+            "location": {
+              "lat": "32.79087",
+              "lng": "-96.810338"
+            }
+          },
+          "broadcasts": [
+            {
+              "network": "ESPN",
+              "type": "TV",
+              "locale": "National",
+              "channel": "206"
+            }
+          ],
+          "home": {
+            "name": "Virginia Tech Hokies",
+            "alias": "VT",
+            "id": "040ad25c-7ea1-4aad-a169-e9aeca855c34",
+            "seed": 1,
+            "source": {
+              "id": "80df7f4a-c985-4ed5-ae0d-984ffcf36db9",
+              "title": "Seattle 3 - Elite Eight - Game 1",
+              "status": "closed",
+              "coverage": "full",
+              "home_team": "040ad25c-7ea1-4aad-a169-e9aeca855c34",
+              "away_team": "3d736e36-ebbe-4d0c-a9dc-5bbfd33ae179",
+              "scheduled": "2023-03-28T01:00:00+00:00",
+              "outcome": "win"
+            }
+          },
+          "away": {
+            "name": "LSU Lady Tigers",
+            "alias": "LSU",
+            "id": "83271bc0-c5f0-4f88-8612-4c8581f20275",
+            "seed": 3,
+            "source": {
+              "id": "2f297f0e-161d-432f-9f9a-9d3846a6a727",
+              "title": "Greenville 2 - Elite Eight - Game 1",
+              "status": "closed",
+              "coverage": "full",
+              "home_team": "83271bc0-c5f0-4f88-8612-4c8581f20275",
+              "away_team": "4abe8851-6e27-4853-8407-9fd5828d4938",
+              "scheduled": "2023-03-26T23:00:00+00:00",
+              "outcome": "win"
+            }
+          }
+        }
+      ],
+      "bracketed": []
+    }
+  ]
+}

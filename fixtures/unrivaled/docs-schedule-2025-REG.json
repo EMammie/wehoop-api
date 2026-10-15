@@ -1,0 +1,148 @@
+{
+  "league": {
+    "id": "844ee10a-00c8-4dc1-9c17-52598de2ef47",
+    "name": "Unrivaled",
+    "alias": "UNRIVALED"
+  },
+  "season": {
+    "id": "c86ab7c9-5408-44e6-af06-c22636262927",
+    "year": 2025,
+    "type": "REG"
+  },
+  "games": [
+    {
+      "id": "838316ea-ab7b-4581-a1dd-74229d1970d5",
+      "status": "closed",
+      "coverage": "full",
+      "scheduled": "2025-01-18T00:00:00+00:00",
+      "home_points": 80,
+      "away_points": 84,
+      "track_on_court": true,
+      "time_zones": {
+        "venue": "US/Eastern",
+        "home": "US/Eastern",
+        "away": "US/Eastern"
+      },
+      "venue": {
+        "id": "67e49419-cb04-4ce0-ab33-ae42af8d8634",
+        "name": "Sephora Arena",
+        "capacity": 850,
+        "address": "7321 NW 75th Street",
+        "city": "Medley",
+        "state": "FL",
+        "zip": "33166",
+        "country": "USA",
+        "location": {
+          "lat": "25.842035",
+          "lng": "-80.317192"
+        }
+      },
+      "broadcasts": [
+        {
+          "network": "TNT",
+          "type": "TV",
+          "locale": "National",
+          "channel": "245"
+        }
+      ],
+      "home": {
+        "name": "Mist",
+        "alias": "MST",
+        "id": "0780b080-347b-407b-b8d6-fa109ec23908"
+      },
+      "away": {
+        "name": "Lunar Owls",
+        "alias": "LNR",
+        "id": "67c22115-2385-458f-8632-a67a025fef55"
+      }
+    },
+    {
+      "id": "3c58e5c2-6d7c-4797-9a43-9f3fffc536f7",
+      "status": "scheduled",
+      "coverage": "full",
+      "scheduled": "2025-01-18T01:15:00+00:00",
+      "track_on_court": true,
+      "time_zones": {
+        "venue": "US/Eastern",
+        "home": "US/Eastern",
+        "away": "US/Eastern"
+      },
+      "venue": {
+        "id": "67e49419-cb04-4ce0-ab33-ae42af8d8634",
+        "name": "Sephora Arena",
+        "capacity": 850,
+        "address": "7321 NW 75th Street",
+        "city": "Medley",
+        "state": "FL",
+        "zip": "33166",
+        "country": "USA",
+        "location": {
+          "lat": "25.842035",
+          "lng": "-80.317192"
+        }
+      },
+      "broadcasts": [
+        {
+          "network": "TNT",
+          "type": "TV",
+          "locale": "National",
+          "channel": "245"
+        }
+      ],
+      "home": {
+        "name": "Rose",
+        "alias": "ROS",
+        "id": "3b7f5d56-3586-4d58-98a7-562e267a965e"
+      },
+      "away": {
+        "name": "Vinyl",
+        "alias": "VNL",
+        "id": "4eeb0d49-106d-4a2d-8917-b703595219dc"
+      }
+    },
+    {
+      "id": "5a8f4590-601c-4ed0-88f6-df78201e0a22",
+      "status": "scheduled",
+      "coverage": "full",
+      "scheduled": "2025-01-18T19:00:00+00:00",
+      "track_on_court": true,
+      "time_zones": {
+        "venue": "US/Eastern",
+        "home": "US/Eastern",
+        "away": "US/Eastern"
+      },
+      "venue": {
+        "id": "67e49419-cb04-4ce0-ab33-ae42af8d8634",
+        "name": "Sephora Arena",
+        "capacity": 850,
+        "address": "7321 NW 75th Street",
+        "city": "Medley",
+        "state": "FL",
+        "zip": "33166",
+        "country": "USA",
+        "location": {
+          "lat": "25.842035",
+          "lng": "-80.317192"
+        }
+      },
+      "broadcasts": [
+        {
+          "network": "truTV",
+          "type": "TV",
+          "locale": "National",
+          "channel": "246"
+        }
+      ],
+      "home": {
+        "name": "Phantom",
+        "alias": "PHA",
+        "id": "e5be75a6-cd4a-41d3-b3c3-638506ced50a"
+      },
+      "away": {
+        "name": "Laces",
+        "alias": "LCS",
+        "id": "b1da8619-1db7-4c21-99bb-4c7307e25026"
+      }
+    }
+  ]
+}

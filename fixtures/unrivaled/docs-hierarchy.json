@@ -1,0 +1,98 @@
+{
+  "league": {
+    "id": "844ee10a-00c8-4dc1-9c17-52598de2ef47",
+    "name": "Unrivaled",
+    "alias": "UNRIVALED"
+  },
+  "conferences": [
+    {
+      "id": "56089804-dbb3-4621-96eb-ec520ab26988",
+      "name": "Unrivaled",
+      "alias": "UNRIVALED",
+      "teams": [
+        {
+          "id": "0780b080-347b-407b-b8d6-fa109ec23908",
+          "name": "Mist",
+          "alias": "MST",
+          "franchise_id": "a730984c-2f67-4d33-aabf-dcd9d45b2e2b",
+          "founded": 2025,
+          "team_colors": [
+            {
+              "type": "secondary",
+              "hex_color": "#a3d3e7",
+              "rgb_color": {
+                "red": 163,
+                "green": 211,
+                "blue": 231
+              }
+            },
+            {
+              "type": "primary",
+              "hex_color": "#083860",
+              "rgb_color": {
+                "red": 8,
+                "green": 56,
+                "blue": 96
+              }
+            }
+          ],
+          "venue": {
+            "id": "67e49419-cb04-4ce0-ab33-ae42af8d8634",
+            "name": "Unrivaled Arena",
+            "capacity": 850,
+            "address": "7321 NW 75th Street",
+            "city": "Medley",
+            "state": "FL",
+            "zip": "33166",
+            "country": "USA",
+            "location": {
+              "lat": "25.842035",
+              "lng": "-80.317192"
+            }
+          }
+        },
+        {
+          "id": "3b7f5d56-3586-4d58-98a7-562e267a965e",
+          "name": "Rose",
+          "alias": "ROS",
+          "franchise_id": "05f487c9-1fe6-4253-a49a-e7870662f445",
+          "founded": 2025,
+          "team_colors": [
+            {
+              "type": "secondary",
+              "hex_color": "#dda493",
+              "rgb_color": {
+                "red": 221,
+                "green": 164,
+                "blue": 147
+              }
+            },
+            {
+              "type": "primary",
+              "hex_color": "#1b5751",
+              "rgb_color": {
+                "red": 27,
+                "green": 87,
+                "blue": 81
+              }
+            }
+          ],
+          "venue": {
+            "id": "67e49419-cb04-4ce0-ab33-ae42af8d8634",
+            "name": "Unrivaled Arena",
+            "capacity": 850,
+            "address": "7321 NW 75th Street",
+            "city": "Medley",
+            "state": "FL",
+            "zip": "33166",
+            "country": "USA",
+            "location": {
+              "lat": "25.842035",
+              "lng": "-80.317192"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

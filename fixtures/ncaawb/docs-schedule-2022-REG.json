@@ -1,0 +1,90 @@
+{
+  "league": {
+    "id": "affab7b6-647e-4304-bbe2-1f9d68cd0cea",
+    "name": "NCAA WOMEN",
+    "alias": "NCAAW"
+  },
+  "season": {
+    "id": "99709e03-9678-4ded-b848-3406ff731687",
+    "year": 2022,
+    "type": "REG"
+  },
+  "games": [
+    {
+      "id": "02d0040b-d0e8-4b0a-913b-0eb97a816ceb",
+      "status": "closed",
+      "coverage": "boxscore",
+      "scheduled": "2022-11-07T16:00:00Z",
+      "home_points": 88,
+      "away_points": 56,
+      "conference_game": false,
+      "time_zones": {
+        "venue": "US/Eastern",
+        "home": "US/Eastern",
+        "away": "US/Eastern"
+      },
+      "venue": {
+        "id": "9770a04e-e7a8-4665-9fff-419191dc5664",
+        "name": "Savage Arena",
+        "capacity": 7014,
+        "address": "2801 W Bancroft Street",
+        "city": "Toledo",
+        "state": "OH",
+        "zip": "43606",
+        "country": "USA",
+        "location": {
+          "lat": "41.6601653",
+          "lng": "-83.6119204"
+        }
+      },
+      "home": {
+        "name": "Toledo Rockets",
+        "alias": "TOL",
+        "id": "f5f56256-ce91-4123-8dff-19a411d96172"
+      },
+      "away": {
+        "name": "Wright State Raiders",
+        "alias": "WRST",
+        "id": "b5e353c4-af1e-4f20-9eb8-9d397f5c8f49"
+      }
+    },
+    {
+      "id": "32c2263b-8587-4f38-813f-fda7d09c37ed",
+      "status": "closed",
+      "coverage": "boxscore",
+      "scheduled": "2025-10-21T23:30:00+00:00",
+      "home_points": 49,
+      "away_points": 36,
+      "conference_game": false,
+      "time_zones": {
+        "venue": "US/Eastern",
+        "home": "US/Eastern",
+        "away": "US/Eastern"
+      },
+      "venue": {
+        "id": "90309916-1459-4ded-bbba-e7a107318b9c",
+        "name": "UPMC Events Center",
+        "capacity": 3056,
+        "address": "6001 University Boulevard",
+        "city": "Moon Township",
+        "state": "PA",
+        "zip": "15108",
+        "country": "USA",
+        "location": {
+          "lat": "40.5202535",
+          "lng": "-80.2171257"
+        }
+      },
+      "home": {
+        "name": "Robert Morris Colonials",
+        "alias": "RMU",
+        "id": "d472d67f-09ce-4de3-b43b-139c6d0e3725"
+      },
+      "away": {
+        "name": "St. Francis (PA) Red Flash",
+        "alias": "SFPA",
+        "id": "def0ce77-9c31-4962-8dae-4316dcc0add3"
+      }
+    }
+  ]
+}

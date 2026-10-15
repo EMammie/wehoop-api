@@ -1,0 +1,182 @@
+{
+  "league": {
+    "id": "59c24590-0adb-4b3d-80a8-10450f83f4a1",
+    "name": "WNBA",
+    "alias": "WNBA"
+  },
+  "conferences": [
+    {
+      "id": "092510cf-3285-48bb-b831-40ac3608ca36",
+      "name": "EASTERN CONFERENCE",
+      "alias": "EASTERN-W",
+      "teams": [
+        {
+          "id": "08ed8274-e29f-4248-bc2e-83cc8ed18d75",
+          "name": "Liberty",
+          "market": "New York",
+          "alias": "NYL",
+          "franchise_id": "8675491c-69a6-4097-bb00-46636be26670",
+          "sr_id": "sr:team:3446",
+          "founded": 1997,
+          "owner": "Joseph Tsai and Clara Wu Tsai",
+          "general_manager": "Jonathan Kolb",
+          "president": "Keia Clarke",
+          "mascot": "Ellie the Elephant",
+          "sponsor": "Webull",
+          "championships_won": 0,
+          "conference_titles": 3,
+          "playoff_appearances": 18,
+          "team_colors": [
+            {
+              "type": "primary",
+              "hex_color": "#86cebc",
+              "rgb_color": {
+                "red": 134,
+                "green": 206,
+                "blue": 188
+              }
+            },
+            {
+              "type": "secondary",
+              "hex_color": "#000000",
+              "rgb_color": {
+                "red": 0,
+                "green": 0,
+                "blue": 0
+              }
+            }
+          ],
+          "venue": {
+            "id": "7a330bcd-ac0f-50ca-bc29-2460e5c476b3",
+            "name": "Barclays Center",
+            "capacity": 17732,
+            "address": "620 Atlantic Avenue",
+            "city": "Brooklyn",
+            "state": "NY",
+            "zip": "11217",
+            "country": "USA",
+            "sr_id": "sr:venue:6918",
+            "location": {
+              "lat": "40.682957",
+              "lng": "-73.975165"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "d95b23c8-dee5-4142-ac4a-2b4ab05beebc",
+      "name": "WESTERN CONFERENCE",
+      "alias": "WESTERN-W",
+      "teams": [
+        {
+          "id": "0699edf3-5993-4182-b9b4-ec935cbd4fcc",
+          "name": "Mercury",
+          "market": "Phoenix",
+          "alias": "PHO",
+          "franchise_id": "996e8c32-2beb-4138-ab76-0384a11fa0af",
+          "sr_id": "sr:team:3444",
+          "founded": 1997,
+          "owner": "Mat Ishbia",
+          "general_manager": "Nick U'Ren",
+          "mascot": "Scorch",
+          "sponsor": "Fry's Food and Drug",
+          "championships_won": 3,
+          "championship_seasons": "2007, 2009, 2014",
+          "conference_titles": 4,
+          "retired_numbers": "7, 13, 22, 32",
+          "playoff_appearances": 17,
+          "team_colors": [
+            {
+              "type": "secondary",
+              "hex_color": "#e56020",
+              "rgb_color": {
+                "red": 229,
+                "green": 96,
+                "blue": 32
+              }
+            },
+            {
+              "type": "primary",
+              "hex_color": "#1d1160",
+              "rgb_color": {
+                "red": 29,
+                "green": 17,
+                "blue": 96
+              }
+            }
+          ],
+          "venue": {
+            "id": "1d2e59b2-2479-5f84-a6a7-e82f65dd8442",
+            "name": "Footprint Center",
+            "capacity": 18422,
+            "address": "201 E. Jefferson Street",
+            "city": "Phoenix",
+            "state": "AZ",
+            "zip": "85004",
+            "country": "USA",
+            "sr_id": "sr:venue:6938",
+            "location": {
+              "lat": "33.445833",
+              "lng": "-112.071389"
+            }
+          }
+        },
+        {
+          "id": "0a5ad38d-2fe3-43ba-894b-1ba3d5042ea9",
+          "name": "Sparks",
+          "market": "Los Angeles",
+          "alias": "LAS",
+          "franchise_id": "2e4e5ff6-1dcf-4126-aecd-b48e579ff82c",
+          "sr_id": "sr:team:3447",
+          "founded": 1997,
+          "owner": "Sparks LA Sports",
+          "general_manager": "Karen Bryant",
+          "president": "Christine Monjer",
+          "mascot": "Sparky",
+          "sponsor": "EquiTrust Life Insurance",
+          "championships_won": 3,
+          "championship_seasons": "2001, 2002, 2016",
+          "conference_titles": 3,
+          "retired_numbers": "9, 11",
+          "playoff_appearances": 20,
+          "team_colors": [
+            {
+              "type": "secondary",
+              "hex_color": "#fdb927",
+              "rgb_color": {
+                "red": 253,
+                "green": 185,
+                "blue": 39
+              }
+            },
+            {
+              "type": "primary",
+              "hex_color": "#552583",
+              "rgb_color": {
+                "red": 85,
+                "green": 37,
+                "blue": 131
+              }
+            }
+          ],
+          "venue": {
+            "id": "792ec100-691e-5e16-8ef8-79b2b6ee38ba",
+            "name": "Crypto.com Arena",
+            "capacity": 18997,
+            "address": "1111 S. Figueroa Street",
+            "city": "Los Angeles",
+            "state": "CA",
+            "zip": "90015",
+            "country": "USA",
+            "sr_id": "sr:venue:6008",
+            "location": {
+              "lat": "34.043059",
+              "lng": "-118.267223"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

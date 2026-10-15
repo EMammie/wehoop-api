@@ -76,3 +76,19 @@ observation's `observedAt` on replay; `body` is the provider document exactly as
 | File | Source | Documents | sha256 |
 |---|---|---|---|
 | `sim-93ee7c68-replay.compact.jsonl.gz` | `pnpm sim record` + `pnpm sim compact` as above (recorded 2026-10-14, session at natural pace, 3,350 raw documents: 2,790 pbp / 280 summary / 280 boxscore, 1,802,476,345 bytes raw) | 158 documents (76 pbp, 41 summary, 41 boxscore), 2,541,778 bytes | sha256: 7be194ab80d0ca885a12d802702d046f73e8ab9c13763af13d5a4527c5b0481c |
+
+## Docs samples (`docs-*`, M2)
+
+The `Result` example payloads embedded in Sportradar's public WNBA v8 reference pages
+(`https://developer.sportradar.com/basketball/reference/wnba-<feed>`), extracted on 2026-10-14
+from the page's embedded OpenAPI definition, pretty-printed, otherwise unedited. They are **not**
+captured responses.
+
+| File | Page | Notable |
+|---|---|---|
+| `docs-player-profile-boston.json` | `wnba-player-profile` | Aliyah Boston: `references[]` with a WNBA `external` id, a `sport_profile` id and an NCAAW `league_profile` id; four season lines. The same player is in the captured Unrivaled league leaders, which is what `fixtures/unrivaled/hand-player-profile-boston.json` links |
+| `docs-schedule-2022-PST.json` | `wnba-schedule` | playoff games with `title` and `seed` |
+| `docs-standings-2022-REG.json` | `wnba-standings` | `calc_rank`, `rank.clinched` |
+| `docs-hierarchy.json` | `wnba-league-hierarchy` | `conferences[] > teams[]` with colors and venue |
+| `docs-seasonal-stats-6f017f37.json` | `wnba-seasonal-statistics` | team + player season lines |
+| `docs-identity-replay.jsonl` | replay file: the Boston profile, then the hierarchy | `pnpm dev:worker --mode sim --league wnba --replay-file fixtures/wnba/docs-identity-replay.jsonl --pace 0` |

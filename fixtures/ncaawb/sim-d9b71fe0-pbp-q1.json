@@ -1,0 +1,1466 @@
+{
+  "id": "2e36b340-9277-4b99-af20-b7ff7e86640e",
+  "status": "inprogress",
+  "coverage": "full",
+  "scheduled": "2026-02-18T23:30:00+00:00",
+  "conference_game": true,
+  "lead_changes": 1,
+  "times_tied": 1,
+  "clock": "6:12",
+  "quarter": 1,
+  "track_on_court": false,
+  "entry_mode": "LDE",
+  "clock_decimal": "6:12",
+  "possession_arrow": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+  "broadcasts": [
+    {
+      "type": "Internet",
+      "network": "B1G+"
+    }
+  ],
+  "time_zones": {
+    "venue": "US/Eastern",
+    "home": "US/Eastern",
+    "away": "US/Central"
+  },
+  "season": {
+    "id": "ec6ca218-4496-4d67-99e5-95bea992f4bf",
+    "year": 2025,
+    "type": "REG",
+    "name": "Regular Season"
+  },
+  "home": {
+    "name": "Spartans",
+    "alias": "MSU",
+    "market": "Michigan State",
+    "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+    "points": 11,
+    "rank": 18,
+    "remaining_timeouts": 4
+  },
+  "away": {
+    "name": "Wildcats",
+    "alias": "NW",
+    "market": "Northwestern",
+    "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+    "points": 9,
+    "rank": 0,
+    "remaining_timeouts": 4
+  },
+  "periods": [
+    {
+      "type": "quarter",
+      "id": "e6115368-c8ca-4539-af17-686e83daa633",
+      "number": 1,
+      "sequence": 1,
+      "scoring": {
+        "times_tied": 1,
+        "lead_changes": 1,
+        "home": {
+          "name": "Spartans",
+          "market": "Michigan State",
+          "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+          "points": 11
+        },
+        "away": {
+          "name": "Wildcats",
+          "market": "Northwestern",
+          "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+          "points": 9
+        }
+      },
+      "events": [
+        {
+          "id": "6d7dda3d-7a69-495d-a448-7d5026015306",
+          "clock": "10:00",
+          "updated": "2026-02-18T23:33:24+00:00",
+          "description": "(Spartans gains possession)",
+          "sequence": 1771457604572,
+          "home_points": 0,
+          "away_points": 0,
+          "clock_decimal": "10:00",
+          "created": "2026-02-18T23:33:24+00:00",
+          "event_type": "opentip",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 579,
+            "coord_y": 292,
+            "action_area": "outsidecenter"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          }
+        },
+        {
+          "id": "80b909b5-1189-43aa-b0fb-11de882955a5",
+          "clock": "9:45",
+          "updated": "2026-02-18T23:33:33+00:00",
+          "description": "Jalyn Brown misses three point jump shot",
+          "sequence": 1771457613046,
+          "home_points": 0,
+          "away_points": 0,
+          "clock_decimal": "9:45",
+          "created": "2026-02-18T23:33:33+00:00",
+          "event_type": "threepointmiss",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 897,
+            "coord_y": 88,
+            "action_area": "outsideleft"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": false,
+              "shot_type": "jump shot",
+              "three_point_shot": true,
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Jalyn Brown",
+                "jersey_number": "23",
+                "id": "7ca40da2-25b5-4939-a714-28c7c25c5747"
+              }
+            }
+          ]
+        },
+        {
+          "id": "694c62ad-b13f-482a-a31e-79794cd303f8",
+          "clock": "9:43",
+          "updated": "2026-02-18T23:33:33+00:00",
+          "description": "Caroline Lau defensive rebound",
+          "sequence": 1771457613094,
+          "home_points": 0,
+          "away_points": 0,
+          "clock_decimal": "9:43",
+          "created": "2026-02-18T23:33:33+00:00",
+          "event_type": "rebound",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 897,
+            "coord_y": 88,
+            "action_area": "backcourt"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "rebound",
+              "rebound_type": "defensive",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Caroline Lau",
+                "jersey_number": "7",
+                "id": "7439880b-0aff-40a3-8c53-f801abd26bea"
+              }
+            }
+          ]
+        },
+        {
+          "id": "132ddb07-8b10-4241-8a98-87362e21901c",
+          "clock": "9:35",
+          "updated": "2026-02-18T23:33:43+00:00",
+          "description": "Casey Harter makes two point layup",
+          "sequence": 1771457623133,
+          "home_points": 0,
+          "away_points": 2,
+          "clock_decimal": "9:35",
+          "created": "2026-02-18T23:33:43+00:00",
+          "event_type": "twopointmade",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 65,
+            "coord_y": 267,
+            "action_area": "underbasket"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": true,
+              "shot_type": "layup",
+              "points": 2,
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Casey Harter",
+                "jersey_number": "12",
+                "id": "256763e3-b751-4957-8dd9-230bc020eb45"
+              }
+            }
+          ]
+        },
+        {
+          "id": "b03e7b08-3847-4e94-a6e4-d121900a52ed",
+          "clock": "9:23",
+          "updated": "2026-02-18T23:33:59+00:00",
+          "description": "Grace VanSlooten makes two point layup",
+          "sequence": 1771457639630,
+          "home_points": 2,
+          "away_points": 2,
+          "clock_decimal": "9:23",
+          "created": "2026-02-18T23:33:59+00:00",
+          "event_type": "twopointmade",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 1055,
+            "coord_y": 261,
+            "action_area": "underbasket"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": true,
+              "shot_type": "layup",
+              "points": 2,
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Grace VanSlooten",
+                "jersey_number": "14",
+                "id": "67eed592-635c-42f6-8c61-18105c46fcfe"
+              }
+            }
+          ]
+        },
+        {
+          "id": "e6e901b6-c645-4975-9f98-ba31b0168535",
+          "clock": "9:23",
+          "updated": "2026-02-18T23:34:15+00:00",
+          "description": "Grace Sullivan shooting foul (Grace VanSlooten draws the foul)",
+          "sequence": 1771457655543,
+          "home_points": 2,
+          "away_points": 2,
+          "clock_decimal": "9:23",
+          "created": "2026-02-18T23:34:15+00:00",
+          "event_type": "shootingfoul",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 1048,
+            "coord_y": 284,
+            "action_area": "backcourt"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "fouldrawn",
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Grace VanSlooten",
+                "jersey_number": "14",
+                "id": "67eed592-635c-42f6-8c61-18105c46fcfe"
+              }
+            },
+            {
+              "type": "personalfoul",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Grace Sullivan",
+                "jersey_number": "22",
+                "id": "06052c85-0092-4905-bfff-0aa5adc78b7e"
+              }
+            }
+          ]
+        },
+        {
+          "id": "982b80b3-f842-4bec-830e-88ff5ee9b307",
+          "clock": "9:23",
+          "updated": "2026-02-18T23:34:23+00:00",
+          "description": "Grace VanSlooten misses regular free throw 1 of 1",
+          "sequence": 1771457663006,
+          "home_points": 2,
+          "away_points": 2,
+          "clock_decimal": "9:23",
+          "created": "2026-02-18T23:34:23+00:00",
+          "event_type": "freethrowmiss",
+          "attempt": "1 of 1",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 897,
+            "coord_y": 311,
+            "action_area": "insidecenter"
+          },
+          "statistics": [
+            {
+              "type": "freethrow",
+              "made": false,
+              "free_throw_type": "regular",
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Grace VanSlooten",
+                "jersey_number": "14",
+                "id": "67eed592-635c-42f6-8c61-18105c46fcfe"
+              }
+            }
+          ]
+        },
+        {
+          "id": "556b0334-afee-4e93-aa0a-a5e1f0aac316",
+          "clock": "9:23",
+          "updated": "2026-02-18T23:34:23+00:00",
+          "description": "Tayla Thomas defensive rebound",
+          "sequence": 1771457663039,
+          "home_points": 2,
+          "away_points": 2,
+          "clock_decimal": "9:23",
+          "created": "2026-02-18T23:34:23+00:00",
+          "event_type": "rebound",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 897,
+            "coord_y": 311,
+            "action_area": "backcourt"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "rebound",
+              "rebound_type": "defensive",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Tayla Thomas",
+                "jersey_number": "23",
+                "id": "86033b69-8274-48ee-a775-39f219a81f5b"
+              }
+            }
+          ]
+        },
+        {
+          "id": "6a06c71b-491a-4a13-8c44-5535e7333335",
+          "clock": "9:14",
+          "updated": "2026-02-18T23:34:32+00:00",
+          "description": "Tayla Thomas turnover (Sara Sambolić steals)",
+          "sequence": 1771457672686,
+          "home_points": 2,
+          "away_points": 2,
+          "clock_decimal": "9:14",
+          "created": "2026-02-18T23:34:32+00:00",
+          "event_type": "turnover",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 476,
+            "coord_y": 215,
+            "action_area": "outsidecenter"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "turnover",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Tayla Thomas",
+                "jersey_number": "23",
+                "id": "86033b69-8274-48ee-a775-39f219a81f5b"
+              }
+            },
+            {
+              "type": "steal",
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Sara Sambolić",
+                "jersey_number": "9",
+                "id": "b066ee6e-9c10-4e34-b7dc-45f1a9407a83"
+              }
+            }
+          ]
+        },
+        {
+          "id": "5dc66d8b-9312-426f-b70a-185f3fb3e179",
+          "clock": "9:02",
+          "updated": "2026-02-18T23:34:57+00:00",
+          "description": "Sara Sambolić makes three point jump shot (Grace VanSlooten assists)",
+          "sequence": 1771457697362,
+          "home_points": 5,
+          "away_points": 2,
+          "clock_decimal": "9:02",
+          "created": "2026-02-18T23:34:57+00:00",
+          "event_type": "threepointmade",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 790,
+            "coord_y": 322,
+            "action_area": "outsidecenter"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "assist",
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Grace VanSlooten",
+                "jersey_number": "14",
+                "id": "67eed592-635c-42f6-8c61-18105c46fcfe"
+              }
+            },
+            {
+              "type": "fieldgoal",
+              "made": true,
+              "shot_type": "jump shot",
+              "three_point_shot": true,
+              "points": 3,
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Sara Sambolić",
+                "jersey_number": "9",
+                "id": "b066ee6e-9c10-4e34-b7dc-45f1a9407a83"
+              }
+            }
+          ]
+        },
+        {
+          "id": "c13e9cd2-79ae-4716-830c-d1944fbf0c53",
+          "clock": "8:40",
+          "updated": "2026-02-18T23:35:06+00:00",
+          "description": "Tayla Thomas turnover (Kennedy Blair steals)",
+          "sequence": 1771457706902,
+          "home_points": 5,
+          "away_points": 2,
+          "clock_decimal": "8:40",
+          "created": "2026-02-18T23:35:06+00:00",
+          "event_type": "turnover",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 363,
+            "coord_y": 195,
+            "action_area": "outsidecenter"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "turnover",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Tayla Thomas",
+                "jersey_number": "23",
+                "id": "86033b69-8274-48ee-a775-39f219a81f5b"
+              }
+            },
+            {
+              "type": "steal",
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Kennedy Blair",
+                "jersey_number": "35",
+                "id": "d4ea5259-1f01-4fcf-a7ad-be6d768ad1c8"
+              }
+            }
+          ]
+        },
+        {
+          "id": "f5120416-88e6-4efb-8a37-ca305609b2e7",
+          "clock": "8:36",
+          "updated": "2026-02-18T23:35:18+00:00",
+          "description": "Kennedy Blair makes two point layup",
+          "sequence": 1771457718053,
+          "home_points": 7,
+          "away_points": 2,
+          "clock_decimal": "8:36",
+          "created": "2026-02-18T23:35:18+00:00",
+          "event_type": "twopointmade",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 1048,
+            "coord_y": 275,
+            "action_area": "underbasket"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": true,
+              "shot_type": "layup",
+              "points": 2,
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Kennedy Blair",
+                "jersey_number": "35",
+                "id": "d4ea5259-1f01-4fcf-a7ad-be6d768ad1c8"
+              }
+            }
+          ]
+        },
+        {
+          "id": "26989dd1-84cd-4c28-813f-5863b22b7a5a",
+          "clock": "8:14",
+          "updated": "2026-02-18T23:35:30+00:00",
+          "description": "Casey Harter misses two point layup",
+          "sequence": 1771457730516,
+          "home_points": 7,
+          "away_points": 2,
+          "clock_decimal": "8:14",
+          "created": "2026-02-18T23:35:30+00:00",
+          "event_type": "twopointmiss",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 89,
+            "coord_y": 256,
+            "action_area": "inthepaint"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": false,
+              "shot_type": "layup",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Casey Harter",
+                "jersey_number": "12",
+                "id": "256763e3-b751-4957-8dd9-230bc020eb45"
+              }
+            }
+          ]
+        },
+        {
+          "id": "c90fb446-d17d-4d7c-961e-97fc35b9ca48",
+          "clock": "8:11",
+          "updated": "2026-02-18T23:35:33+00:00",
+          "description": "Tayla Thomas offensive rebound",
+          "sequence": 1771457730551,
+          "home_points": 7,
+          "away_points": 2,
+          "clock_decimal": "8:11",
+          "created": "2026-02-18T23:35:30+00:00",
+          "event_type": "rebound",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 89,
+            "coord_y": 256,
+            "action_area": "inthepaint"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "rebound",
+              "rebound_type": "offensive",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Tayla Thomas",
+                "jersey_number": "23",
+                "id": "86033b69-8274-48ee-a775-39f219a81f5b"
+              }
+            }
+          ]
+        },
+        {
+          "id": "e6258ee8-6aae-48dd-b06f-6c67c8ab9a22",
+          "clock": "8:11",
+          "updated": "2026-02-18T23:35:40+00:00",
+          "description": "Tayla Thomas misses two point layup",
+          "sequence": 1771457740488,
+          "home_points": 7,
+          "away_points": 2,
+          "clock_decimal": "8:11",
+          "created": "2026-02-18T23:35:40+00:00",
+          "event_type": "twopointmiss",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 53,
+            "coord_y": 273,
+            "action_area": "underbasket"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": false,
+              "shot_type": "layup",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Tayla Thomas",
+                "jersey_number": "23",
+                "id": "86033b69-8274-48ee-a775-39f219a81f5b"
+              }
+            }
+          ]
+        },
+        {
+          "id": "e72b3edb-9dda-4593-a37b-bf0ffc5b2b02",
+          "clock": "8:09",
+          "updated": "2026-02-18T23:35:40+00:00",
+          "description": "Kennedy Blair defensive rebound",
+          "sequence": 1771457740521,
+          "home_points": 7,
+          "away_points": 2,
+          "clock_decimal": "8:09",
+          "created": "2026-02-18T23:35:40+00:00",
+          "event_type": "rebound",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 53,
+            "coord_y": 273,
+            "action_area": "backcourt"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "rebound",
+              "rebound_type": "defensive",
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Kennedy Blair",
+                "jersey_number": "35",
+                "id": "d4ea5259-1f01-4fcf-a7ad-be6d768ad1c8"
+              }
+            }
+          ]
+        },
+        {
+          "id": "591694b3-b922-41a8-b055-4e115211c0b3",
+          "clock": "8:03",
+          "updated": "2026-02-18T23:35:52+00:00",
+          "description": "Inés Sotelo misses three point jump shot",
+          "sequence": 1771457752881,
+          "home_points": 7,
+          "away_points": 2,
+          "clock_decimal": "8:03",
+          "created": "2026-02-18T23:35:52+00:00",
+          "event_type": "threepointmiss",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 958,
+            "coord_y": 552,
+            "action_area": "outsideright"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": false,
+              "shot_type": "jump shot",
+              "three_point_shot": true,
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Inés Sotelo",
+                "jersey_number": "10",
+                "id": "71a1a673-7704-4f42-be18-5f53ec06f869"
+              }
+            }
+          ]
+        },
+        {
+          "id": "87ea7843-0727-47ad-ae15-f54e99af9f7a",
+          "clock": "7:59",
+          "updated": "2026-02-18T23:35:55+00:00",
+          "description": "Grace Sullivan defensive rebound",
+          "sequence": 1771457752916,
+          "home_points": 7,
+          "away_points": 2,
+          "clock_decimal": "7:59",
+          "created": "2026-02-18T23:35:52+00:00",
+          "event_type": "rebound",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 958,
+            "coord_y": 552,
+            "action_area": "backcourt"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "rebound",
+              "rebound_type": "defensive",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Grace Sullivan",
+                "jersey_number": "22",
+                "id": "06052c85-0092-4905-bfff-0aa5adc78b7e"
+              }
+            }
+          ]
+        },
+        {
+          "id": "d1363e1c-1165-4258-9288-4efbde42d5d0",
+          "clock": "7:49",
+          "updated": "2026-02-18T23:36:04+00:00",
+          "description": "Caroline Lau turnover",
+          "sequence": 1771457764263,
+          "home_points": 7,
+          "away_points": 2,
+          "clock_decimal": "7:49",
+          "created": "2026-02-18T23:36:04+00:00",
+          "event_type": "turnover",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 278,
+            "coord_y": 442,
+            "action_area": "insideleft"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "turnover",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Caroline Lau",
+                "jersey_number": "7",
+                "id": "7439880b-0aff-40a3-8c53-f801abd26bea"
+              }
+            }
+          ]
+        },
+        {
+          "id": "7680387e-e4c1-4dbd-b908-15c0e9dec02b",
+          "clock": "7:32",
+          "updated": "2026-02-18T23:36:18+00:00",
+          "description": "Kennedy Blair makes two point jump shot (Jalyn Brown assists)",
+          "sequence": 1771457778149,
+          "home_points": 9,
+          "away_points": 2,
+          "clock_decimal": "7:32",
+          "created": "2026-02-18T23:36:18+00:00",
+          "event_type": "twopointmade",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 983,
+            "coord_y": 275,
+            "action_area": "inthepaint"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": true,
+              "shot_type": "jump shot",
+              "points": 2,
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Kennedy Blair",
+                "jersey_number": "35",
+                "id": "d4ea5259-1f01-4fcf-a7ad-be6d768ad1c8"
+              }
+            },
+            {
+              "type": "assist",
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Jalyn Brown",
+                "jersey_number": "23",
+                "id": "7ca40da2-25b5-4939-a714-28c7c25c5747"
+              }
+            }
+          ]
+        },
+        {
+          "id": "eb6e12f5-b332-4768-9e0b-5ea7aedff9d9",
+          "clock": "7:08",
+          "updated": "2026-02-18T23:36:29+00:00",
+          "description": "Grace Sullivan misses two point jump shot",
+          "sequence": 1771457789564,
+          "home_points": 9,
+          "away_points": 2,
+          "clock_decimal": "7:08",
+          "created": "2026-02-18T23:36:29+00:00",
+          "event_type": "twopointmiss",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 204,
+            "coord_y": 154,
+            "action_area": "insideright"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": false,
+              "shot_type": "jump shot",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Grace Sullivan",
+                "jersey_number": "22",
+                "id": "06052c85-0092-4905-bfff-0aa5adc78b7e"
+              }
+            }
+          ]
+        },
+        {
+          "id": "bb4c6e12-0bec-4638-8ba7-d327729954f2",
+          "clock": "7:06",
+          "updated": "2026-02-18T23:36:29+00:00",
+          "description": "Tayla Thomas offensive rebound",
+          "sequence": 1771457789595,
+          "home_points": 9,
+          "away_points": 2,
+          "clock_decimal": "7:06",
+          "created": "2026-02-18T23:36:29+00:00",
+          "event_type": "rebound",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 204,
+            "coord_y": 154,
+            "action_area": "insideright"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "rebound",
+              "rebound_type": "offensive",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Tayla Thomas",
+                "jersey_number": "23",
+                "id": "86033b69-8274-48ee-a775-39f219a81f5b"
+              }
+            }
+          ]
+        },
+        {
+          "id": "98553b2c-866b-4022-9107-077452ebc3cc",
+          "clock": "7:02",
+          "updated": "2026-02-18T23:36:36+00:00",
+          "description": "Tayla Thomas makes two point layup",
+          "sequence": 1771457796740,
+          "home_points": 9,
+          "away_points": 4,
+          "clock_decimal": "7:02",
+          "created": "2026-02-18T23:36:36+00:00",
+          "event_type": "twopointmade",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 54,
+            "coord_y": 251,
+            "action_area": "inthepaint"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": true,
+              "shot_type": "layup",
+              "points": 2,
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Tayla Thomas",
+                "jersey_number": "23",
+                "id": "86033b69-8274-48ee-a775-39f219a81f5b"
+              }
+            }
+          ]
+        },
+        {
+          "id": "b8c9421b-e0f9-4f46-9c83-ca3671fe6634",
+          "clock": "6:55",
+          "updated": "2026-02-18T23:36:46+00:00",
+          "description": "Grace VanSlooten misses two point layup",
+          "sequence": 1771457806054,
+          "home_points": 9,
+          "away_points": 4,
+          "clock_decimal": "6:55",
+          "created": "2026-02-18T23:36:46+00:00",
+          "event_type": "twopointmiss",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 1082,
+            "coord_y": 275,
+            "action_area": "inthepaint"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": false,
+              "shot_type": "layup",
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Grace VanSlooten",
+                "jersey_number": "14",
+                "id": "67eed592-635c-42f6-8c61-18105c46fcfe"
+              }
+            }
+          ]
+        },
+        {
+          "id": "77810743-59d6-48f0-bec2-491cfe409bc9",
+          "clock": "6:53",
+          "updated": "2026-02-18T23:36:46+00:00",
+          "description": "Grace Sullivan defensive rebound",
+          "sequence": 1771457806090,
+          "home_points": 9,
+          "away_points": 4,
+          "clock_decimal": "6:53",
+          "created": "2026-02-18T23:36:46+00:00",
+          "event_type": "rebound",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 1082,
+            "coord_y": 275,
+            "action_area": "backcourt"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "rebound",
+              "rebound_type": "defensive",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Grace Sullivan",
+                "jersey_number": "22",
+                "id": "06052c85-0092-4905-bfff-0aa5adc78b7e"
+              }
+            }
+          ]
+        },
+        {
+          "id": "456eaeea-1a9f-4e5e-8e5e-333d4f9a5c62",
+          "clock": "6:41",
+          "updated": "2026-02-18T23:36:53+00:00",
+          "description": "Caroline Lau makes three point jump shot",
+          "sequence": 1771457813852,
+          "home_points": 9,
+          "away_points": 7,
+          "clock_decimal": "6:41",
+          "created": "2026-02-18T23:36:53+00:00",
+          "event_type": "threepointmade",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 228,
+            "coord_y": 65,
+            "action_area": "outsideright"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": true,
+              "shot_type": "jump shot",
+              "three_point_shot": true,
+              "points": 3,
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Caroline Lau",
+                "jersey_number": "7",
+                "id": "7439880b-0aff-40a3-8c53-f801abd26bea"
+              }
+            }
+          ]
+        },
+        {
+          "id": "d3948da4-4d37-4f67-ae56-67c662528148",
+          "clock": "6:24",
+          "updated": "2026-02-18T23:37:09+00:00",
+          "description": "Grace Sullivan shooting foul (Sara Sambolić draws the foul)",
+          "sequence": 1771457829378,
+          "home_points": 9,
+          "away_points": 7,
+          "clock_decimal": "6:24",
+          "created": "2026-02-18T23:37:09+00:00",
+          "event_type": "shootingfoul",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 993,
+            "coord_y": 284,
+            "action_area": "backcourt"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "fouldrawn",
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Sara Sambolić",
+                "jersey_number": "9",
+                "id": "b066ee6e-9c10-4e34-b7dc-45f1a9407a83"
+              }
+            },
+            {
+              "type": "personalfoul",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Grace Sullivan",
+                "jersey_number": "22",
+                "id": "06052c85-0092-4905-bfff-0aa5adc78b7e"
+              }
+            }
+          ]
+        },
+        {
+          "id": "8e0d5ddb-2aee-4720-a5e4-58d1bda05621",
+          "clock": "6:24",
+          "updated": "2026-02-18T23:37:15+00:00",
+          "description": "Sara Sambolić makes regular free throw 1 of 2",
+          "sequence": 1771457835930,
+          "home_points": 10,
+          "away_points": 7,
+          "clock_decimal": "6:24",
+          "created": "2026-02-18T23:37:15+00:00",
+          "event_type": "freethrowmade",
+          "attempt": "1 of 2",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 899,
+            "coord_y": 305,
+            "action_area": "insidecenter"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "freethrow",
+              "made": true,
+              "free_throw_type": "regular",
+              "points": 1,
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Sara Sambolić",
+                "jersey_number": "9",
+                "id": "b066ee6e-9c10-4e34-b7dc-45f1a9407a83"
+              }
+            }
+          ]
+        },
+        {
+          "id": "0d5cfbb2-596a-481b-b729-15fe16a77de6",
+          "clock": "6:24",
+          "updated": "2026-02-18T23:37:19+00:00",
+          "description": "Sara Sambolić makes regular free throw 2 of 2",
+          "sequence": 1771457839278,
+          "home_points": 11,
+          "away_points": 7,
+          "clock_decimal": "6:24",
+          "created": "2026-02-18T23:37:19+00:00",
+          "event_type": "freethrowmade",
+          "attempt": "2 of 2",
+          "attribution": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 892,
+            "coord_y": 321,
+            "action_area": "insidecenter"
+          },
+          "possession": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+          },
+          "statistics": [
+            {
+              "type": "freethrow",
+              "made": true,
+              "free_throw_type": "regular",
+              "points": 1,
+              "team": {
+                "name": "Spartans",
+                "market": "Michigan State",
+                "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+              },
+              "player": {
+                "full_name": "Sara Sambolić",
+                "jersey_number": "9",
+                "id": "b066ee6e-9c10-4e34-b7dc-45f1a9407a83"
+              }
+            }
+          ]
+        },
+        {
+          "id": "109724b2-886e-4d5f-9c77-2be341cf9c78",
+          "clock": "6:12",
+          "updated": "2026-02-18T23:37:28+00:00",
+          "description": "Tayla Thomas makes two point layup (Caroline Lau assists)",
+          "sequence": 1771457848922,
+          "home_points": 11,
+          "away_points": 9,
+          "clock_decimal": "6:12",
+          "created": "2026-02-18T23:37:28+00:00",
+          "event_type": "twopointmade",
+          "attribution": {
+            "name": "Wildcats",
+            "market": "Northwestern",
+            "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+            "team_basket": "left"
+          },
+          "location": {
+            "coord_x": 71,
+            "coord_y": 237,
+            "action_area": "inthepaint"
+          },
+          "possession": {
+            "name": "Spartans",
+            "market": "Michigan State",
+            "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c"
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": true,
+              "shot_type": "layup",
+              "points": 2,
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Tayla Thomas",
+                "jersey_number": "23",
+                "id": "86033b69-8274-48ee-a775-39f219a81f5b"
+              }
+            },
+            {
+              "type": "assist",
+              "team": {
+                "name": "Wildcats",
+                "market": "Northwestern",
+                "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0"
+              },
+              "player": {
+                "full_name": "Caroline Lau",
+                "jersey_number": "7",
+                "id": "7439880b-0aff-40a3-8c53-f801abd26bea"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "time": 1771457849466
+}

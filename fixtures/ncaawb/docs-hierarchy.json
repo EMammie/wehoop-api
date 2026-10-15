@@ -1,0 +1,115 @@
+{
+  "league": {
+    "id": "affab7b6-647e-4304-bbe2-1f9d68cd0cea",
+    "name": "NCAA WOMEN",
+    "alias": "NCAAW"
+  },
+  "divisions": [
+    {
+      "id": "4ce010e9-a8ef-4a6e-8fee-e0bb9f58dbb9",
+      "name": "NCAA Division I Women",
+      "alias": "D1-W",
+      "conferences": [
+        {
+          "id": "2b83870c-321a-4862-adb5-c8b61e344e6b",
+          "name": "Southeastern Women",
+          "alias": "SEC-W",
+          "teams": [
+            {
+              "id": "10eb43d2-840a-47fd-8e3a-a8341e01f533",
+              "name": "Bulldogs",
+              "market": "Mississippi State",
+              "alias": "MSST",
+              "founded": 1878,
+              "mascot": "Bully the Bulldog",
+              "fight_song": "Hail State",
+              "championships_won": 0,
+              "conference_titles": 1,
+              "playoff_appearances": 12,
+              "team_colors": [
+                {
+                  "type": "primary",
+                  "hex_color": "#5d1625",
+                  "rgb_color": {
+                    "red": 93,
+                    "green": 22,
+                    "blue": 37
+                  }
+                },
+                {
+                  "type": "secondary",
+                  "hex_color": "#ffffff",
+                  "rgb_color": {
+                    "red": 255,
+                    "green": 255,
+                    "blue": 255
+                  }
+                }
+              ],
+              "venue": {
+                "id": "8949bf74-cf16-4c7c-8e8a-bc92b6f85d23",
+                "name": "Humphrey Coliseum",
+                "capacity": 10575,
+                "address": "55 Coliseum Boulevard",
+                "city": "Starkville",
+                "state": "MS",
+                "zip": "39762",
+                "country": "USA",
+                "location": {
+                  "lat": "33.461667",
+                  "lng": "-88.794444"
+                }
+              }
+            },
+            {
+              "id": "1d9515d0-910a-44d1-b2bb-661390767673",
+              "name": "Commodores",
+              "market": "Vanderbilt",
+              "alias": "VAN",
+              "founded": 1873,
+              "mascot": "Mr. C",
+              "fight_song": "Dynamite",
+              "championships_won": 0,
+              "conference_titles": 6,
+              "playoff_appearances": 28,
+              "team_colors": [
+                {
+                  "type": "secondary",
+                  "hex_color": "#cfae70",
+                  "rgb_color": {
+                    "red": 207,
+                    "green": 174,
+                    "blue": 112
+                  }
+                },
+                {
+                  "type": "primary",
+                  "hex_color": "#000000",
+                  "rgb_color": {
+                    "red": 0,
+                    "green": 0,
+                    "blue": 0
+                  }
+                }
+              ],
+              "venue": {
+                "id": "c0cb7e8d-05c3-41db-9874-7a6436ca3800",
+                "name": "Memorial Gymnasium",
+                "capacity": 14316,
+                "address": "25th Ave S and Vanderbilt Place",
+                "city": "Nashville",
+                "state": "TN",
+                "zip": "37235",
+                "country": "USA",
+                "location": {
+                  "lat": "36.144611",
+                  "lng": "-86.80742"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

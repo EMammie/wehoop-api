@@ -1,0 +1,177 @@
+{
+  "league": {
+    "id": "844ee10a-00c8-4dc1-9c17-52598de2ef47",
+    "name": "Unrivaled",
+    "alias": "UNRIVALED"
+  },
+  "season": {
+    "id": "c86ab7c9-5408-44e6-af06-c22636262927",
+    "year": 2025,
+    "type": "REG"
+  },
+  "conferences": [
+    {
+      "id": "56089804-dbb3-4621-96eb-ec520ab26988",
+      "name": "Unrivaled",
+      "alias": "UNRIVALED",
+      "teams": [
+        {
+          "id": "67c22115-2385-458f-8632-a67a025fef55",
+          "name": "Lunar Owls",
+          "wins": 1,
+          "losses": 0,
+          "win_pct": 1,
+          "points_for": 84,
+          "points_against": 80,
+          "point_diff": 4,
+          "games_behind": {
+            "league": 0,
+            "conference": 0
+          },
+          "streak": {
+            "kind": "win",
+            "length": 1
+          },
+          "calc_rank": {
+            "league_rank": 1,
+            "conf_rank": 1
+          },
+          "records": [
+            {
+              "record_type": "below_500",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "conference",
+              "wins": 1,
+              "losses": 0,
+              "win_pct": 1
+            },
+            {
+              "record_type": "equal_rebounds",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "equal_turnovers",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "fewer_turnovers",
+              "wins": 1,
+              "losses": 0,
+              "win_pct": 1
+            },
+            {
+              "record_type": "home",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "last_10",
+              "wins": 1,
+              "losses": 0,
+              "win_pct": 1
+            },
+            {
+              "record_type": "last_10_home",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "last_10_road",
+              "wins": 1,
+              "losses": 0,
+              "win_pct": 1
+            },
+            {
+              "record_type": "leads_field_goal_pct",
+              "wins": 1,
+              "losses": 0,
+              "win_pct": 1
+            },
+            {
+              "record_type": "leads_rebounds",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "neutral",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "opponent_fewer_turnovers",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "opponent_leads_field_goal_pct",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "opponent_leads_rebounds",
+              "wins": 1,
+              "losses": 0,
+              "win_pct": 1
+            },
+            {
+              "record_type": "opponent_scores_100_or_more",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "overtime",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "over_500",
+              "wins": 1,
+              "losses": 0,
+              "win_pct": 1
+            },
+            {
+              "record_type": "road",
+              "wins": 1,
+              "losses": 0,
+              "win_pct": 1
+            },
+            {
+              "record_type": "scores_100_or_more",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "ten_points",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            },
+            {
+              "record_type": "three_points",
+              "wins": 0,
+              "losses": 0,
+              "win_pct": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

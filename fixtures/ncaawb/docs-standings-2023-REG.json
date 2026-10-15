@@ -1,0 +1,66 @@
+{
+  "league": {
+    "id": "affab7b6-647e-4304-bbe2-1f9d68cd0cea",
+    "name": "NCAA WOMEN",
+    "alias": "NCAAW"
+  },
+  "season": {
+    "id": "cf5dcb91-e9ec-4993-ba42-5d632306b4c8",
+    "year": 2023,
+    "type": "REG"
+  },
+  "conferences": [
+    {
+      "id": "dbac6641-431e-427d-8eb9-791997636b4c",
+      "name": "Atlantic 10 Women",
+      "alias": "A10-W",
+      "teams": [
+        {
+          "id": "eaf99cfb-1a76-49d4-aa1d-076c581e904c",
+          "name": "Hawks",
+          "market": "Saint Joseph's",
+          "wins": 25,
+          "losses": 3,
+          "win_pct": 0.893,
+          "points_for": 66.57,
+          "points_against": 53.04,
+          "point_diff": 13.53,
+          "conf_points_for": 65.38,
+          "conf_points_against": 50.88,
+          "clinched": null,
+          "post_season_ineligible": false,
+          "strength_of_schedule_rank": 10,
+          "conference_rank": 2,
+          "subdivision_rank": 0,
+          "games_behind": {
+            "conference": 0.0
+          },
+          "streak": {
+            "kind": "win",
+            "length": 1
+          },
+          "records": [
+            {
+              "record_type": "a10-w",
+              "wins": 14,
+              "losses": 2,
+              "win_pct": 0.875
+            },
+            {
+              "record_type": "aac-w",
+              "wins": 2,
+              "losses": 0,
+              "win_pct": 1.0
+            },
+            {
+              "record_type": "top_25",
+              "wins": 0,
+              "losses": 1,
+              "win_pct": 0.0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
