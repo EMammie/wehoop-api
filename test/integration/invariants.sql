@@ -250,3 +250,21 @@ from public.games g
 join public.seasons s on s.id = g.season_id
 where s.type = 'OOT'
   and g.tournament_id is null;
+
+-- check: stats_bodies_carry_no_canonical_uuid | expect: 0
+select count(*)
+from public.game_changes c
+where c.change_type in ('stats_player', 'stats_team')
+  and (c.body ? 'playerId' or c.body ? 'teamId');
+
+-- check: player_stats_provider_id_resolves_to_row_player | expect: 0
+select count(*)
+from public.game_player_stats ps
+join public.games g on g.id = ps.game_id
+where not exists (
+  select 1 from public.player_external_ids e
+  where e.provider = 'sportradar'
+    and e.league = g.league
+    and e.external_id = ps.provider_player_id
+    and e.player_id = ps.player_id
+);

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { GameChangeSchema, StatsPlayerBodySchema, TeamStatsSchema } from './game-change.js';
+import { GameChangeSchema, StatsPlayerBodySchema, StatsTeamBodySchema } from './game-change.js';
 import { GameStatusSchema, LiveEventSchema, PeriodRefSchema, ScoreSchema } from './live-event.js';
 
 /**
@@ -26,7 +26,8 @@ export const SnapshotSchema = z.object({
     elamTargetScore: z.int().positive().nullable(),
   }),
   periods: z.array(PeriodRefSchema.extend({ score: ScoreSchema })),
-  teamStats: z.array(z.object({ teamId: z.uuid(), isHome: z.boolean(), stats: TeamStatsSchema })),
+  /** The same provider-keyed bodies the stats_* changes carry, so a fold reproduces the snapshot. */
+  teamStats: z.array(StatsTeamBodySchema),
   playerStats: z.array(StatsPlayerBodySchema),
   events: z.array(z.object({ providerEventId: z.string(), body: LiveEventSchema })),
   seq: z.int().nonnegative(),

@@ -69,12 +69,16 @@ export const TeamStatsSchema = z.object({
 });
 export type TeamStats = z.infer<typeof TeamStatsSchema>;
 
+/**
+ * Team box line. Keyed on the provider team id: every id inside a body is a
+ * provider id (plan §3); `teams.id` is a column on game_team_stats only.
+ */
 export const StatsTeamBodySchema = z.object({
-  teamId: z.uuid(),
   providerTeamId: z.string(),
   isHome: z.boolean(),
   stats: TeamStatsSchema,
 });
+export type StatsTeamBody = z.infer<typeof StatsTeamBodySchema>;
 
 /** One player's box line. Typed on the game_player_stats columns; everything else in `extra`. */
 export const PlayerStatsSchema = z.object({
@@ -101,13 +105,14 @@ export const PlayerStatsSchema = z.object({
 export type PlayerStats = z.infer<typeof PlayerStatsSchema>;
 
 /**
- * Player stats (M2). `playerId` / `teamId` are the canonical uuids resolved by
- * identity.ts; `providerPlayerId` is kept so a client holding a provider id
- * from a LiveEvent body can join without a lookup.
+ * Player stats (M2). Keyed on `providerPlayerId` / `providerTeamId`, like every
+ * LiveEvent body: canonical uuids (`players.id`, `teams.id`) are columns on
+ * game_player_stats resolved by identity.ts and never enter the body or the
+ * content hash, so an identity merge never rewrites history (plan §3, ratified
+ * 2026-10-14). A client joins a provider id to a canonical player through
+ * `/v1/players/<league>:<providerId>`.
  */
 export const StatsPlayerBodySchema = z.object({
-  playerId: z.uuid(),
-  teamId: z.uuid(),
   providerPlayerId: z.string(),
   providerTeamId: z.string(),
   fullName: z.string(),

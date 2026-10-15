@@ -33,13 +33,7 @@ import {
   type StoredEventForFreshness,
 } from './freshness.js';
 import { ensureSeason, playerIdsFor, teamIdsFor } from './identity.js';
-import type {
-  GameView,
-  NormalizedBatch,
-  NormalizedEvent,
-  NormalizedPlayerStats,
-  Observation,
-} from './types.js';
+import type { GameView, NormalizedBatch, NormalizedEvent, Observation } from './types.js';
 
 /**
  * THE ONLY WRITER of games, play_events, game_changes, game_periods and the
@@ -79,6 +73,11 @@ export interface ApplyCounts {
   touchedStats: number;
   /** Player stats lines whose player could not be resolved to a canonical id (skipped, logged). */
   unresolvedPlayers: number;
+  /**
+   * Player stats lines whose provider id resolves to a canonical player another line of the same
+   * batch already covered (two provider ids merged into one person): the later line is skipped.
+   */
+  duplicatePlayers: number;
 }
 
 export type ApplyResult =
@@ -441,6 +440,7 @@ export async function applyChanges(
       ignoredOlderStats: 0,
       touchedStats: 0,
       unresolvedPlayers: 0,
+      duplicatePlayers: 0,
     };
     const eventWrites = diff.writes.map((w) => ({ action: w.action, ev: w.event, hash: w.hash }));
     const deletions: Array<{ row: StoredEventRow; revision: string | null }> = [];
@@ -550,12 +550,7 @@ export async function applyChanges(
             statsWrites.push({ teamId, isHome: ts.isHome, stats: ts.stats, hash });
             changes.push({
               type: 'stats_team',
-              body: {
-                teamId,
-                providerTeamId: ts.providerTeamId,
-                isHome: ts.isHome,
-                stats: ts.stats,
-              },
+              body: { providerTeamId: ts.providerTeamId, isHome: ts.isHome, stats: ts.stats },
             });
         }
       }
@@ -565,11 +560,14 @@ export async function applyChanges(
                where game_id = ${gameId} and team_id = ${teamId}`;
     }
 
-    // Player stats: same precedence, keyed by canonical player id. The body hash covers the whole
-    // line (roster facts included), so a change of starter/on_court is a change like any other.
+    // Player stats: same precedence. The row is keyed by canonical player id (PK), the body and
+    // its hash by provider ids only (plan §3): an identity merge repoints player_id and leaves the
+    // hash alone, so the next identical summary is a no-op. The hash covers the whole line (roster
+    // facts included), so a change of starter/on_court is a change like any other.
     const playerWrites: Array<{
+      playerId: string;
+      teamId: string;
       body: StatsPlayerBody;
-      line: NormalizedPlayerStats;
       hash: string;
     }> = [];
     const playerTouches: string[] = [];
@@ -580,6 +578,7 @@ export async function applyChanges(
         select player_id as "playerId", content_hash as "contentHash", observed_at as "observedAt"
         from public.game_player_stats where game_id = ${gameId}`;
       const existingByPlayer = new Map(existing.map((e) => [e.playerId, e]));
+      const seenPlayers = new Set<string>();
       for (const line of batch.playerStats) {
         const playerId = playerIds.get(line.providerPlayerId);
         const teamId = teamIds.get(line.providerTeamId);
@@ -595,9 +594,18 @@ export async function applyChanges(
           );
           continue;
         }
+        if (seenPlayers.has(playerId)) {
+          // Two provider ids of this document resolve to one canonical player (a merge collision,
+          // see repointPlayerReferences): one row per (game, player), the first line wins.
+          counts.duplicatePlayers++;
+          deps.log.warn(
+            { gameId, playerId, providerPlayerId: line.providerPlayerId },
+            'player stats line skipped: another line of this batch resolves to the same player',
+          );
+          continue;
+        }
+        seenPlayers.add(playerId);
         const body: StatsPlayerBody = {
-          playerId,
-          teamId,
           providerPlayerId: line.providerPlayerId,
           providerTeamId: line.providerTeamId,
           fullName: line.fullName,
@@ -623,7 +631,7 @@ export async function applyChanges(
             playerTouches.push(playerId);
             break;
           default:
-            playerWrites.push({ body, line, hash });
+            playerWrites.push({ playerId, teamId, body, hash });
             changes.push({ type: 'stats_player', body });
         }
       }
@@ -703,6 +711,11 @@ export async function applyChanges(
     let newLastSeq = lastSeq;
     const numbered: GameChange[] = [];
     if (n > 0) {
+      // stats_final_at marks the close that final stats can follow from. A generation-less batch
+      // (schedule poll) may close a never-watched game (restrictedGameLevel: status only, 0-0
+      // score stays), but a schedule entry carries no stats, so the mark is left for a watcher's
+      // own closing document.
+      const statsFinal = nextStatus?.status === 'closed' && !decision.restrictedGameLevel;
       const [bumped] = await tx<{ lastSeq: string }[]>`
         update public.games set
           last_seq = last_seq + ${n},
@@ -712,7 +725,7 @@ export async function applyChanges(
           current_period = ${nextStatus ? (nextStatus.period?.number ?? null) : g.currentPeriod},
           period_type = ${nextStatus ? (nextStatus.period?.type ?? null) : g.periodType},
           elam_target_score = ${nextStatus ? (nextStatus.elamTargetScore ?? null) : g.elamTargetScore},
-          stats_final_at = case when ${nextStatus?.status === 'closed'} and stats_final_at is null then ${now()} else stats_final_at end
+          stats_final_at = case when ${statsFinal} and stats_final_at is null then ${now()} else stats_final_at end
         where id = ${gameId} returning last_seq::text as "lastSeq"`;
       if (!bumped) throw new Error('last_seq update returned no row');
       newLastSeq = Number(bumped.lastSeq);
@@ -790,16 +803,18 @@ export async function applyChanges(
       for (const w of playerWrites) {
         const b = w.body;
         const st = b.stats;
-        await tx`insert into public.game_player_stats (game_id, player_id, team_id, starter, played, on_court, minutes,
-                   points, fgm, fga, tpm, tpa, ftm, fta, off_rebounds, def_rebounds, rebounds, assists, steals, blocks,
-                   turnovers, personal_fouls, plus_minus, efficiency, extra, content_hash, observed_at,
+        await tx`insert into public.game_player_stats (game_id, player_id, team_id, provider_player_id, starter, played,
+                   on_court, minutes, points, fgm, fga, tpm, tpa, ftm, fta, off_rebounds, def_rebounds, rebounds, assists,
+                   steals, blocks, turnovers, personal_fouls, plus_minus, efficiency, extra, content_hash, observed_at,
                    jersey, position, not_playing_reason)
-                 values (${gameId}, ${b.playerId}, ${b.teamId}, ${b.starter}, ${b.played}, ${b.onCourt}, ${st.minutes},
-                   ${st.points}, ${st.fgm}, ${st.fga}, ${st.tpm}, ${st.tpa}, ${st.ftm}, ${st.fta}, ${st.offRebounds},
-                   ${st.defRebounds}, ${st.rebounds}, ${st.assists}, ${st.steals}, ${st.blocks}, ${st.turnovers},
-                   ${st.personalFouls}, ${st.plusMinus}, ${st.efficiency}, ${tx.json(st.extra as never)}, ${w.hash},
-                   ${observation.observedAt}, ${b.jersey}, ${b.position}, ${b.notPlayingReason})
-                 on conflict (game_id, player_id) do update set team_id = excluded.team_id, starter = excluded.starter,
+                 values (${gameId}, ${w.playerId}, ${w.teamId}, ${b.providerPlayerId}, ${b.starter}, ${b.played},
+                   ${b.onCourt}, ${st.minutes}, ${st.points}, ${st.fgm}, ${st.fga}, ${st.tpm}, ${st.tpa}, ${st.ftm},
+                   ${st.fta}, ${st.offRebounds}, ${st.defRebounds}, ${st.rebounds}, ${st.assists}, ${st.steals},
+                   ${st.blocks}, ${st.turnovers}, ${st.personalFouls}, ${st.plusMinus}, ${st.efficiency},
+                   ${tx.json(st.extra as never)}, ${w.hash}, ${observation.observedAt}, ${b.jersey}, ${b.position},
+                   ${b.notPlayingReason})
+                 on conflict (game_id, player_id) do update set team_id = excluded.team_id,
+                   provider_player_id = excluded.provider_player_id, starter = excluded.starter,
                    played = excluded.played, on_court = excluded.on_court, minutes = excluded.minutes,
                    points = excluded.points, fgm = excluded.fgm, fga = excluded.fga, tpm = excluded.tpm, tpa = excluded.tpa,
                    ftm = excluded.ftm, fta = excluded.fta, off_rebounds = excluded.off_rebounds,
@@ -1008,6 +1023,11 @@ export interface StandingLine {
   asOf: Date;
 }
 
+/**
+ * Upsert standings lines. `as_of` is the observation at which the line LAST
+ * CHANGED (it sits outside the hash but inside the distinct guard), so a
+ * re-presented identical table leaves the row, and its `as_of`, untouched.
+ */
 export async function applyStandings(db: Db | Tx, lines: StandingLine[]): Promise<number> {
   let written = 0;
   for (const l of lines) {
@@ -1030,4 +1050,57 @@ export async function applyStandings(db: Db | Tx, lines: StandingLine[]): Promis
     if (row) written++;
   }
   return written;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Identity merge: FK repoint (the stats tables and play_events are written    */
+/* here only, CLAUDE.md non-negotiable 2)                                      */
+/* ------------------------------------------------------------------------- */
+
+export interface RepointCounts {
+  playEvents: number;
+  gamePlayerStats: { repointed: number; dropped: number };
+  playerSeasonStats: { repointed: number; dropped: number };
+  playerTeamSeasons: { repointed: number; dropped: number };
+}
+
+/**
+ * Move every row that references `loser` to `survivor` inside the caller's
+ * merge transaction (identity.ts mergePlayers). Rows whose key would collide
+ * with one the survivor already owns (same game / season line / team season)
+ * are dropped in favour of the survivor's and counted; the caller logs them.
+ * game_changes is never touched: stats bodies are provider-keyed (plan §3), so
+ * the merge rewrites no history and the next identical document is a no-op.
+ */
+export async function repointPlayerReferences(
+  tx: Tx,
+  loser: string,
+  survivor: string,
+): Promise<RepointCounts> {
+  const playEvents =
+    await tx`update public.play_events set player_id = ${survivor}, updated_at = now()
+                              where player_id = ${loser}`;
+  const gps =
+    await tx`update public.game_player_stats s set player_id = ${survivor}, updated_at = now()
+                       where s.player_id = ${loser}
+                         and not exists (select 1 from public.game_player_stats t
+                                         where t.game_id = s.game_id and t.player_id = ${survivor})`;
+  const gpsDropped = await tx`delete from public.game_player_stats where player_id = ${loser}`;
+  const pss =
+    await tx`update public.player_season_stats s set player_id = ${survivor}, updated_at = now()
+                       where s.player_id = ${loser}
+                         and not exists (select 1 from public.player_season_stats t
+                                         where t.player_id = ${survivor} and t.season_id = s.season_id and t.team_id = s.team_id)`;
+  const pssDropped = await tx`delete from public.player_season_stats where player_id = ${loser}`;
+  const pts = await tx`update public.player_team_seasons s set player_id = ${survivor}
+                       where s.player_id = ${loser}
+                         and not exists (select 1 from public.player_team_seasons t
+                                         where t.player_id = ${survivor} and t.team_id = s.team_id and t.season_id = s.season_id)`;
+  const ptsDropped = await tx`delete from public.player_team_seasons where player_id = ${loser}`;
+  return {
+    playEvents: playEvents.count,
+    gamePlayerStats: { repointed: gps.count, dropped: gpsDropped.count },
+    playerSeasonStats: { repointed: pss.count, dropped: pssDropped.count },
+    playerTeamSeasons: { repointed: pts.count, dropped: ptsDropped.count },
+  };
 }

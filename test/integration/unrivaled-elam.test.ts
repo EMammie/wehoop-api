@@ -98,7 +98,7 @@ describe('Unrivaled Elam game through the worker path', () => {
     ]);
   });
 
-  it('status changes carry elamTargetScore from the Elam period on; event rows carry canonical player ids; stats_player emitted with uuids', async () => {
+  it('status changes carry elamTargetScore from the Elam period on; event rows carry canonical player ids; stats_player is provider-keyed and its row resolves to the canonical player', async () => {
     const changes = await db<{ seq: number; type: string; body: Record<string, unknown> }[]>`
       select seq::int as seq, change_type::text as type, body from public.game_changes where game_id = ${gameId} order by seq`;
     const statuses = changes.filter((c) => c.type === 'status').map((c) => c.body);
@@ -121,16 +121,30 @@ describe('Unrivaled Elam game through the worker path', () => {
       stats_team: 1,
       stats_player: 1,
     });
-    const sp = changes.find((c) => c.type === 'stats_player')?.body as {
-      playerId: string;
-      providerPlayerId: string;
-      fullName: string;
-    };
+    const sp = changes.find((c) => c.type === 'stats_player')?.body as Record<string, unknown>;
     expect(sp.providerPlayerId).toBe('a00515fd-bdd9-44d1-83a5-597a99316c54');
     expect(sp.fullName).toBe('Breanna Stewart');
-    const [ext] = await db<{ playerId: string }[]>`
-      select player_id as "playerId" from public.player_external_ids where league = 'unrivaled' and external_id = ${sp.providerPlayerId}`;
-    expect(ext?.playerId).toBe(sp.playerId);
+    // No canonical uuid in the body (plan §3); the row carries it and agrees with identity.
+    expect(Object.keys(sp).sort()).toEqual(
+      [
+        'providerPlayerId',
+        'providerTeamId',
+        'fullName',
+        'jersey',
+        'position',
+        'starter',
+        'played',
+        'onCourt',
+        'notPlayingReason',
+        'stats',
+      ].sort(),
+    );
+    const [row] = await db<{ playerId: string; extPlayerId: string }[]>`
+      select ps.player_id as "playerId", e.player_id as "extPlayerId"
+      from public.game_player_stats ps
+      join public.player_external_ids e on e.league = 'unrivaled' and e.external_id = ps.provider_player_id
+      where ps.game_id = ${gameId} and ps.provider_player_id = ${String(sp.providerPlayerId)}`;
+    expect(row?.playerId).toBe(row?.extPlayerId);
     const events = await db<{ type: string; hasPlayer: boolean; hasTeam: boolean }[]>`
       select event_type as type, player_id is not null as "hasPlayer", team_id is not null as "hasTeam"
       from public.play_events where game_id = ${gameId} order by period_sequence, provider_sequence`;

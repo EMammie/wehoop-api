@@ -78,25 +78,29 @@ export async function loadSnapshot(
     >`
       select number, type, sequence, home_points as "homePoints", away_points as "awayPoints"
       from public.game_periods where game_id = ${gameId} order by sequence`;
+    // Stats rows are returned as the provider-keyed bodies the stats_* changes carry (plan §3):
+    // the uuids stay columns, so a fold of /changes reproduces the snapshot even after a merge.
     const teamStats = await tx<
       {
-        teamId: string;
+        providerTeamId: string;
         isHome: boolean;
         stats: Record<string, unknown>;
         extra: Record<string, unknown> | null;
       }[]
     >`
-      select team_id as "teamId", is_home as "isHome", extra,
+      select t.provider_team_id as "providerTeamId", s.is_home as "isHome", s.extra,
              jsonb_build_object(
-               'points', points, 'fgm', fgm, 'fga', fga, 'tpm', tpm, 'tpa', tpa, 'ftm', ftm, 'fta', fta,
-               'offRebounds', off_rebounds, 'defRebounds', def_rebounds, 'rebounds', rebounds, 'assists', assists,
-               'steals', steals, 'blocks', blocks, 'turnovers', turnovers, 'personalFouls', personal_fouls,
-               'fastBreakPts', fast_break_pts, 'paintPts', paint_pts, 'secondChancePts', second_chance_pts,
-               'benchPts', bench_pts, 'biggestLead', biggest_lead) as stats
-      from public.game_team_stats where game_id = ${gameId} order by is_home desc`;
+               'points', s.points, 'fgm', s.fgm, 'fga', s.fga, 'tpm', s.tpm, 'tpa', s.tpa, 'ftm', s.ftm, 'fta', s.fta,
+               'offRebounds', s.off_rebounds, 'defRebounds', s.def_rebounds, 'rebounds', s.rebounds, 'assists', s.assists,
+               'steals', s.steals, 'blocks', s.blocks, 'turnovers', s.turnovers, 'personalFouls', s.personal_fouls,
+               'fastBreakPts', s.fast_break_pts, 'paintPts', s.paint_pts, 'secondChancePts', s.second_chance_pts,
+               'benchPts', s.bench_pts, 'biggestLead', s.biggest_lead) as stats
+      from public.game_team_stats s join public.teams t on t.id = s.team_id
+      where s.game_id = ${gameId} order by s.is_home desc`;
+    // provider_player_id is the id the line was keyed on (never a lookup through
+    // player_external_ids, which can hold several ids per league after a merge).
     const playerStats = await tx<Record<string, unknown>[]>`
-      select ps.player_id as "playerId", ps.team_id as "teamId",
-             coalesce(e.external_id, '') as "providerPlayerId", t.provider_team_id as "providerTeamId",
+      select ps.provider_player_id as "providerPlayerId", t.provider_team_id as "providerTeamId",
              p.full_name as "fullName", ps.jersey, ps.position, ps.starter, ps.played, ps.on_court as "onCourt",
              ps.not_playing_reason as "notPlayingReason",
              jsonb_build_object(
@@ -109,11 +113,6 @@ export async function loadSnapshot(
       join public.games g on g.id = ps.game_id
       join public.players p on p.id = ps.player_id
       join public.teams t on t.id = ps.team_id
-      left join lateral (
-        select external_id from public.player_external_ids x
-        where x.player_id = ps.player_id and x.league = t.league and x.provider = 'sportradar'
-        order by (x.source = 'profile') desc, x.external_id limit 1
-      ) e on true
       where ps.game_id = ${gameId}
       order by (ps.team_id = g.home_team_id) desc, ps.starter desc nulls last, p.full_name`;
     const events = await tx<{ providerEventId: string; body: unknown }[]>`
@@ -153,7 +152,7 @@ export async function loadSnapshot(
         score: { home: p.homePoints, away: p.awayPoints },
       })),
       teamStats: teamStats.map((t) => ({
-        teamId: t.teamId,
+        providerTeamId: t.providerTeamId,
         isHome: t.isHome,
         stats: { ...t.stats, extra: t.extra ?? {} },
       })),
