@@ -5,7 +5,7 @@
 Recorded from the Sportradar simulation service (`playback.sportradar.com`, no API key, never
 counts quota) on 2026-10-14 from recording `d9b71fe0-0cbf-11f1-bf29-5913e6df42d2`
 (Northwestern Wildcats at Michigan State Spartans, scheduled 2026-02-18T23:30Z, Big Ten,
-`conference_game: true`, provider game id `e3e3d6ef-…` see the documents; season
+`conference_game: true`, provider game id `2e36b340-9277-4b99-af20-b7ff7e86640e`; season
 `ec6ca218-4496-4d67-99e5-95bea992f4bf` = 2025 REG). The recording exposes the REST feeds
 `boxscore`, `game`, `pbp` (no push). **Coverage is `full`** on every document; none of the 38
 NCAAWB recordings listed on 2026-10-14 is an `extended_boxscore` game, so the score-only path is

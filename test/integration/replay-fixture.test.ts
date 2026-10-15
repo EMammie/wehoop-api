@@ -136,7 +136,10 @@ describe('committed replay fixture through the worker path', () => {
     };
     const r = await apply(deps, gameId, corrected, observation(run, corrected, new Date()));
     expect(r.outcome === 'applied' && r.changes.map((c) => c.type)).toEqual(['stats_team']);
-    expect(r.outcome === 'applied' && r.counts.touchedStats).toBe(1); // the away side: same hash, newer observation
+    // the away side and every player line: same hash, newer observation
+    expect(r.outcome === 'applied' && r.counts.touchedStats).toBe(
+      1 + lastSummary.batch.playerStats.length,
+    );
     expect((await counts(db, gameId)).changes).toBe(before.changes + 1);
     // the same correction re-presented with an OLDER observedAt is ignored, not re-applied
     const older = await apply(
@@ -146,6 +149,8 @@ describe('committed replay fixture through the worker path', () => {
       observation(run, lastSummary, new Date(Date.now() - 3_600_000)),
     );
     expect(older.outcome === 'applied' && older.changes).toEqual([]);
-    expect(older.outcome === 'applied' && older.counts.ignoredOlderStats).toBe(2);
+    expect(older.outcome === 'applied' && older.counts.ignoredOlderStats).toBe(
+      2 + lastSummary.batch.playerStats.length,
+    );
   });
 });

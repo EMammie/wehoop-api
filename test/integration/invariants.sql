@@ -182,3 +182,71 @@ where deleted_revision_at is not null and deleted_at is null;
 
 -- check: stats_observed_at_set | expect: 0
 select count(*) from public.game_team_stats where observed_at is null;
+
+-- check: client_views_use_security_invoker | expect: 4
+select count(*)
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind = 'v'
+  and n.nspname = 'public'
+  and c.relname in ('v_schedule', 'v_boxscore', 'v_standings', 'v_player_seasons')
+  and coalesce(
+    (select option_value::boolean
+     from pg_options_to_table(c.reloptions)
+     where option_name = 'security_invoker'),
+    false
+  );
+
+-- check: views_do_not_expose_watch_run_id | expect: 0
+select count(*)
+from information_schema.columns c
+join pg_class r on r.relname = c.table_name
+join pg_namespace n on n.oid = r.relnamespace and n.nspname = c.table_schema
+where c.table_schema = 'public'
+  and r.relkind = 'v'
+  and c.column_name = 'watch_run_id';
+
+-- check: anon_can_select_every_client_view | expect: 4
+select count(*)
+from information_schema.role_table_grants
+where grantee = 'anon'
+  and table_schema = 'public'
+  and privilege_type = 'SELECT'
+  and table_name in ('v_schedule', 'v_boxscore', 'v_standings', 'v_player_seasons');
+
+-- check: external_ids_point_at_canonical_players | expect: 0
+select count(*)
+from public.player_external_ids e
+join public.players p on p.id = e.player_id
+where p.merged_into is not null;
+
+-- check: merged_players_point_at_canonical_survivors | expect: 0
+select count(*)
+from public.players l
+join public.players s on s.id = l.merged_into
+where s.merged_into is not null;
+
+-- check: tombstoned_players_own_nothing | expect: 0
+select count(*)
+from public.players l
+where l.merged_into is not null
+  and (exists (select 1 from public.player_season_stats x where x.player_id = l.id)
+    or exists (select 1 from public.player_team_seasons x where x.player_id = l.id)
+    or exists (select 1 from public.game_player_stats x where x.player_id = l.id)
+    or exists (select 1 from public.play_events x where x.player_id = l.id));
+
+-- check: player_stats_observed_at_set | expect: 0
+select count(*) from public.game_player_stats where observed_at is null;
+
+-- check: elam_games_have_a_target | expect: 0
+select count(*)
+from public.games g
+where g.period_type = 'elam'
+  and g.elam_target_score is null;
+
+-- check: oot_games_belong_to_a_tournament | expect: 0
+select count(*)
+from public.games g
+join public.seasons s on s.id = g.season_id
+where s.type = 'OOT'
+  and g.tournament_id is null;

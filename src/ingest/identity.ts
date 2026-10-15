@@ -341,14 +341,14 @@ async function linkExternalId(
   tx: TransactionSql,
   playerId: string,
   ref: { league: LeagueCode; externalId: string; idType: string; source: 'profile' | 'reference' },
-): Promise<{ playerId: string; merged: boolean }> {
+): Promise<{ playerId: string; mergedFrom: string | null }> {
   const [existing] = await tx<{ playerId: string }[]>`
     select player_id as "playerId" from public.player_external_ids
     where provider = ${PROVIDER} and league = ${ref.league} and external_id = ${ref.externalId}`;
   if (!existing) {
     await tx`insert into public.player_external_ids (provider, league, external_id, player_id, id_type, source)
              values (${PROVIDER}, ${ref.league}, ${ref.externalId}, ${playerId}, ${ref.idType}, ${ref.source})`;
-    return { playerId, merged: false };
+    return { playerId, mergedFrom: null };
   }
   const other = await resolveCanonical(tx, existing.playerId);
   // A profile owns its id: upgrade a game-sourced row; references never downgrade a profile row.
@@ -356,8 +356,9 @@ async function linkExternalId(
     await tx`update public.player_external_ids set source = 'profile', id_type = ${ref.idType}
              where provider = ${PROVIDER} and league = ${ref.league} and external_id = ${ref.externalId} and source <> 'profile'`;
   }
-  if (other === playerId) return { playerId, merged: false };
-  return { playerId: await mergePlayers(tx, playerId, other), merged: true };
+  if (other === playerId) return { playerId, mergedFrom: null };
+  const survivor = await mergePlayers(tx, playerId, other);
+  return { playerId: survivor, mergedFrom: survivor === playerId ? other : playerId };
 }
 
 export interface ProfileResult {
@@ -394,6 +395,7 @@ export async function applyPlayerProfile(
       idType: 'league_profile',
       source: 'profile',
     });
+    if (own.mergedFrom) mergedFrom.push(own.mergedFrom);
     playerId = own.playerId;
 
     // 2. References: league profiles under their league, the sport profile under ours.
@@ -408,9 +410,9 @@ export async function applyPlayerProfile(
         for (const peer of peers) {
           const other = await resolveCanonical(tx, peer.playerId);
           if (other !== playerId) {
-            const before = playerId;
-            playerId = await mergePlayers(tx, playerId, other);
-            mergedFrom.push(before === playerId ? other : before);
+            const survivor = await mergePlayers(tx, playerId, other);
+            mergedFrom.push(survivor === playerId ? other : playerId);
+            playerId = survivor;
           }
         }
       } else {
@@ -424,13 +426,12 @@ export async function applyPlayerProfile(
         }
         target = { league: scoped, idType: ref.id_type };
       }
-      const before = playerId;
       const linked = await linkExternalId(tx, playerId, {
         ...target,
         externalId: ref.source_id,
         source: 'reference',
       });
-      if (linked.merged) mergedFrom.push(before === linked.playerId ? '' : before);
+      if (linked.mergedFrom) mergedFrom.push(linked.mergedFrom);
       playerId = linked.playerId;
     }
 
@@ -492,7 +493,7 @@ export async function applyPlayerProfile(
 
     return {
       playerId,
-      mergedFrom: mergedFrom.filter((id) => id !== ''),
+      mergedFrom,
       externalIds: await externalIdsOf(tx, playerId),
       seasonLines,
     };

@@ -464,11 +464,11 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     const after = await counts(db, gameId);
     expect(after).toMatchObject({ clock: stored.clock, home: stored.home, away: stored.away });
     expect(await staleReasons(db, gameId)).toEqual({ superseded_observation: 1 });
-    // its stats were still reconciled per entity
-    expect(r.outcome === 'applied' && r.changes.map((c) => c.type)).toEqual([
-      'stats_team',
-      'stats_team',
-    ]);
+    // its stats were still reconciled per entity (team lines and, since M2, player lines)
+    const types = r.outcome === 'applied' ? r.changes.map((c) => c.type) : [];
+    expect(types.filter((t) => t === 'stats_team')).toHaveLength(2);
+    expect(types.filter((t) => t === 'stats_player')).toHaveLength(sum.batch.playerStats.length);
+    expect(types.every((t) => t === 'stats_team' || t === 'stats_player')).toBe(true);
     // and a delayed pbp whose event carries a newer `updated` still corrects that event while the clock stays put
     const { doc } = withCorrection(nd, 2, true);
     const r2 = await apply(deps, gameId, doc, observation(run, doc, later(11), { source: 'rest' }));
