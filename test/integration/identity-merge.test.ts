@@ -805,6 +805,138 @@ describe('conflicting profiles are held with their evidence and change nothing',
     expect(await gameFingerprint(gameId)).toEqual(gameBefore);
   });
 
+  it('own-id path: a third league merged two game-sourced ids of one league; the first profile upgrades its id, the second is held and writes nothing (no attributes, no seasons), game state unchanged, replay adds nothing', async () => {
+    const suffix = randomUUID();
+    const docs = suffixedDocs(suffix);
+    const [l1, l2] = attributedLines(docs);
+    if (!l1 || !l2) throw new Error('fixture has fewer than two players with an event and a line');
+    const P1 = l1.providerPlayerId;
+    const P2 = l2.providerPlayerId;
+    const { gameId } = await seedGame(db, docs.pbp);
+    const run = await replayRun(db, gameId);
+    expect((await apply(deps, gameId, docs.pbp, observation(run, docs.pbp, T0))).outcome).toBe(
+      'applied',
+    );
+    expect(
+      (await apply(deps, gameId, docs.sum, observation(run, docs.sum, later(5)))).outcome,
+    ).toBe('applied');
+    // Two WNBA game-sourced rows; an Unrivaled profile says they are one person: the real-world
+    // duplicate-record case, merged under the ratified rule with a provenance row.
+    const u = `u-${suffix}`;
+    const r0 = await applyPlayerProfile(
+      db,
+      'unrivaled',
+      profile(u, l1.fullName, [
+        { source_id: P1, scope: 'WNBA', id_type: 'league_profile' },
+        { source_id: P2, scope: 'WNBA', id_type: 'league_profile' },
+      ]),
+      silentLog,
+    );
+    const survivor = r0.playerId ?? '';
+    expect(survivor).toBeTruthy();
+    expect(r0.mergedFrom).toHaveLength(1);
+    expect(r0.held).toEqual([]);
+    const loser = r0.mergedFrom[0] ?? '';
+    expect(await mergeRowFor(loser)).toMatchObject({ survivorId: survivor, triggerDocumentId: u });
+    // WNBA profile P1 arrives: its id is upgraded to profile-owned on the merged row, no hold.
+    const p1 = await applyPlayerProfile(
+      db,
+      'wnba',
+      PlayerProfileDocumentSchema.parse({
+        id: P1,
+        full_name: l1.fullName,
+        first_name: 'First',
+        position: 'G',
+      }),
+      silentLog,
+    );
+    expect(p1.playerId).toBe(survivor);
+    expect(p1.held).toEqual([]);
+    const idBefore = await identityFingerprint([survivor, loser]);
+    expect(idBefore.externalIds).toEqual(
+      expect.arrayContaining([
+        {
+          league: 'wnba',
+          external_id: P1,
+          id_type: 'league_profile',
+          source: 'profile',
+          player_id: survivor,
+        },
+        {
+          league: 'wnba',
+          external_id: P2,
+          id_type: 'league_profile',
+          source: 'game',
+          player_id: survivor,
+        },
+      ]),
+    );
+    const gameBefore = await gameFingerprint(gameId);
+    expect(
+      gameBefore.lines
+        .filter((l) => l.playerId === survivor)
+        .map((l) => l.providerPlayerId)
+        .sort(),
+    ).toEqual([P1, P2].sort());
+
+    // WNBA profile P2 arrives with its own attributes and a season: owning P2 on that row too
+    // would give one person two WNBA profiles, so it is held before anything is written.
+    const ownRef = { scope: 'wnba', id_type: 'league_profile', source_id: P2 };
+    const seasonId = `season-${suffix}`;
+    const p2Doc = PlayerProfileDocumentSchema.parse({
+      id: P2,
+      full_name: 'Someone Else',
+      first_name: 'Other',
+      position: 'C',
+      seasons: [{ id: seasonId, year: 2998, type: 'REG', teams: [] }],
+    });
+    const p2 = await applyPlayerProfile(db, 'wnba', p2Doc, silentLog);
+    expect(p2).toEqual({
+      playerId: null,
+      mergedFrom: [],
+      merges: [],
+      held: [
+        {
+          reason: 'conflicting_profiles',
+          reference: ownRef,
+          candidateIds: [survivor],
+          detail: { conflicts: [{ league: 'wnba', idType: 'league_profile', externalId: P1 }] },
+        },
+      ],
+      externalIds: [],
+      seasonLines: 0,
+    });
+    expect(await holdsFor(P2)).toEqual([
+      {
+        reason: 'conflicting_profiles',
+        triggerFeed: 'player_profile',
+        triggerDocumentId: P2,
+        triggerReference: ownRef,
+        candidateIds: [survivor],
+        status: 'open',
+      },
+    ]);
+    // Nothing written: identities, claims (P2 still game-sourced), attributes, merges, seasons.
+    expect(await identityFingerprint([survivor, loser])).toEqual(idBefore);
+    const [season] = await db<{ n: number }[]>`
+      select count(*)::int as n from public.seasons where league = 'wnba' and provider_season_id = ${seasonId}`;
+    expect(season?.n).toBe(0);
+    // Game state: nothing moved, nothing deleted, and the identical summary is still a no-op.
+    expect(await gameFingerprint(gameId)).toEqual(gameBefore);
+    const r = await apply(deps, gameId, docs.sum, observation(run, docs.sum, later(10)));
+    if (r.outcome !== 'applied') throw new Error('expected applied');
+    expect(r.changes).toEqual([]);
+    expect(await gameFingerprint(gameId)).toEqual(gameBefore);
+
+    // Replaying the contradicting document: still one open hold, still nothing changed.
+    const again = await applyPlayerProfile(db, 'wnba', p2Doc, silentLog);
+    expect(again.playerId).toBeNull();
+    expect(again.held).toHaveLength(1);
+    expect(await holdsFor(P2)).toHaveLength(1);
+    expect(await identityFingerprint([survivor, loser])).toEqual(idBefore);
+    expect(await gameFingerprint(gameId)).toEqual(gameBefore);
+  });
+
   it('a matching sport-wide id across leagues still merges normally with a provenance row, and re-ingesting the unchanged profile is a no-op', async () => {
     const suffix = randomUUID();
     const s = `s-${suffix}`;

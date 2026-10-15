@@ -549,7 +549,10 @@ async function profileClaimsOf(tx: TransactionSql, playerId: string): Promise<Pr
 }
 
 export interface ProfileResult {
-  /** The canonical row the profile was applied to; null when the document's own id was held. */
+  /**
+   * The canonical row the profile was applied to; null when the document was skipped because its
+   * own id was held (nothing was written: no attributes, seasons or season lines; `held` says why).
+   */
   playerId: string | null;
   /** Canonical rows that were folded into playerId by this profile. */
   mergedFrom: string[];
@@ -573,7 +576,11 @@ export interface ProfileOptions {
  * - a reference with an unknown scope or id type, an id stored under another
  *   id type, or an id owned by a tombstone is HELD (never linked);
  * - the profile lands on the row its own id resolves to, else on the oldest
- *   row a reference resolves to, else on a new row;
+ *   row a reference resolves to, else on a new row; if the own id's row
+ *   already carries another profile-owned id of this league or another
+ *   sport-wide id, owning the id there is a contradiction: it is held as
+ *   `conflicting_profiles` and the document writes nothing (playerId null),
+ *   like a held own id;
  * - every other row a reference resolves to is MERGED into it, with the
  *   reference recorded as the trigger, unless the two rows (plus this
  *   document's own claims) would give one person two provider profiles in
@@ -680,6 +687,40 @@ export async function applyPlayerProfile(
     if (ownRow === 'held') {
       log?.warn({ league, playerId: doc.id }, 'profile skipped: its own id is held');
       return { playerId: null, mergedFrom: [], merges: [], held, externalIds: [], seasonLines: 0 };
+    }
+    if (ownRow !== null) {
+      // The own id already resolves to a row (game-sourced, linked by another profile's reference,
+      // or this document seen before). Owning it as a profile must not give that row a second
+      // profile-owned id in this league or a second sport-wide id: the row may have reached that
+      // state legitimately (two game-sourced ids of one league merged by a third league's
+      // profile), and this document is the one that would turn it into a contradiction. Held,
+      // and the document writes nothing, exactly like a held own id.
+      const conflicts = claimConflicts(
+        claims,
+        (await profileClaimsOf(tx, ownRow)).filter(
+          (c) => !(c.league === league && c.idType === 'league_profile' && c.externalId === doc.id),
+        ),
+      );
+      if (conflicts.length > 0) {
+        await hold({
+          reason: 'conflicting_profiles',
+          reference: own.raw,
+          candidateIds: [ownRow],
+          detail: { conflicts },
+        });
+        log?.warn(
+          { league, playerId: doc.id, row: ownRow },
+          'profile skipped: owning its id would give the row a second provider profile',
+        );
+        return {
+          playerId: null,
+          mergedFrom: [],
+          merges: [],
+          held,
+          externalIds: [],
+          seasonLines: 0,
+        };
+      }
     }
     /** canonical row -> the references of this document that resolved to it */
     const candidates = new Map<string, ExternalRef[]>();
