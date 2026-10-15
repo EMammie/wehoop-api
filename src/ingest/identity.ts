@@ -3,7 +3,12 @@ import type { Db } from '../db/client.js';
 import type { LeagueCode } from '../leagues/codes.js';
 import type { Logger } from '../logger.js';
 import type { PlayerProfileDocument } from '../providers/sportradar/schemas/profile.js';
-import { applyPlayerSeasonStats, type PlayerSeasonLine } from './apply-changes.js';
+import {
+  applyPlayerSeasonStats,
+  type PlayerSeasonLine,
+  type RepointCounts,
+  repointPlayerReferences,
+} from './apply-changes.js';
 import type { DocumentPlayer } from './types.js';
 
 /**
@@ -15,16 +20,20 @@ import type { DocumentPlayer } from './types.js';
  * `game`). A profile document owns its id (source `profile`) and links every
  * `references[]` entry (source `reference`): a league profile id under that
  * league, the sport-wide profile id under the profile's own league with
- * id_type `sport_profile`. When a link lands on an id that already belongs to
- * another canonical row the two are MERGED: the survivor is the older row
- * (created_at, then id: deterministic for any replay order), the loser gets
- * `merged_into`, and every FK that referenced the loser is repointed in the
- * same transaction. Canonical uuids never enter LiveEvent bodies, so a merge
- * never rewrites history. Re-applying the same profile is a no-op.
+ * id_type `sport_profile`. A profile first resolves every id it carries; it
+ * creates a row only when none resolves, and when two distinct canonical rows
+ * resolve the two are MERGED: the survivor is the older row (created_at, then
+ * id: deterministic for any replay order), the loser gets `merged_into` (and
+ * earlier tombstones pointing at the loser are flattened onto the survivor, so
+ * chains stay depth 1), and every FK that referenced the loser is repointed in
+ * the same transaction. Canonical uuids never enter change bodies or content
+ * hashes, so a merge never rewrites history. Re-applying the same profile is a
+ * no-op.
  *
- * None of this is game state: nothing here touches games, play_events,
- * game_changes, game_periods or the stats tables; season lines go through
- * applyPlayerSeasonStats in apply-changes.ts.
+ * None of this is game state: nothing here writes games, play_events,
+ * game_changes, game_periods or the stats tables; the merge repoint and the
+ * season lines go through apply-changes.ts (repointPlayerReferences,
+ * applyPlayerSeasonStats).
  */
 
 type Sql = Db | TransactionSql;
@@ -111,6 +120,10 @@ export interface SeasonFacts {
 /**
  * Upsert a season by (league, provider_season_id). A provider season type the
  * enum does not know is not invented: the season is skipped (null) and logged.
+ * A (league, year, type) already stored under a different provider id is a
+ * clash, not the same season: null is returned (the caller leaves its
+ * season_id unset) and the clash is logged, so a game is never silently linked
+ * to a season the provider did not name.
  */
 export async function ensureSeason(
   db: Sql,
@@ -138,15 +151,14 @@ export async function ensureSeason(
     on conflict (league, year, type) do nothing
     returning id`;
   if (inserted) return inserted.id;
-  // The same (league, year, type) exists under another provider id: keep the stored one.
   const [clash] = await db<{ id: string; providerSeasonId: string }[]>`
     select id, provider_season_id as "providerSeasonId" from public.seasons
     where league = ${league} and year = ${season.year} and type = ${season.type}::public.season_type`;
   log?.warn(
-    { league, season, stored: clash?.providerSeasonId },
-    'season (league, year, type) already exists under another provider id; stored row kept',
+    { league, season, stored: clash?.providerSeasonId, metric: 'season_provider_id_clash' },
+    'season (league, year, type) already exists under another provider id; not linked',
   );
-  return clash?.id ?? null;
+  return null;
 }
 
 export interface TournamentFacts {
@@ -185,7 +197,7 @@ export async function ensureTournament(
 /* Players                                                                    */
 /* ------------------------------------------------------------------------- */
 
-/** Follow players.merged_into to the surviving row (bounded; merges are depth 1 by construction). */
+/** Follow players.merged_into to the surviving row (bounded; mergePlayers keeps chains at depth 1). */
 export async function resolveCanonical(db: Sql, playerId: string): Promise<string> {
   let id = playerId;
   for (let i = 0; i < 8; i++) {
@@ -255,16 +267,26 @@ export async function ensurePlayers(
         out.set(p.providerPlayerId, again);
         continue;
       }
-      const fullName =
-        p.fullName ?? `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim() ?? p.providerPlayerId;
+      const fullName = p.fullName ?? `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim();
       const [row] = await tx<{ id: string }[]>`
         insert into public.players (full_name, first_name, last_name, jersey, position)
         values (${fullName || p.providerPlayerId}, ${p.firstName}, ${p.lastName}, ${p.jersey}, ${p.position})
         returning id`;
       if (!row) throw new Error('players insert returned no row');
-      await tx`insert into public.player_external_ids (provider, league, external_id, player_id, id_type, source)
-               values (${PROVIDER}, ${league}, ${p.providerPlayerId}, ${row.id}, 'league_profile', 'game')`;
-      out.set(p.providerPlayerId, row.id);
+      const [linked] = await tx<{ playerId: string }[]>`
+        insert into public.player_external_ids (provider, league, external_id, player_id, id_type, source)
+        values (${PROVIDER}, ${league}, ${p.providerPlayerId}, ${row.id}, 'league_profile', 'game')
+        on conflict (provider, league, external_id) do nothing
+        returning player_id as "playerId"`;
+      if (linked) {
+        out.set(p.providerPlayerId, row.id);
+        continue;
+      }
+      // Lost a race with a concurrent writer: drop the row we made and use theirs.
+      await tx`delete from public.players where id = ${row.id}`;
+      const winner = await playerIdFor(tx, league, p.providerPlayerId);
+      if (!winner) throw new Error(`player ${league}:${p.providerPlayerId} vanished mid-insert`);
+      out.set(p.providerPlayerId, winner);
     }
     return out;
   }) as Promise<Map<string, string>>;
@@ -285,15 +307,28 @@ export async function externalIdsOf(db: Sql, playerId: string): Promise<External
     order by league, id_type, external_id`;
 }
 
+export interface MergeResult {
+  survivor: string;
+  loser: string;
+  repoint: RepointCounts;
+}
+
 /**
  * Merge two canonical players. Survivor = the older row (created_at, then id),
- * so the outcome does not depend on which profile arrived first. Every FK that
- * referenced the loser is repointed; rows that would collide with the
- * survivor's (same PK) are dropped in favour of the survivor's. Returns the
- * survivor.
+ * so the outcome does not depend on which profile arrived first. External ids
+ * move to the survivor; every FK that referenced the loser is repointed by
+ * apply-changes.ts (rows that would collide with the survivor's are dropped and
+ * counted); the survivor's blank attributes are filled from the loser; the
+ * loser is tombstoned and any tombstone that pointed at the loser is flattened
+ * onto the survivor so `merged_into` chains never exceed depth 1.
  */
-export async function mergePlayers(tx: TransactionSql, a: string, b: string): Promise<string> {
-  if (a === b) return a;
+export async function mergePlayers(
+  tx: TransactionSql,
+  a: string,
+  b: string,
+  log?: Logger,
+): Promise<MergeResult> {
+  if (a === b) throw new Error(`mergePlayers: ${a} with itself`);
   const rows = await tx<{ id: string; createdAt: Date }[]>`
     select id, created_at as "createdAt" from public.players where id in (${a}, ${b}) and merged_into is null
     order by created_at, id`;
@@ -302,25 +337,17 @@ export async function mergePlayers(tx: TransactionSql, a: string, b: string): Pr
   const loser = rows[1]?.id;
   if (!survivor || !loser) throw new Error('mergePlayers: unreachable');
   await tx`update public.player_external_ids set player_id = ${survivor} where player_id = ${loser}`;
-  await tx`update public.play_events set player_id = ${survivor} where player_id = ${loser}`;
-  await tx`insert into public.player_team_seasons (player_id, team_id, season_id, jersey, status)
-           select ${survivor}, team_id, season_id, jersey, status from public.player_team_seasons where player_id = ${loser}
-           on conflict (player_id, team_id, season_id) do nothing`;
-  await tx`delete from public.player_team_seasons where player_id = ${loser}`;
-  await tx`insert into public.player_season_stats
-             (player_id, season_id, team_id, games_played, games_started, minutes, points, rebounds, off_rebounds,
-              def_rebounds, assists, steals, blocks, turnovers, personal_fouls, fgm, fga, tpm, tpa, ftm, fta,
-              plus_minus, averages, extra, content_hash)
-           select ${survivor}, season_id, team_id, games_played, games_started, minutes, points, rebounds, off_rebounds,
-              def_rebounds, assists, steals, blocks, turnovers, personal_fouls, fgm, fga, tpm, tpa, ftm, fta,
-              plus_minus, averages, extra, content_hash
-           from public.player_season_stats where player_id = ${loser}
-           on conflict (player_id, season_id, team_id) do nothing`;
-  await tx`delete from public.player_season_stats where player_id = ${loser}`;
-  await tx`update public.game_player_stats s set player_id = ${survivor}
-           where s.player_id = ${loser}
-             and not exists (select 1 from public.game_player_stats t where t.game_id = s.game_id and t.player_id = ${survivor})`;
-  await tx`delete from public.game_player_stats where player_id = ${loser}`;
+  const repoint = await repointPlayerReferences(tx, loser, survivor);
+  const dropped =
+    repoint.gamePlayerStats.dropped +
+    repoint.playerSeasonStats.dropped +
+    repoint.playerTeamSeasons.dropped;
+  if (dropped > 0) {
+    log?.warn(
+      { survivor, loser, repoint, metric: 'merge_rows_dropped' },
+      "identity merge dropped rows that collided with the survivor's",
+    );
+  }
   // Fill the survivor's blanks from the loser, then tombstone the loser.
   await tx`update public.players s set
              first_name = coalesce(s.first_name, l.first_name), last_name = coalesce(s.last_name, l.last_name),
@@ -329,8 +356,26 @@ export async function mergePlayers(tx: TransactionSql, a: string, b: string): Pr
              college = coalesce(s.college, l.college), headshot_url = coalesce(s.headshot_url, l.headshot_url),
              jersey = coalesce(s.jersey, l.jersey), status = coalesce(s.status, l.status)
            from public.players l where s.id = ${survivor} and l.id = ${loser}`;
-  await tx`update public.players set merged_into = ${survivor}, updated_at = now() where id = ${loser}`;
-  return survivor;
+  await tx`update public.players set merged_into = ${survivor}, updated_at = now()
+           where id = ${loser} or merged_into = ${loser}`;
+  log?.info({ survivor, loser, repoint }, 'players merged');
+  return { survivor, loser, repoint };
+}
+
+interface ExternalRef {
+  league: LeagueCode;
+  externalId: string;
+  idType: string;
+  source: 'profile' | 'reference';
+}
+
+/** The canonical player an external id currently resolves to, or null when the id is unknown. */
+async function resolveRef(tx: TransactionSql, ref: ExternalRef): Promise<string | null> {
+  const [existing] = await tx<{ playerId: string; idType: string | null }[]>`
+    select player_id as "playerId", id_type as "idType" from public.player_external_ids
+    where provider = ${PROVIDER} and league = ${ref.league} and external_id = ${ref.externalId}`;
+  if (!existing) return null;
+  return resolveCanonical(tx, existing.playerId);
 }
 
 /**
@@ -340,15 +385,24 @@ export async function mergePlayers(tx: TransactionSql, a: string, b: string): Pr
 async function linkExternalId(
   tx: TransactionSql,
   playerId: string,
-  ref: { league: LeagueCode; externalId: string; idType: string; source: 'profile' | 'reference' },
-): Promise<{ playerId: string; mergedFrom: string | null }> {
-  const [existing] = await tx<{ playerId: string }[]>`
-    select player_id as "playerId" from public.player_external_ids
+  ref: ExternalRef,
+  log?: Logger,
+): Promise<{ playerId: string; merge: MergeResult | null }> {
+  const [existing] = await tx<{ playerId: string; idType: string | null }[]>`
+    select player_id as "playerId", id_type as "idType" from public.player_external_ids
     where provider = ${PROVIDER} and league = ${ref.league} and external_id = ${ref.externalId}`;
   if (!existing) {
     await tx`insert into public.player_external_ids (provider, league, external_id, player_id, id_type, source)
              values (${PROVIDER}, ${ref.league}, ${ref.externalId}, ${playerId}, ${ref.idType}, ${ref.source})`;
-    return { playerId, mergedFrom: null };
+    return { playerId, merge: null };
+  }
+  if (existing.idType !== null && existing.idType !== ref.idType && ref.source !== 'profile') {
+    // The key is (provider, league, external_id); a reference naming a stored id under another
+    // type is linked (it is the same string) but reported, since the type will not be rewritten.
+    log?.warn(
+      { ref, stored: existing.idType },
+      'external id already stored under a different id_type; stored type kept',
+    );
   }
   const other = await resolveCanonical(tx, existing.playerId);
   // A profile owns its id: upgrade a game-sourced row; references never downgrade a profile row.
@@ -356,22 +410,27 @@ async function linkExternalId(
     await tx`update public.player_external_ids set source = 'profile', id_type = ${ref.idType}
              where provider = ${PROVIDER} and league = ${ref.league} and external_id = ${ref.externalId} and source <> 'profile'`;
   }
-  if (other === playerId) return { playerId, mergedFrom: null };
-  const survivor = await mergePlayers(tx, playerId, other);
-  return { playerId: survivor, mergedFrom: survivor === playerId ? other : playerId };
+  if (other === playerId) return { playerId, merge: null };
+  const merge = await mergePlayers(tx, playerId, other, log);
+  return { playerId: merge.survivor, merge };
 }
 
 export interface ProfileResult {
   playerId: string;
   /** Canonical rows that were folded into playerId by this profile. */
   mergedFrom: string[];
+  /** Rows of merge losers dropped because the survivor already owned the same key (see repointPlayerReferences). */
+  dropped: { gamePlayerStats: number; playerSeasonStats: number; playerTeamSeasons: number };
   externalIds: ExternalIdRow[];
   seasonLines: number;
 }
 
 /**
  * Apply a player profile document from `league`: canonical row, attributes,
- * references, seasons and season lines. Deterministic and idempotent.
+ * references, seasons and season lines. Deterministic and idempotent. The
+ * profile's own id and every reference are resolved before anything is
+ * written: a row is created only when none of them is known, and a merge
+ * happens only when they resolve to two distinct existing rows.
  */
 export async function applyPlayerProfile(
   db: Db,
@@ -381,61 +440,85 @@ export async function applyPlayerProfile(
 ): Promise<ProfileResult> {
   return db.begin(async (tx) => {
     const mergedFrom: string[] = [];
-    // 1. The profile's own id.
-    let playerId = await playerIdFor(tx, league, doc.id);
+    const dropped = { gamePlayerStats: 0, playerSeasonStats: 0, playerTeamSeasons: 0 };
+    const noteMerge = (m: MergeResult | null) => {
+      if (!m) return;
+      mergedFrom.push(m.loser);
+      dropped.gamePlayerStats += m.repoint.gamePlayerStats.dropped;
+      dropped.playerSeasonStats += m.repoint.playerSeasonStats.dropped;
+      dropped.playerTeamSeasons += m.repoint.playerTeamSeasons.dropped;
+    };
+
+    // 1. Every id the profile carries: its own, then references (league profiles under their
+    //    league, the sport profile under ours).
+    const refs: ExternalRef[] = [
+      { league, externalId: doc.id, idType: 'league_profile', source: 'profile' },
+    ];
+    const sportIds: string[] = [];
+    for (const ref of doc.references ?? []) {
+      if (ref.id_type === 'sport_profile') {
+        refs.push({
+          league,
+          externalId: ref.source_id,
+          idType: 'sport_profile',
+          source: 'reference',
+        });
+        sportIds.push(ref.source_id);
+        continue;
+      }
+      const scoped = SCOPE_TO_LEAGUE[ref.scope.toUpperCase()];
+      if (!scoped) {
+        log?.info(
+          { league, playerId: doc.id, ref },
+          'profile reference with unknown scope skipped',
+        );
+        continue;
+      }
+      refs.push({
+        league: scoped,
+        externalId: ref.source_id,
+        idType: ref.id_type,
+        source: 'reference',
+      });
+    }
+
+    // 2. Resolve first, write nothing: the canonical rows these ids already belong to.
+    const known = new Set<string>();
+    for (const ref of refs) {
+      const id = await resolveRef(tx, ref);
+      if (id) known.add(id);
+    }
+    // The same sport-wide id seen from another league's profile is the same person.
+    for (const sportId of sportIds) {
+      const peers = await tx<{ playerId: string }[]>`
+        select player_id as "playerId" from public.player_external_ids
+        where provider = ${PROVIDER} and id_type = 'sport_profile' and external_id = ${sportId} and league <> ${league}`;
+      for (const peer of peers) known.add(await resolveCanonical(tx, peer.playerId));
+    }
+    let playerId = [...known][0] ?? null;
     if (!playerId) {
       const [row] = await tx<{ id: string }[]>`
         insert into public.players (full_name) values (${doc.full_name}) returning id`;
       if (!row) throw new Error('players insert returned no row');
       playerId = row.id;
     }
-    const own = await linkExternalId(tx, playerId, {
-      league,
-      externalId: doc.id,
-      idType: 'league_profile',
-      source: 'profile',
-    });
-    if (own.mergedFrom) mergedFrom.push(own.mergedFrom);
-    playerId = own.playerId;
 
-    // 2. References: league profiles under their league, the sport profile under ours.
-    for (const ref of doc.references ?? []) {
-      let target: { league: LeagueCode; idType: string } | null = null;
-      if (ref.id_type === 'sport_profile') {
-        target = { league, idType: 'sport_profile' };
-        // The same sport-wide id seen from another league's profile is the same person.
-        const peers = await tx<{ playerId: string }[]>`
-          select player_id as "playerId" from public.player_external_ids
-          where provider = ${PROVIDER} and id_type = 'sport_profile' and external_id = ${ref.source_id} and league <> ${league}`;
-        for (const peer of peers) {
-          const other = await resolveCanonical(tx, peer.playerId);
-          if (other !== playerId) {
-            const survivor = await mergePlayers(tx, playerId, other);
-            mergedFrom.push(survivor === playerId ? other : playerId);
-            playerId = survivor;
-          }
-        }
-      } else {
-        const scoped = SCOPE_TO_LEAGUE[ref.scope.toUpperCase()];
-        if (!scoped) {
-          log?.info(
-            { league, playerId: doc.id, ref },
-            'profile reference with unknown scope skipped',
-          );
-          continue;
-        }
-        target = { league: scoped, idType: ref.id_type };
-      }
-      const linked = await linkExternalId(tx, playerId, {
-        ...target,
-        externalId: ref.source_id,
-        source: 'reference',
-      });
-      if (linked.mergedFrom) mergedFrom.push(linked.mergedFrom);
+    // 3. Link: inserts the ids that were unknown, upgrades the own id to source=profile, and
+    //    merges when an id belongs to another of the known rows.
+    for (const ref of refs) {
+      const linked = await linkExternalId(tx, playerId, ref, log);
+      noteMerge(linked.merge);
       playerId = linked.playerId;
     }
+    for (const id of known) {
+      const other = await resolveCanonical(tx, id);
+      if (other === playerId) continue;
+      const merge = await mergePlayers(tx, playerId, other, log);
+      noteMerge(merge);
+      playerId = merge.survivor;
+    }
 
-    // 3. Attributes: the profile is the authority on what it carries; omissions keep stored values.
+    // 4. Attributes: the profile is the authority on what it carries; omissions keep stored values.
     await tx`update public.players set
                full_name = ${doc.full_name},
                first_name = coalesce(${doc.first_name ?? null}, first_name),
@@ -450,7 +533,7 @@ export async function applyPlayerProfile(
                provider_updated_at = coalesce(${doc.updated ?? null}::timestamptz, provider_updated_at)
              where id = ${playerId}`;
 
-    // 4. Seasons, team seasons, season lines.
+    // 5. Seasons, team seasons, season lines.
     let seasonLines = 0;
     for (const s of doc.seasons ?? []) {
       const seasonId = await ensureSeason(
@@ -494,6 +577,7 @@ export async function applyPlayerProfile(
     return {
       playerId,
       mergedFrom,
+      dropped,
       externalIds: await externalIdsOf(tx, playerId),
       seasonLines,
     };

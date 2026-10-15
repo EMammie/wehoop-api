@@ -57,10 +57,11 @@ describe('ReferenceIngester', () => {
         lastSeq: string;
         season: string;
         title: string | null;
+        statsFinalAt: Date | null;
       }[]
     >`
       select g.provider_game_id as "providerGameId", g.status::text as status, g.home_points as home, g.away_points as away,
-             g.last_seq::text as "lastSeq", s.type::text || s.year::text as season, g.title
+             g.last_seq::text as "lastSeq", s.type::text || s.year::text as season, g.title, g.stats_final_at as "statsFinalAt"
       from public.games g join public.seasons s on s.id = g.season_id
       where g.league = 'unrivaled' and g.provider_game_id = any(${gameIds.map((i) => `${i}-${suffix}`)})
       order by g.scheduled_at`;
@@ -71,6 +72,9 @@ describe('ReferenceIngester', () => {
       ['scheduled', 0, 0, 0, 'REG2025'],
       ['scheduled', 0, 0, 0, 'REG2025'],
     ]);
+    // A schedule poll carries no stats, so a closed-0-0 row created by one is never marked
+    // stats-final: that mark waits for a watcher's own closing document.
+    expect(rows.map((r) => r.statsFinalAt)).toEqual([null, null, null]);
     // same document again: nothing new
     const again = await ingester('unrivaled').process(
       'schedule',
@@ -230,12 +234,9 @@ describe('ReferenceIngester', () => {
   });
 
   it('seasonal statistics and league leaders write season lines once; re-applying writes none', async () => {
-    const suffix = randomUUID();
-    const seasonal = suffixed(
-      fixture('docs-seasonal-stats-6e0c5edc.json', 'ncaawb'),
-      ['cf5dcb91-e9ec-4993-ba42-5d632306b4c8'],
-      suffix,
-    );
+    // Season ids are never suffixed: (league, year, type) is unique and a second provider id for
+    // the same season is a clash that ensureSeason refuses to link (identity-merge.test.ts).
+    const seasonal = fixture('docs-seasonal-stats-6e0c5edc.json', 'ncaawb');
     const a = await ingester('ncaawb').process('seasonal_stats', seasonal, T0);
     expect(a).toMatchObject({ teams: 1, players: 1 });
     expect(a.seasonLines).toBeLessThanOrEqual(1); // 0 when a previous run of this suite already wrote it
@@ -244,11 +245,7 @@ describe('ReferenceIngester', () => {
     const [line] = await db<{ n: number }[]>`
       select count(*)::int as n from public.v_player_seasons where league = 'ncaawb' and season_year = 2023 and season_type = 'REG'`;
     expect(line?.n).toBeGreaterThanOrEqual(1);
-    const leaders = suffixed(
-      fixture('2026-REG-league-leaders.json', 'unrivaled'),
-      ['e8440860-998c-42ca-902d-461e588de916'],
-      suffix,
-    );
+    const leaders = fixture('2026-REG-league-leaders.json', 'unrivaled');
     const c = await ingester('unrivaled').process('league_leaders', leaders, T0);
     expect(c.players).toBe(45);
     expect(c.seasonLines).toBeLessThanOrEqual(45);

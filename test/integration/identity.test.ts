@@ -119,8 +119,9 @@ describe('identity: canonical players and cross-league external ids', () => {
     expect(w.mergedFrom).toEqual([]);
     expect(w.seasonLines).toBe(4);
     const u = await applyPlayerProfile(db, 'unrivaled', unrivaled, silentLog);
-    expect(u.mergedFrom).toHaveLength(1);
-    expect(u.playerId).toBe(w.playerId); // the older row survives
+    // Every reference already resolves to the WNBA row: no second row is created, nothing merges.
+    expect(u.mergedFrom).toEqual([]);
+    expect(u.playerId).toBe(w.playerId);
     const snap = await snapshotOf(u.playerId);
     expect(snap.mergedInto).toBeNull();
     expect([...snap.externalIds].sort()).toEqual([
@@ -132,15 +133,9 @@ describe('identity: canonical players and cross-league external ids', () => {
       `wnba:wnba-${suffix}:league_profile:profile`,
     ]);
     expect(snap.lines).toBe(5); // 4 WNBA + 1 Unrivaled
-    // every provider id resolves to the survivor, including through the tombstone
+    // every provider id resolves to the one row
     expect(await playerIdFor(db, 'unrivaled', `unr-${suffix}`)).toBe(u.playerId);
     expect(await playerIdFor(db, 'ncaawb', `ncaaw-${suffix}`)).toBe(u.playerId);
-    for (const loser of u.mergedFrom) expect(await resolveCanonical(db, loser)).toBe(u.playerId);
-    // the merged row is a tombstone that owns nothing
-    const [tomb] = await db<{ ids: number; lines: number }[]>`
-      select (select count(*)::int from public.player_external_ids where player_id = ${u.mergedFrom[0] ?? ''}) as ids,
-             (select count(*)::int from public.player_season_stats where player_id = ${u.mergedFrom[0] ?? ''}) as lines`;
-    expect(tomb).toEqual({ ids: 0, lines: 0 });
 
     // idempotent: re-applying both profiles creates no players, ids or lines
     const before = await db<{ players: number; ids: number; lines: number }[]>`
@@ -174,7 +169,7 @@ describe('identity: canonical players and cross-league external ids', () => {
     expect(snap.lines).toBe(5);
   });
 
-  it('a player with ids in two leagues but no Unrivaled profile is merged through any profile that references the other league', async () => {
+  it('the first profile for a player already known from another league adopts that row: no junk row, no merge', async () => {
     const suffix = randomUUID();
     const { wnba } = bostonPair(suffix);
     // A game feed named the NCAAW id first (no profile ever seen for that league).
@@ -189,16 +184,50 @@ describe('identity: canonical players and cross-league external ids', () => {
         position: null,
       },
     ]);
+    const [before] = await db<{ players: number }[]>`
+      select count(*)::int as players from public.players`;
     const w = await applyPlayerProfile(db, 'wnba', wnba, silentLog);
-    // The game-sourced row is older, so it survives and the WNBA profile's fresh row is the tombstone.
+    // The reference resolves before anything is written: the profile lands on the game-sourced row.
     expect(w.playerId).toBe(fromGame.get(`ncaaw-${suffix}`));
-    expect(w.mergedFrom).toHaveLength(1);
-    expect(w.mergedFrom[0]).not.toBe(w.playerId);
+    expect(w.mergedFrom).toEqual([]);
+    const [after] = await db<{ players: number }[]>`
+      select count(*)::int as players from public.players`;
+    expect(after?.players).toBe(before?.players);
     expect(await playerIdFor(db, 'ncaawb', `ncaaw-${suffix}`)).toBe(w.playerId);
     expect(await playerIdFor(db, 'wnba', `wnba-${suffix}`)).toBe(w.playerId);
     const [p] = await db<{ fullName: string; college: string | null }[]>`
       select full_name as "fullName", college from public.players where id = ${w.playerId}`;
     expect(p).toEqual({ fullName: 'Aliyah Boston', college: 'South Carolina' }); // the profile is the authority
+  });
+
+  it('two game-sourced rows in two leagues are merged by the first profile that references both; the older row survives', async () => {
+    const suffix = randomUUID();
+    const { wnba } = bostonPair(suffix);
+    const player = (league: 'wnba' | 'ncaawb', id: string) =>
+      ensurePlayers(db, league, [
+        {
+          providerPlayerId: id,
+          providerTeamId: null,
+          fullName: 'A. Boston',
+          firstName: null,
+          lastName: null,
+          jersey: null,
+          position: null,
+        },
+      ]);
+    const older = (await player('wnba', `wnba-${suffix}`)).get(`wnba-${suffix}`);
+    const younger = (await player('ncaawb', `ncaaw-${suffix}`)).get(`ncaaw-${suffix}`);
+    const w = await applyPlayerProfile(db, 'wnba', wnba, silentLog);
+    expect(w.playerId).toBe(older);
+    expect(w.mergedFrom).toEqual([younger]);
+    expect(await resolveCanonical(db, younger ?? '')).toBe(older);
+    // the merged row is a tombstone that owns nothing
+    const [tomb] = await db<{ ids: number; lines: number; mergedInto: string | null }[]>`
+      select (select count(*)::int from public.player_external_ids where player_id = ${younger ?? ''}) as ids,
+             (select count(*)::int from public.player_season_stats where player_id = ${younger ?? ''}) as lines,
+             (select merged_into from public.players where id = ${younger ?? ''}) as "mergedInto"`;
+    expect(tomb).toEqual({ ids: 0, lines: 0, mergedInto: older });
+    expect((await snapshotOf(w.playerId)).lines).toBe(4);
   });
 });
 
@@ -206,8 +235,27 @@ describe('GET /v1/players/:id', () => {
   it('returns the canonical player with all three league ids and per-league season lines, by uuid or by league:providerId, and resolves a merged id', async () => {
     const suffix = randomUUID();
     const { wnba, unrivaled } = bostonPair(suffix);
+    // Game feeds named the NCAAW id and then the WNBA id before any profile: the WNBA profile
+    // resolves both rows and merges them (the older NCAAW row survives, the WNBA row is the
+    // tombstone the route must resolve).
+    const player = (league: 'wnba' | 'ncaawb', id: string) =>
+      ensurePlayers(db, league, [
+        {
+          providerPlayerId: id,
+          providerTeamId: null,
+          fullName: 'A. Boston',
+          firstName: null,
+          lastName: null,
+          jersey: null,
+          position: null,
+        },
+      ]);
+    const fromNcaaw = (await player('ncaawb', `ncaaw-${suffix}`)).get(`ncaaw-${suffix}`);
+    const fromWnba = (await player('wnba', `wnba-${suffix}`)).get(`wnba-${suffix}`);
     const w = await applyPlayerProfile(db, 'wnba', wnba, silentLog);
+    expect(w).toMatchObject({ playerId: fromNcaaw, mergedFrom: [fromWnba] });
     const u = await applyPlayerProfile(db, 'unrivaled', unrivaled, silentLog);
+    expect(u).toMatchObject({ playerId: fromNcaaw, mergedFrom: [] });
     const byUuid = await app.request(`/v1/players/${u.playerId}`);
     expect(byUuid.status).toBe(200);
     const body = PlayerResponseSchema.parse(await byUuid.json());
@@ -221,7 +269,7 @@ describe('GET /v1/players/:id', () => {
       new Set(['wnba', 'ncaawb', 'unrivaled']),
     );
     expect(body.externalIds.map((e) => e.externalId)).toContain(`ncaaw-${suffix}`);
-    expect(body.mergedIds).toEqual(u.mergedFrom);
+    expect(body.mergedIds).toEqual([fromWnba]);
     expect(new Set(body.seasons.map((s) => s.league))).toEqual(new Set(['wnba', 'unrivaled']));
     expect(body.seasons.find((s) => s.league === 'unrivaled')).toMatchObject({
       seasonYear: 2026,
@@ -241,7 +289,7 @@ describe('GET /v1/players/:id', () => {
       expect(PlayerResponseSchema.parse(await res.json()).player.id).toBe(u.playerId);
     }
     // the tombstoned uuid resolves to the survivor
-    const merged = await app.request(`/v1/players/${w.mergedFrom[0] ?? u.mergedFrom[0]}`);
+    const merged = await app.request(`/v1/players/${fromWnba}`);
     expect(merged.status).toBe(200);
     expect(PlayerResponseSchema.parse(await merged.json()).player.id).toBe(u.playerId);
     expect((await app.request('/v1/players/nope')).status).toBe(400);
