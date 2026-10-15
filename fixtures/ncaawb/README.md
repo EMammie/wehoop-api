@@ -21,7 +21,8 @@ the raw recording pretty-printed.
 | `sim-d9b71fe0-pbp-q1.json` | pbp | Q1 in progress, 30 events | normalizer, mutated-fixture schema test, coverage tests |
 | `sim-d9b71fe0-summary-q1.json` | game summary | Q1 (team + player statistics) | `stats_player`, coverage tests |
 | `sim-d9b71fe0-boxscore-q1.json` | boxscore | Q1 | line score |
-| `sim-d9b71fe0-pbp-closed.json` | pbp | final, `status=closed` | full-document replay |
+| `sim-d9b71fe0-pbp-halftime.json` | pbp | halftime, 143 events, 28-55 | freshness (halftime -> Q3) |
+| `sim-d9b71fe0-pbp-closed.json` | pbp | final, `status=closed`, 306 events, Northwestern 68 at Michigan State 104, no `deleted_events` | full-document replay |
 | `sim-d9b71fe0-summary-closed.json` | game summary | final | final team + player stats |
 | `sim-d9b71fe0-boxscore-closed.json` | boxscore | final | "final score matches recording boxscore" |
 
@@ -37,7 +38,7 @@ Replay: `pnpm dev:worker --mode sim --league ncaawb --replay-file fixtures/ncaaw
 
 | File | Source | Documents | sha256 |
 |---|---|---|---|
-| `sim-d9b71fe0-replay.compact.jsonl.gz` | see below | see below | see below |
+| `sim-d9b71fe0-replay.compact.jsonl.gz` | `pnpm sim record` + `pnpm sim compact` as above (recorded 2026-10-14/15, session at natural pace, 3,047 raw documents: 2,537 pbp / 255 summary / 255 boxscore, 455,957,681 bytes raw) | 138 documents (64 pbp, 37 summary, 37 boxscore), 1,176,200 bytes | sha256: 6a9872607adf1478a50c7b404fca066a000f9ec5bef8eb381159d5ab5469d8c0 |
 
 ## Docs samples (`docs-*`)
 
