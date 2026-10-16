@@ -501,8 +501,9 @@ interface HeldDocument {
 /**
  * Record a reference identity.ts refuses to act on, with the document that
  * carried it. Re-applying the document never duplicates an open hold: the one
- * open row keeps its candidates and detail and only its stored body (and
- * `document_updated_at`) is refreshed.
+ * open row is refreshed with the stored body, the candidates, detail and run
+ * as computed now (stored identity may have moved since the first write; a
+ * resolution must see the current parties), and `document_updated_at`.
  */
 async function holdReference(
   tx: TransactionSql,
@@ -517,7 +518,10 @@ async function holdReference(
              ${trigger.runId}, ${tx.json(trigger.document as never)}, ${trigger.documentObservedAt}, now())
            on conflict (league, trigger_feed, trigger_document_id, trigger_reference, reason)
              where status = 'open' do update
-             set document = excluded.document,
+             set candidate_ids = excluded.candidate_ids,
+                 detail = excluded.detail,
+                 run_id = excluded.run_id,
+                 document = excluded.document,
                  document_observed_at = excluded.document_observed_at,
                  document_updated_at = now(),
                  updated_at = now()`;

@@ -152,13 +152,15 @@ interface HeldDocumentRow {
   documentObservedAt: Date | null;
   /** epoch seconds with microseconds, so two writes a few ms apart compare strictly */
   documentUpdatedAt: number | null;
+  runId: number | null;
 }
 /** The preserved document on every hold of one trigger document (plan §2 rev 4.5). */
 async function heldDocuments(documentId: string): Promise<HeldDocumentRow[]> {
   return db<HeldDocumentRow[]>`
     select id, reason, status, candidate_ids as "candidateIds", detail, document,
            document_observed_at as "documentObservedAt",
-           extract(epoch from document_updated_at)::float8 as "documentUpdatedAt"
+           extract(epoch from document_updated_at)::float8 as "documentUpdatedAt",
+           run_id::int as "runId"
     from ingest.player_merge_holds where trigger_document_id = ${documentId} order by reason, trigger_reference`;
 }
 
@@ -994,8 +996,11 @@ describe('conflicting profiles are held with their evidence and change nothing',
     expect(h0.documentUpdatedAt).toBeTruthy();
     expect(await seasonFootprint(`season-${suffix}`, `team-${suffix}`)).toEqual(NO_FOOTPRINT);
 
-    // Replay from the stored body only: same outcome, same hold row, refreshed body timestamp.
-    const replay = await replayHeldDocument(db, h0.id, silentLog);
+    expect(h0.runId).toBeNull();
+
+    // Replay from the stored body only: same outcome, same hold row, refreshed body timestamp;
+    // the run the replay is attributed to (the refreshed hold follows the replay option).
+    const replay = await replayHeldDocument(db, h0.id, silentLog, { runId: run.id });
     expect(replay).toEqual(first);
     const after = await heldDocuments(u);
     expect(after).toHaveLength(1);
@@ -1008,6 +1013,10 @@ describe('conflicting profiles are held with their evidence and change nothing',
     expect(h1.document).toEqual(h0.document);
     expect(h1.documentObservedAt?.toISOString()).toBe(T0.toISOString());
     expect(h1.documentUpdatedAt ?? 0).toBeGreaterThan(h0.documentUpdatedAt ?? 0);
+    expect(h1.runId).toBe(run.id);
+    // A replay without a run option keeps the hold's own run.
+    expect((await replayHeldDocument(db, h0.id, silentLog)).playerId).toBeNull();
+    expect((await heldDocuments(u))[0]?.runId).toBe(run.id);
     // Identities, claims, attributes, seasons and game-stat fingerprints: unchanged throughout.
     expect(await identityFingerprint([rowP, rowN])).toEqual(idBefore);
     expect(await gameFingerprint(gameId)).toEqual(gameBefore);
