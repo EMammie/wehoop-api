@@ -1,6 +1,6 @@
 # Current milestone
 
-**M2 — Three leagues + identity** on branch `m2-three-leagues` (M1 merged as PR #3 and tagged `m1`; plan is rev 4.3).
+**M2 — Three leagues + identity** on branch `m2-three-leagues` (M1 merged as PR #3 and tagged `m1`; plan is rev 4.5).
 
 Scope (from `docs/PLAN.md` §7): NCAAWB + Unrivaled adapters, schedule/boxscore/standings/hierarchy/profile/seasonal-stats/tournament schemas, `identity.ts`, `player_season_stats`, `tournaments` + OOT, PostgREST views (`security_invoker`), `/v1/players/:id`, Elam, coverage.
 

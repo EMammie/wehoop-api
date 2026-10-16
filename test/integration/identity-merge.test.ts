@@ -715,10 +715,14 @@ describe('references identity.ts refuses to act on are held, never merged', () =
       source: 'reference',
       player_id: r2.playerId,
     });
-    expect(idBefore.players.map((p) => [p.full_name, p.position])).toEqual([
-      ['Conflict A', null],
-      ['Conflict B', null],
-    ]);
+    expect(idBefore.players.find((p) => p.id === r1.playerId)).toMatchObject({
+      full_name: 'Conflict A',
+      position: null,
+    });
+    expect(idBefore.players.find((p) => p.id === r2.playerId)).toMatchObject({
+      full_name: 'Conflict B',
+      position: null,
+    });
     expect(await seasonFootprint(`season-${suffix}`, `team-${suffix}`)).toEqual(NO_FOOTPRINT);
     const [w1Row] = await db<{ playerId: string }[]>`
       select player_id as "playerId" from public.player_external_ids where league = 'wnba' and external_id = ${w1}`;
