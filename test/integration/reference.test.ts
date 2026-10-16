@@ -238,6 +238,55 @@ describe('ReferenceIngester', () => {
     expect(liberty?.venue?.name).toBeTruthy();
   });
 
+  it('player profile: a document whose references contradict each other is held, skipped, and preserved with the observation time the ingester tracked', async () => {
+    const suffix = randomUUID();
+    const w1 = `w1-${suffix}`;
+    const w2 = `w2-${suffix}`;
+    const n = `n-${suffix}`;
+    await ingester('wnba').process('player_profile', { id: w1, full_name: 'Ref A' }, T0);
+    await ingester('wnba').process(
+      'player_profile',
+      {
+        id: w2,
+        full_name: 'Ref B',
+        references: [{ source_id: n, scope: 'NCAAW', id_type: 'league_profile' }],
+      },
+      T0,
+    );
+    const seen = new Date(T0.getTime() + 90_000);
+    const out = await ingester('ncaawb').process(
+      'player_profile',
+      {
+        id: n,
+        full_name: 'Ref C',
+        references: [{ source_id: w1, scope: 'WNBA', id_type: 'league_profile' }],
+      },
+      seen,
+    );
+    expect(out.held).toBe(1);
+    expect(out.merged).toBe(0);
+    expect(out.seasonLines).toBe(0);
+    const holds = await db<
+      {
+        reason: string;
+        status: string;
+        document: { id: string; full_name: string };
+        observed: Date;
+      }[]
+    >`
+      select reason, status, document, document_observed_at as observed
+      from ingest.player_merge_holds where trigger_document_id = ${n}`;
+    expect(holds).toHaveLength(1);
+    expect(holds[0]).toMatchObject({ reason: 'conflicting_profiles', status: 'open' });
+    expect(holds[0]?.document).toMatchObject({ id: n, full_name: 'Ref C' });
+    expect(holds[0]?.observed.toISOString()).toBe(seen.toISOString());
+    const [name] = await db<{ fullName: string }[]>`
+      select p.full_name as "fullName" from public.players p
+      join public.player_external_ids e on e.player_id = p.id
+      where e.league = 'ncaawb' and e.external_id = ${n}`;
+    expect(name?.fullName).toBe('Ref B'); // the document landed nowhere
+  });
+
   it('seasonal statistics and league leaders write season lines once; re-applying writes none', async () => {
     // Season ids are never suffixed: (league, year, type) is unique and a second provider id for
     // the same season is a clash that ensureSeason refuses to link (identity-merge.test.ts).

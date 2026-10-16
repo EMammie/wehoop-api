@@ -132,7 +132,7 @@ export class ReferenceIngester {
         await this.hierarchy(body, out);
         break;
       case 'player_profile':
-        await this.playerProfile(body, out);
+        await this.playerProfile(body, observedAt, out);
         break;
       case 'seasonal_stats':
         await this.seasonalStats(body, out);
@@ -389,11 +389,12 @@ export class ReferenceIngester {
     out.teams += (await ensureTeams(this.deps.db, this.deps.league, teams)).size;
   }
 
-  private async playerProfile(body: unknown, out: ReferenceOutcome) {
+  private async playerProfile(body: unknown, observedAt: Date, out: ReferenceOutcome) {
     const doc = PlayerProfileDocumentSchema.parse(body);
     const run = await this.runHandle();
     const result = await applyPlayerProfile(this.deps.db, this.deps.league, doc, this.deps.log, {
       runId: run.id,
+      observedAt,
     });
     out.players++;
     out.merged += result.mergedFrom.length;

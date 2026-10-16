@@ -318,6 +318,11 @@ where h.status = 'open'
   and (select coalesce(merged_into, id) from public.players where id = h.candidate_ids[1])
       = (select coalesce(merged_into, id) from public.players where id = h.candidate_ids[2]);
 
+-- check: open_holds_preserve_their_document | expect: 0
+select count(*)
+from ingest.player_merge_holds
+where status = 'open' and document is null;
+
 -- check: merge_tables_closed_to_clients | expect: 0
 select (has_table_privilege('anon', 'ingest.player_merges', 'SELECT')::int
       + has_table_privilege('anon', 'ingest.player_merge_holds', 'SELECT')::int

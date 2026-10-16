@@ -9,6 +9,7 @@ import {
   ensurePlayerTeamSeason,
   ensureSeason,
   ensureTeams,
+  replayHeldDocument,
   resolveCanonical,
 } from '../../src/ingest/identity.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
@@ -140,6 +141,59 @@ async function holdsFor(documentId: string): Promise<HoldRow[]> {
            trigger_reference as "triggerReference", candidate_ids as "candidateIds", status
     from ingest.player_merge_holds where trigger_document_id = ${documentId} order by reason`;
 }
+
+interface HeldDocumentRow {
+  id: string;
+  reason: string;
+  status: string;
+  candidateIds: string[];
+  detail: Record<string, unknown> | null;
+  document: Record<string, unknown> | null;
+  documentObservedAt: Date | null;
+  /** epoch seconds with microseconds, so two writes a few ms apart compare strictly */
+  documentUpdatedAt: number | null;
+}
+/** The preserved document on every hold of one trigger document (plan §2 rev 4.5). */
+async function heldDocuments(documentId: string): Promise<HeldDocumentRow[]> {
+  return db<HeldDocumentRow[]>`
+    select id, reason, status, candidate_ids as "candidateIds", detail, document,
+           document_observed_at as "documentObservedAt",
+           extract(epoch from document_updated_at)::float8 as "documentUpdatedAt"
+    from ingest.player_merge_holds where trigger_document_id = ${documentId} order by reason`;
+}
+
+/** What a skipped document's seasons[] must not have created: the season, its team, the roster row. */
+async function seasonFootprint(providerSeasonId: string, providerTeamId: string) {
+  const [row] = await db<{ seasons: number; teams: number; teamSeasons: number }[]>`
+    select (select count(*)::int from public.seasons where provider_season_id = ${providerSeasonId}) as seasons,
+           (select count(*)::int from public.teams where provider_team_id = ${providerTeamId}) as teams,
+           (select count(*)::int from public.player_team_seasons pts
+              join public.seasons s on s.id = pts.season_id
+             where s.provider_season_id = ${providerSeasonId}) as "teamSeasons"`;
+  return row;
+}
+const NO_FOOTPRINT = { seasons: 0, teams: 0, teamSeasons: 0 };
+
+/** A document whose own attributes and season differ from everything stored, so a landing would show. */
+const contradictingProfile = (
+  id: string,
+  suffix: string,
+  references: Array<{ source_id: string; scope: string; id_type: string }>,
+) =>
+  PlayerProfileDocumentSchema.parse({
+    id,
+    full_name: 'Someone Else',
+    position: 'C',
+    references,
+    seasons: [
+      {
+        id: `season-${suffix}`,
+        year: 2997,
+        type: 'REG',
+        teams: [{ id: `team-${suffix}`, name: 'Held Team' }],
+      },
+    ],
+  });
 
 /**
  * Everything a conflicting profile must leave untouched, for a set of canonical rows: the player
@@ -598,7 +652,7 @@ describe('references identity.ts refuses to act on are held, never merged', () =
     expect(await holdsFor(docId)).toHaveLength(2);
   });
 
-  it('conflicting profiles: a reference to a row that already carries another provider profile of the same league is held, nothing merges', async () => {
+  it('conflicting profiles: a reference to a row that already carries another provider profile of the same league is held, nothing merges, and the whole document is skipped (no id upgrade, no attributes, no seasons); the hold keeps the document', async () => {
     const suffix = randomUUID();
     const w1 = `w1-${suffix}`;
     const w2 = `w2-${suffix}`;
@@ -612,24 +666,60 @@ describe('references identity.ts refuses to act on are held, never merged', () =
       silentLog,
     );
     expect(r1.playerId).not.toBe(r2.playerId);
-    // The NCAAW profile N claims WNBA W1: the provider now says one person has WNBA profiles W1 and W2.
+    const rows = [r1.playerId ?? '', r2.playerId ?? ''];
+    const idBefore = await identityFingerprint(rows);
+    // The NCAAW profile N claims WNBA W1: the provider now says one person has WNBA profiles W1
+    // and W2. N's own id resolves to W2's row (linked by W2's reference), so that row is the home
+    // row and W1's row the contradicting candidate. The document also carries its own name,
+    // position and a season: with no evidence for either row, none of it may land anywhere.
     const ref = { source_id: w1, scope: 'WNBA', id_type: 'league_profile' };
-    const r3 = await applyPlayerProfile(db, 'ncaawb', profile(n, 'Conflict B', [ref]), silentLog);
-    expect(r3.playerId).toBe(r2.playerId); // lands on the row its own id resolves to
-    expect(r3.mergedFrom).toEqual([]);
-    expect(r3.held).toHaveLength(1);
-    expect(r3.held[0]).toMatchObject({
-      reason: 'conflicting_profiles',
-      reference: ref,
-      candidateIds: [r2.playerId, r1.playerId],
+    const nDoc = contradictingProfile(n, suffix, [ref]);
+    const r3 = await applyPlayerProfile(db, 'ncaawb', nDoc, silentLog, { observedAt: T0 });
+    expect(r3).toEqual({
+      playerId: null,
+      mergedFrom: [],
+      merges: [],
+      held: [
+        {
+          reason: 'conflicting_profiles',
+          reference: ref,
+          candidateIds: [r2.playerId, r1.playerId],
+          detail: { conflicts: [{ league: 'wnba', idType: 'league_profile', externalId: w1 }] },
+        },
+      ],
+      externalIds: [],
+      seasonLines: 0,
     });
-    expect(await holdsFor(n)).toMatchObject([
-      { reason: 'conflicting_profiles', triggerReference: ref, status: 'open' },
+    expect(await holdsFor(n)).toEqual([
+      {
+        reason: 'conflicting_profiles',
+        triggerFeed: 'player_profile',
+        triggerDocumentId: n,
+        triggerReference: ref,
+        candidateIds: [r2.playerId, r1.playerId],
+        status: 'open',
+      },
     ]);
-    // both rows are still canonical and keep their ids
-    const canon = await db<{ id: string; mergedInto: string | null }[]>`
-      select id, merged_into as "mergedInto" from public.players where id in (${r1.playerId ?? ''}, ${r2.playerId ?? ''})`;
-    expect(canon.every((c) => c.mergedInto === null)).toBe(true);
+    // The hold preserves the parsed document and the observation time the ingester tracked.
+    const [held] = await heldDocuments(n);
+    expect(held?.document).toEqual(JSON.parse(JSON.stringify(nDoc)));
+    expect(held?.documentObservedAt?.toISOString()).toBe(T0.toISOString());
+    expect(held?.documentUpdatedAt).toBeTruthy();
+    // Nothing else was written: both rows canonical with the same claims and attributes, N's id
+    // still the reference W2 linked (not upgraded to profile-owned), no season, team or roster row.
+    expect(await identityFingerprint(rows)).toEqual(idBefore);
+    expect(idBefore.externalIds).toContainEqual({
+      league: 'ncaawb',
+      external_id: n,
+      id_type: 'league_profile',
+      source: 'reference',
+      player_id: r2.playerId,
+    });
+    expect(idBefore.players.map((p) => [p.full_name, p.position])).toEqual([
+      ['Conflict A', null],
+      ['Conflict B', null],
+    ]);
+    expect(await seasonFootprint(`season-${suffix}`, `team-${suffix}`)).toEqual(NO_FOOTPRINT);
     const [w1Row] = await db<{ playerId: string }[]>`
       select player_id as "playerId" from public.player_external_ids where league = 'wnba' and external_id = ${w1}`;
     expect(w1Row?.playerId).toBe(r1.playerId);
@@ -743,23 +833,28 @@ describe('conflicting profiles are held with their evidence and change nothing',
     expect(gameBefore.lines.find((l) => l.providerPlayerId === P)?.playerId).toBe(rowP);
 
     // An Unrivaled profile says P and N are one person: that person would own S1 and S2, the
-    // provider contradicting itself across two leagues' id spaces.
+    // provider contradicting itself across two leagues' id spaces. It carries its own name,
+    // position and a season too: nothing may land on P's row (the oldest candidate) by tie-break.
     const refP = { source_id: P, scope: 'WNBA', id_type: 'league_profile' };
     const refN = { source_id: n, scope: 'NCAAW', id_type: 'league_profile' };
     const u = `u-${suffix}`;
-    const unr = profile(u, line.fullName, [refP, refN]);
+    const unr = contradictingProfile(u, suffix, [refP, refN]);
     const res = await applyPlayerProfile(db, 'unrivaled', unr, silentLog);
-    expect(res.playerId).toBe(rowP); // the oldest row a reference resolves to, no contradiction there
-    expect(res.mergedFrom).toEqual([]);
-    expect(res.merges).toEqual([]);
-    expect(res.held).toEqual([
-      {
-        reason: 'conflicting_profiles',
-        reference: refN,
-        candidateIds: [rowP, rowN],
-        detail: { conflicts: [{ league: 'ncaawb', idType: 'sport_profile', externalId: s2 }] },
-      },
-    ]);
+    expect(res).toEqual({
+      playerId: null,
+      mergedFrom: [],
+      merges: [],
+      held: [
+        {
+          reason: 'conflicting_profiles',
+          reference: refN,
+          candidateIds: [rowP, rowN],
+          detail: { conflicts: [{ league: 'ncaawb', idType: 'sport_profile', externalId: s2 }] },
+        },
+      ],
+      externalIds: [],
+      seasonLines: 0,
+    });
     // The hold carries its evidence: feed, document, the references[] entry, both candidates.
     expect(await holdsFor(u)).toEqual([
       {
@@ -771,20 +866,17 @@ describe('conflicting profiles are held with their evidence and change nothing',
         status: 'open',
       },
     ]);
-    // Identities, existing claims and attributes are exactly as before; the only new row is the
-    // Unrivaled document's own id, linked to the row it could claim without contradiction.
-    const idAfter = await identityFingerprint([rowP, rowN]);
-    expect(idAfter.players).toEqual(idBefore.players);
-    expect(idAfter.merges).toEqual(idBefore.merges);
-    expect(idAfter.externalIds).toHaveLength(idBefore.externalIds.length + 1);
-    expect(idAfter.externalIds).toEqual(expect.arrayContaining(idBefore.externalIds));
-    expect(idAfter.externalIds).toContainEqual({
-      league: 'unrivaled',
-      external_id: u,
-      id_type: 'league_profile',
-      source: 'profile',
-      player_id: rowP,
+    // Identities, existing claims and attributes are exactly as before; the Unrivaled document's
+    // own id was linked nowhere, its name and position landed nowhere, its season created nothing.
+    expect(await identityFingerprint([rowP, rowN])).toEqual(idBefore);
+    const [uRow] = await db<{ n: number }[]>`
+      select count(*)::int as n from public.player_external_ids where external_id = ${u}`;
+    expect(uRow?.n).toBe(0);
+    expect(idBefore.players.find((p) => p.id === rowP)).toMatchObject({
+      full_name: line.fullName,
+      position: null,
     });
+    expect(await seasonFootprint(`season-${suffix}`, `team-${suffix}`)).toEqual(NO_FOOTPRINT);
     expect(await resolveCanonical(db, rowN)).toBe(rowN);
     expect(await mergeRowFor(rowN)).toBeUndefined();
     expect(await mergeRowFor(rowP)).toBeUndefined();
@@ -797,12 +889,108 @@ describe('conflicting profiles are held with their evidence and change nothing',
 
     // Replaying the contradicting document: still one open hold, still nothing changed.
     const again = await applyPlayerProfile(db, 'unrivaled', unr, silentLog);
-    expect(again.playerId).toBe(rowP);
+    expect(again.playerId).toBeNull();
     expect(again.mergedFrom).toEqual([]);
     expect(again.held).toHaveLength(1);
     expect(await holdsFor(u)).toHaveLength(1);
-    expect(await identityFingerprint([rowP, rowN])).toEqual(idAfter);
+    expect(await identityFingerprint([rowP, rowN])).toEqual(idBefore);
     expect(await gameFingerprint(gameId)).toEqual(gameBefore);
+    expect(await seasonFootprint(`season-${suffix}`, `team-${suffix}`)).toEqual(NO_FOOTPRINT);
+  });
+
+  it('a held document is replayable from player_merge_holds.document alone: the replay reproduces the identical single open hold (same candidates and detail, body and document_updated_at refreshed) and changes nothing; a corrupted stored body is rejected by the schema', async () => {
+    const suffix = randomUUID();
+    const docs = suffixedDocs(suffix);
+    const line = attributedLines(docs)[0];
+    if (!line) throw new Error('fixture has no player with both an event and a stats line');
+    const P = line.providerPlayerId;
+    const { gameId } = await seedGame(db, docs.pbp);
+    const run = await replayRun(db, gameId);
+    expect((await apply(deps, gameId, docs.pbp, observation(run, docs.pbp, T0))).outcome).toBe(
+      'applied',
+    );
+    expect(
+      (await apply(deps, gameId, docs.sum, observation(run, docs.sum, later(5)))).outcome,
+    ).toBe('applied');
+    const s1 = `s1-${suffix}`;
+    const s2 = `s2-${suffix}`;
+    const n = `n-${suffix}`;
+    const rowP =
+      (
+        await applyPlayerProfile(
+          db,
+          'wnba',
+          profile(P, line.fullName, [{ source_id: s1, scope: 'WNBA', id_type: 'sport_profile' }]),
+          silentLog,
+        )
+      ).playerId ?? '';
+    const rowN =
+      (
+        await applyPlayerProfile(
+          db,
+          'ncaawb',
+          profile(n, 'Sport Other', [{ source_id: s2, scope: 'NCAAW', id_type: 'sport_profile' }]),
+          silentLog,
+        )
+      ).playerId ?? '';
+    expect(rowP && rowN && rowP !== rowN).toBe(true);
+    const idBefore = await identityFingerprint([rowP, rowN]);
+    const gameBefore = await gameFingerprint(gameId);
+
+    // Held and skipped, as the ingester would do it (observedAt is the fetch time it tracked).
+    const refP = { source_id: P, scope: 'WNBA', id_type: 'league_profile' };
+    const refN = { source_id: n, scope: 'NCAAW', id_type: 'league_profile' };
+    const u = `u-${suffix}`;
+    const unr = contradictingProfile(u, suffix, [refP, refN]);
+    const first = await applyPlayerProfile(db, 'unrivaled', unr, silentLog, { observedAt: T0 });
+    expect(first.playerId).toBeNull();
+    expect(first.held).toHaveLength(1);
+    const before = await heldDocuments(u);
+    expect(before).toHaveLength(1);
+    const h0 = before[0];
+    if (!h0) throw new Error('unreachable');
+    expect(h0).toMatchObject({
+      reason: 'conflicting_profiles',
+      status: 'open',
+      candidateIds: [rowP, rowN],
+      detail: { conflicts: [{ league: 'ncaawb', idType: 'sport_profile', externalId: s2 }] },
+    });
+    expect(h0.document).toEqual(JSON.parse(JSON.stringify(unr)));
+    expect(h0.documentObservedAt?.toISOString()).toBe(T0.toISOString());
+    expect(h0.documentUpdatedAt).toBeTruthy();
+    expect(await seasonFootprint(`season-${suffix}`, `team-${suffix}`)).toEqual(NO_FOOTPRINT);
+
+    // Replay from the stored body only: same outcome, same hold row, refreshed body timestamp.
+    const replay = await replayHeldDocument(db, h0.id, silentLog);
+    expect(replay).toEqual(first);
+    const after = await heldDocuments(u);
+    expect(after).toHaveLength(1);
+    const h1 = after[0];
+    if (!h1) throw new Error('unreachable');
+    expect(h1.id).toBe(h0.id);
+    expect(h1.status).toBe('open');
+    expect(h1.candidateIds).toEqual(h0.candidateIds);
+    expect(h1.detail).toEqual(h0.detail);
+    expect(h1.document).toEqual(h0.document);
+    expect(h1.documentObservedAt?.toISOString()).toBe(T0.toISOString());
+    expect(h1.documentUpdatedAt ?? 0).toBeGreaterThan(h0.documentUpdatedAt ?? 0);
+    // Identities, claims, attributes, seasons and game-stat fingerprints: unchanged throughout.
+    expect(await identityFingerprint([rowP, rowN])).toEqual(idBefore);
+    expect(await gameFingerprint(gameId)).toEqual(gameBefore);
+    expect(await seasonFootprint(`season-${suffix}`, `team-${suffix}`)).toEqual(NO_FOOTPRINT);
+    const [uRow] = await db<{ n: number }[]>`
+      select count(*)::int as n from public.player_external_ids where external_id = ${u}`;
+    expect(uRow?.n).toBe(0);
+
+    // The stored body is a provider payload at rest: it crosses the Zod boundary again on replay.
+    await db`update ingest.player_merge_holds set document = '{"id": 1}'::jsonb where id = ${h0.id}`;
+    try {
+      await expect(replayHeldDocument(db, h0.id, silentLog)).rejects.toThrow();
+    } finally {
+      await db`update ingest.player_merge_holds set document = ${db.json(h0.document as never)} where id = ${h0.id}`;
+    }
+    expect(await identityFingerprint([rowP, rowN])).toEqual(idBefore);
+    expect((await heldDocuments(u))[0]?.document).toEqual(h0.document);
   });
 
   it('own-id path: a third league merged two game-sourced ids of one league; the first profile upgrades its id, the second is held and writes nothing (no attributes, no seasons), game state unchanged, replay adds nothing', async () => {

@@ -2,7 +2,10 @@ import type { TransactionSql } from 'postgres';
 import type { Db } from '../db/client.js';
 import type { LeagueCode } from '../leagues/codes.js';
 import type { Logger } from '../logger.js';
-import type { PlayerProfileDocument } from '../providers/sportradar/schemas/profile.js';
+import {
+  type PlayerProfileDocument,
+  PlayerProfileDocumentSchema,
+} from '../providers/sportradar/schemas/profile.js';
 import {
   applyPlayerSeasonStats,
   type MergeConflict,
@@ -32,10 +35,16 @@ import type { DocumentPlayer } from './types.js';
  * it and the full content of any loser row that had to be dropped. Only
  * references in a known league scope with a supported id type are linked
  * automatically; anything ambiguous (unknown scope or type, an id stored under
- * another type, an id owned by a tombstone, two provider profiles of one
- * league ending up on one person) is HELD in ingest.player_merge_holds and
- * never merged. Canonical uuids never enter change bodies or content hashes,
- * so a merge never rewrites history. Re-applying the same profile is a no-op.
+ * another type, an id owned by a tombstone) is HELD in
+ * ingest.player_merge_holds and never linked. Rows that would give one person
+ * two provider profiles of one league or two sport-wide ids are a
+ * contradiction in the provider's data: held as `conflicting_profiles`, and
+ * the whole document is SKIPPED (nothing but the hold is written) rather than
+ * landed on a guessed row. Every hold keeps the document that carried it
+ * (`document`, `document_observed_at`) so it can be replayed through the same
+ * path (replayHeldDocument) without a provider refetch. Canonical uuids never
+ * enter change bodies or content hashes, so a merge never rewrites history.
+ * Re-applying the same profile is a no-op.
  *
  * None of this is live-game state: nothing here writes games, play_events,
  * game_changes, game_periods or the stats tables; the merge repoint of those
@@ -481,20 +490,37 @@ export interface Hold {
   detail?: Record<string, unknown>;
 }
 
-/** Record a reference identity.ts refuses to act on; re-applying the document never duplicates an open hold. */
+/** The document a hold preserves (plan §2 `player_merge_holds.document`), so it can be replayed without a refetch. */
+interface HeldDocument {
+  /** The Zod-parsed profile as it was applied (not the raw bytes). */
+  document: PlayerProfileDocument;
+  /** The observation time the ingester tracked for it (request time of the fetch; apply time when none was passed). */
+  documentObservedAt: Date;
+}
+
+/**
+ * Record a reference identity.ts refuses to act on, with the document that
+ * carried it. Re-applying the document never duplicates an open hold: the one
+ * open row keeps its candidates and detail and only its stored body (and
+ * `document_updated_at`) is refreshed.
+ */
 async function holdReference(
   tx: TransactionSql,
-  trigger: Omit<MergeTrigger, 'source' | 'reference'> & { documentId: string },
+  trigger: Omit<MergeTrigger, 'source' | 'reference'> & { documentId: string } & HeldDocument,
   hold: Hold,
   log?: Logger,
 ): Promise<void> {
   await tx`insert into ingest.player_merge_holds (league, trigger_feed, trigger_document_id, trigger_reference,
-             reason, candidate_ids, detail, run_id)
+             reason, candidate_ids, detail, run_id, document, document_observed_at, document_updated_at)
            values (${trigger.league}, ${trigger.feed}, ${trigger.documentId}, ${tx.json(hold.reference as never)},
              ${hold.reason}, ${hold.candidateIds}::uuid[], ${hold.detail ? tx.json(hold.detail as never) : null},
-             ${trigger.runId})
+             ${trigger.runId}, ${tx.json(trigger.document as never)}, ${trigger.documentObservedAt}, now())
            on conflict (league, trigger_feed, trigger_document_id, trigger_reference, reason)
-             where status = 'open' do nothing`;
+             where status = 'open' do update
+             set document = excluded.document,
+                 document_observed_at = excluded.document_observed_at,
+                 document_updated_at = now(),
+                 updated_at = now()`;
   log?.warn(
     { league: trigger.league, documentId: trigger.documentId, ...hold, metric: 'merge_held' },
     'identity reference held for reconciliation',
@@ -551,7 +577,9 @@ async function profileClaimsOf(tx: TransactionSql, playerId: string): Promise<Pr
 export interface ProfileResult {
   /**
    * The canonical row the profile was applied to; null when the document was skipped because its
-   * own id was held (nothing was written: no attributes, seasons or season lines; `held` says why).
+   * own id was held or because the rows its ids resolve to contradict each other
+   * (`conflicting_profiles`). Nothing was written then: no own-id link, no merge, no attributes,
+   * no seasons or season lines; `held` says why and the hold rows keep the document.
    */
   playerId: string | null;
   /** Canonical rows that were folded into playerId by this profile. */
@@ -566,6 +594,11 @@ export interface ProfileResult {
 export interface ProfileOptions {
   /** ingest.ingestion_runs.id attributed on merge and hold rows. */
   runId?: number | null;
+  /**
+   * The observation time the ingester tracked for the document (the request time of the fetch
+   * that returned it), preserved on every hold row as `document_observed_at`. Defaults to now.
+   */
+  observedAt?: Date;
 }
 
 /**
@@ -574,18 +607,21 @@ export interface ProfileOptions {
  * profile's own id and every reference are RESOLVED before anything is
  * written; then:
  * - a reference with an unknown scope or id type, an id stored under another
- *   id type, or an id owned by a tombstone is HELD (never linked);
+ *   id type, or an id owned by a tombstone is HELD (never linked); the rest
+ *   of the document still lands;
  * - the profile lands on the row its own id resolves to, else on the oldest
- *   row a reference resolves to, else on a new row; if the own id's row
- *   already carries another profile-owned id of this league or another
- *   sport-wide id, owning the id there is a contradiction: it is held as
- *   `conflicting_profiles` and the document writes nothing (playerId null),
- *   like a held own id;
- * - every other row a reference resolves to is MERGED into it, with the
- *   reference recorded as the trigger, unless the two rows (plus this
- *   document's own claims) would give one person two provider profiles in
- *   one league or two sport-wide ids: that is a contradiction in the
- *   provider's data and is held as `conflicting_profiles`;
+ *   row a reference resolves to, else on a new row, and every other row a
+ *   reference resolves to is MERGED into it with the reference recorded as
+ *   the trigger. Before any of that is written, the claims the landing row
+ *   would accumulate (this document's, the home row's, then each merged
+ *   row's in order) are checked: a row that would give one person two
+ *   provider profiles in one league or two sport-wide ids is a contradiction
+ *   in the provider's data, held as `conflicting_profiles` (the hold names
+ *   the rows involved and carries the contradicting claims), and the WHOLE
+ *   document is skipped: no own-id link, no merge, no attributes, no seasons,
+ *   `playerId: null`, exactly like a held own id. No evidence-free tie-break
+ *   lands it anywhere; the hold keeps the document for replay
+ *   (replayHeldDocument) once the contradiction is resolved;
  * - ids nobody knew are linked to the row.
  */
 export async function applyPlayerProfile(
@@ -601,12 +637,23 @@ export async function applyPlayerProfile(
       feed: 'player_profile' as const,
       documentId: doc.id,
       runId: opts.runId ?? null,
+      document: doc,
+      documentObservedAt: opts.observedAt ?? new Date(),
     };
     const held: Hold[] = [];
     const hold = async (h: Hold) => {
       held.push(h);
       await holdReference(tx, trigger, h, log);
     };
+    /** The document was skipped: only hold rows were written. */
+    const skipped = (): ProfileResult => ({
+      playerId: null,
+      mergedFrom: [],
+      merges: [],
+      held,
+      externalIds: [],
+      seasonLines: 0,
+    });
 
     // 1. Every id the profile carries, classified: the own id, then references (league profiles
     //    under their league, the sport profile under ours).
@@ -686,7 +733,7 @@ export async function applyPlayerProfile(
     const ownRow = await resolve(own);
     if (ownRow === 'held') {
       log?.warn({ league, playerId: doc.id }, 'profile skipped: its own id is held');
-      return { playerId: null, mergedFrom: [], merges: [], held, externalIds: [], seasonLines: 0 };
+      return skipped();
     }
     if (ownRow !== null) {
       // The own id already resolves to a row (game-sourced, linked by another profile's reference,
@@ -712,14 +759,7 @@ export async function applyPlayerProfile(
           { league, playerId: doc.id, row: ownRow },
           'profile skipped: owning its id would give the row a second provider profile',
         );
-        return {
-          playerId: null,
-          mergedFrom: [],
-          merges: [],
-          held,
-          externalIds: [],
-          seasonLines: 0,
-        };
+        return skipped();
       }
     }
     /** canonical row -> the references of this document that resolved to it */
@@ -756,7 +796,13 @@ export async function applyPlayerProfile(
       }
     }
 
-    // 3. Home row: the own id's row, else the oldest candidate this document may claim, else new.
+    // 3. Pre-flight, still writing nothing but holds: the home row is the own id's row, else the
+    //    oldest candidate, else new; every other candidate (oldest first) would be merged into it.
+    //    Walk that plan with the claims the home row would accumulate (this document's, its own,
+    //    then each absorbed row's: exactly what a merge moves onto the survivor). A candidate whose
+    //    claims contradict them is held with every row involved and the contradicting claims; one
+    //    such hold skips the whole document. The remaining candidates are still checked so every
+    //    contradiction is recorded, not just the first.
     const ordered = async (ids: string[]): Promise<string[]> =>
       ids.length === 0
         ? []
@@ -764,10 +810,46 @@ export async function applyPlayerProfile(
             await tx<{ id: string }[]>`
               select id from public.players where id = any(${ids}::uuid[]) order by created_at, id`
           ).map((r) => r.id);
-    let playerId: string | null = ownRow;
+    let home: string | null = ownRow;
+    const accumulated: ProfileClaim[] = [...claims];
+    if (home) accumulated.push(...(await profileClaimsOf(tx, home)));
+    const toMerge: string[] = [];
+    let contradicted = false;
+    for (const id of await ordered([...candidates.keys()])) {
+      const theirs = await profileClaimsOf(tx, id);
+      const conflicts = claimConflicts(accumulated, theirs);
+      if (conflicts.length > 0) {
+        const via = candidates.get(id)?.[0] ?? own;
+        await hold({
+          reason: 'conflicting_profiles',
+          reference: via.raw,
+          candidateIds: home ? [home, id] : [id],
+          detail: { conflicts },
+        });
+        contradicted = true;
+        continue;
+      }
+      if (home) toMerge.push(id);
+      else home = id;
+      accumulated.push(...theirs);
+    }
+    if (contradicted) {
+      log?.warn(
+        { league, playerId: doc.id, candidates: [...candidates.keys()] },
+        'profile skipped: its references resolve to rows that contradict each other; document preserved on the hold',
+      );
+      return skipped();
+    }
+
+    // Past this point the document is applied. absorb is the pre-flight's merge; a contradiction
+    // it meets can only come from a concurrent writer that changed identity state after the
+    // pre-flight (the race paths below), and the only way to keep "a held document writes
+    // nothing" is to abandon the transaction: the next ingestion of the document pre-flights
+    // again and holds it properly.
+    let playerId: string | null = home;
     const mergedFrom: string[] = [];
     const merges: MergeResult[] = [];
-    const absorb = async (other: string, viaRefs: ExternalRef[]): Promise<boolean> => {
+    const absorb = async (other: string, viaRefs: ExternalRef[]): Promise<void> => {
       if (!playerId) throw new Error('absorb before a home row exists');
       const conflicts = claimConflicts(
         [...claims, ...(await profileClaimsOf(tx, playerId))],
@@ -775,13 +857,9 @@ export async function applyPlayerProfile(
       );
       const via = viaRefs[0] ?? own;
       if (conflicts.length > 0) {
-        await hold({
-          reason: 'conflicting_profiles',
-          reference: via.raw,
-          candidateIds: [playerId, other],
-          detail: { conflicts },
-        });
-        return false;
+        throw new Error(
+          `profile ${league}:${doc.id}: identity state changed under the transaction (row ${other} now contradicts ${playerId}); rolled back, re-ingest to hold`,
+        );
       }
       const m = await mergePlayers(
         tx,
@@ -793,26 +871,7 @@ export async function applyPlayerProfile(
       mergedFrom.push(m.loser);
       merges.push(m);
       playerId = m.survivor;
-      return true;
     };
-    if (!playerId) {
-      for (const id of await ordered([...candidates.keys()])) {
-        const conflicts = claimConflicts(claims, await profileClaimsOf(tx, id));
-        if (conflicts.length === 0) {
-          playerId = id;
-          candidates.delete(id);
-          break;
-        }
-        const via = candidates.get(id)?.[0] ?? own;
-        await hold({
-          reason: 'conflicting_profiles',
-          reference: via.raw,
-          candidateIds: [id],
-          detail: { conflicts },
-        });
-        candidates.delete(id);
-      }
-    }
     if (!playerId) {
       const [row] = await tx<{ id: string }[]>`
         insert into public.players (full_name) values (${doc.full_name}) returning id`;
@@ -826,18 +885,19 @@ export async function applyPlayerProfile(
       on conflict (provider, league, external_id) do update set source = 'profile'
       returning player_id as "playerId"`;
     if (ownLinked && ownLinked.playerId !== playerId) {
-      // Lost a race: another writer linked our id since we resolved it. Treat its row as a candidate.
+      // Lost a race: another writer linked our id since we resolved it. Its row is absorbed like
+      // any candidate (absorb aborts the transaction if it now contradicts the home row).
       const theirs = await resolveCanonical(tx, ownLinked.playerId);
       if (theirs !== playerId) {
         await tx`update public.player_external_ids set player_id = ${playerId}
                  where provider = ${PROVIDER} and league = ${league} and external_id = ${doc.id}`;
-        note(theirs, own);
+        await absorb(theirs, [own]);
       }
     }
 
     // 4. Merge every other row a reference resolved to (oldest first: deterministic), then link
     //    the ids nobody knew. A link that loses a race re-resolves and is absorbed the same way.
-    for (const id of await ordered([...candidates.keys()])) {
+    for (const id of toMerge) {
       const viaRefs = candidates.get(id) ?? [];
       if ((await resolveCanonical(tx, id)) === playerId) continue; // folded by an earlier merge
       await absorb(id, viaRefs);
@@ -916,4 +976,56 @@ export async function applyPlayerProfile(
       seasonLines,
     };
   }) as Promise<ProfileResult>;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Replaying held documents                                                   */
+/* ------------------------------------------------------------------------- */
+
+export interface ReplayHeldOptions {
+  /** ingest.ingestion_runs.id attributed on the merge and hold rows the replay writes; defaults to the hold's own run. */
+  runId?: number | null;
+}
+
+/**
+ * Re-apply the document a hold preserved, through the normal applyPlayerProfile
+ * path, from the stored body alone (no provider refetch). The stored jsonb is a
+ * provider payload at rest and is re-parsed with the profile schema before
+ * use. While the contradiction stands the replay reproduces the same single
+ * open hold (its stored body and `document_updated_at` refresh); once an
+ * operator has resolved it, the replay lands the document. A hold written
+ * before 0008 carries no document and cannot be replayed from here.
+ */
+export async function replayHeldDocument(
+  db: Db,
+  holdId: string,
+  log?: Logger,
+  opts: ReplayHeldOptions = {},
+): Promise<ProfileResult> {
+  const [hold] = await db<
+    {
+      league: LeagueCode;
+      triggerFeed: string;
+      document: unknown;
+      documentObservedAt: Date | null;
+      runId: number | null;
+    }[]
+  >`
+    select league, trigger_feed as "triggerFeed", document, document_observed_at as "documentObservedAt",
+           run_id as "runId"
+    from ingest.player_merge_holds where id = ${holdId}`;
+  if (!hold) throw new Error(`player_merge_holds ${holdId} not found`);
+  if (hold.triggerFeed !== 'player_profile') {
+    throw new Error(
+      `player_merge_holds ${holdId}: only player_profile holds carry a replayable document`,
+    );
+  }
+  if (hold.document === null || hold.document === undefined) {
+    throw new Error(`player_merge_holds ${holdId} has no stored document (written before 0008)`);
+  }
+  const doc = PlayerProfileDocumentSchema.parse(hold.document);
+  return applyPlayerProfile(db, hold.league, doc, log, {
+    runId: opts.runId === undefined ? hold.runId : opts.runId,
+    ...(hold.documentObservedAt ? { observedAt: hold.documentObservedAt } : {}),
+  });
 }
