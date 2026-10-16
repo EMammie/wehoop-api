@@ -553,16 +553,51 @@ interface ProfileClaim {
   externalId: string;
 }
 
-function claimConflicts(a: ProfileClaim[], b: ProfileClaim[]): ProfileClaim[] {
-  const out: ProfileClaim[] = [];
-  for (const x of a)
-    for (const y of b)
-      if (
-        x.idType === y.idType &&
-        x.externalId !== y.externalId &&
-        (x.idType === 'sport_profile' || x.league === y.league)
-      )
-        out.push(y);
+/** A claim with who holds it: the document being applied, or the canonical row (uuid) that owns the id. */
+interface OwnedClaim {
+  claim: ProfileClaim;
+  owner: 'document' | string;
+}
+
+/** One contradiction: a candidate's claim and the already-accumulated claim it cannot coexist with. */
+export interface ClaimConflict {
+  theirs: ProfileClaim;
+  against: OwnedClaim;
+}
+
+function contradicts(x: ProfileClaim, y: ProfileClaim): boolean {
+  return (
+    x.idType === y.idType &&
+    x.externalId !== y.externalId &&
+    (x.idType === 'sport_profile' || x.league === y.league)
+  );
+}
+
+/**
+ * Every claim of `theirs` that cannot coexist with an accumulated claim, paired
+ * with that claim and its owner, so a hold can name the row holding the
+ * counter-claim, not only the candidate that collided with it.
+ */
+function claimConflicts(accumulated: OwnedClaim[], theirs: ProfileClaim[]): ClaimConflict[] {
+  const out: ClaimConflict[] = [];
+  for (const a of accumulated)
+    for (const y of theirs) if (contradicts(a.claim, y)) out.push({ theirs: y, against: a });
+  return out;
+}
+
+const owned = (claims: ProfileClaim[], owner: 'document' | string): OwnedClaim[] =>
+  claims.map((claim) => ({ claim, owner }));
+
+/** Rows a set of conflicts involves, in first-seen order and deduplicated: the home row, every counter-claim owner, the candidate. */
+function rowsInvolved(
+  home: string | null,
+  conflicts: ClaimConflict[],
+  candidate: string,
+): string[] {
+  const out: string[] = [];
+  for (const id of [home, ...conflicts.map((c) => c.against.owner), candidate]) {
+    if (id && id !== 'document' && !out.includes(id)) out.push(id);
+  }
   return out;
 }
 
@@ -743,7 +778,7 @@ export async function applyPlayerProfile(
       // profile), and this document is the one that would turn it into a contradiction. Held,
       // and the document writes nothing, exactly like a held own id.
       const conflicts = claimConflicts(
-        claims,
+        owned(claims, 'document'),
         (await profileClaimsOf(tx, ownRow)).filter(
           (c) => !(c.league === league && c.idType === 'league_profile' && c.externalId === doc.id),
         ),
@@ -799,10 +834,11 @@ export async function applyPlayerProfile(
     // 3. Pre-flight, still writing nothing but holds: the home row is the own id's row, else the
     //    oldest candidate, else new; every other candidate (oldest first) would be merged into it.
     //    Walk that plan with the claims the home row would accumulate (this document's, its own,
-    //    then each absorbed row's: exactly what a merge moves onto the survivor). A candidate whose
-    //    claims contradict them is held with every row involved and the contradicting claims; one
-    //    such hold skips the whole document. The remaining candidates are still checked so every
-    //    contradiction is recorded, not just the first.
+    //    then each absorbed row's: exactly what a merge moves onto the survivor), each claim tagged
+    //    with its owner. A candidate whose claims contradict them is held naming every row
+    //    involved (the home row, the rows owning the counter-claims, the candidate) with the
+    //    contradicting pairs in detail; one such hold skips the whole document. The remaining
+    //    candidates are still checked so every contradiction is recorded, not just the first.
     const ordered = async (ids: string[]): Promise<string[]> =>
       ids.length === 0
         ? []
@@ -811,8 +847,8 @@ export async function applyPlayerProfile(
               select id from public.players where id = any(${ids}::uuid[]) order by created_at, id`
           ).map((r) => r.id);
     let home: string | null = ownRow;
-    const accumulated: ProfileClaim[] = [...claims];
-    if (home) accumulated.push(...(await profileClaimsOf(tx, home)));
+    const accumulated: OwnedClaim[] = owned(claims, 'document');
+    if (home) accumulated.push(...owned(await profileClaimsOf(tx, home), home));
     const toMerge: string[] = [];
     let contradicted = false;
     for (const id of await ordered([...candidates.keys()])) {
@@ -823,7 +859,7 @@ export async function applyPlayerProfile(
         await hold({
           reason: 'conflicting_profiles',
           reference: via.raw,
-          candidateIds: home ? [home, id] : [id],
+          candidateIds: rowsInvolved(home, conflicts, id),
           detail: { conflicts },
         });
         contradicted = true;
@@ -831,7 +867,7 @@ export async function applyPlayerProfile(
       }
       if (home) toMerge.push(id);
       else home = id;
-      accumulated.push(...theirs);
+      accumulated.push(...owned(theirs, id));
     }
     if (contradicted) {
       log?.warn(
@@ -852,7 +888,7 @@ export async function applyPlayerProfile(
     const absorb = async (other: string, viaRefs: ExternalRef[]): Promise<void> => {
       if (!playerId) throw new Error('absorb before a home row exists');
       const conflicts = claimConflicts(
-        [...claims, ...(await profileClaimsOf(tx, playerId))],
+        [...owned(claims, 'document'), ...owned(await profileClaimsOf(tx, playerId), playerId)],
         await profileClaimsOf(tx, other),
       );
       const via = viaRefs[0] ?? own;

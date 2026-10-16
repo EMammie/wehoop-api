@@ -159,7 +159,7 @@ async function heldDocuments(documentId: string): Promise<HeldDocumentRow[]> {
     select id, reason, status, candidate_ids as "candidateIds", detail, document,
            document_observed_at as "documentObservedAt",
            extract(epoch from document_updated_at)::float8 as "documentUpdatedAt"
-    from ingest.player_merge_holds where trigger_document_id = ${documentId} order by reason`;
+    from ingest.player_merge_holds where trigger_document_id = ${documentId} order by reason, trigger_reference`;
 }
 
 /** What a skipped document's seasons[] must not have created: the season, its team, the roster row. */
@@ -684,7 +684,17 @@ describe('references identity.ts refuses to act on are held, never merged', () =
           reason: 'conflicting_profiles',
           reference: ref,
           candidateIds: [r2.playerId, r1.playerId],
-          detail: { conflicts: [{ league: 'wnba', idType: 'league_profile', externalId: w1 }] },
+          detail: {
+            conflicts: [
+              {
+                theirs: { league: 'wnba', idType: 'league_profile', externalId: w1 },
+                against: {
+                  claim: { league: 'wnba', idType: 'league_profile', externalId: w2 },
+                  owner: r2.playerId,
+                },
+              },
+            ],
+          },
         },
       ],
       externalIds: [],
@@ -853,7 +863,17 @@ describe('conflicting profiles are held with their evidence and change nothing',
           reason: 'conflicting_profiles',
           reference: refN,
           candidateIds: [rowP, rowN],
-          detail: { conflicts: [{ league: 'ncaawb', idType: 'sport_profile', externalId: s2 }] },
+          detail: {
+            conflicts: [
+              {
+                theirs: { league: 'ncaawb', idType: 'sport_profile', externalId: s2 },
+                against: {
+                  claim: { league: 'wnba', idType: 'sport_profile', externalId: s1 },
+                  owner: rowP,
+                },
+              },
+            ],
+          },
         },
       ],
       externalIds: [],
@@ -957,7 +977,17 @@ describe('conflicting profiles are held with their evidence and change nothing',
       reason: 'conflicting_profiles',
       status: 'open',
       candidateIds: [rowP, rowN],
-      detail: { conflicts: [{ league: 'ncaawb', idType: 'sport_profile', externalId: s2 }] },
+      detail: {
+        conflicts: [
+          {
+            theirs: { league: 'ncaawb', idType: 'sport_profile', externalId: s2 },
+            against: {
+              claim: { league: 'wnba', idType: 'sport_profile', externalId: s1 },
+              owner: rowP,
+            },
+          },
+        ],
+      },
     });
     expect(h0.document).toEqual(JSON.parse(JSON.stringify(unr)));
     expect(h0.documentObservedAt?.toISOString()).toBe(T0.toISOString());
@@ -1092,7 +1122,17 @@ describe('conflicting profiles are held with their evidence and change nothing',
           reason: 'conflicting_profiles',
           reference: ownRef,
           candidateIds: [survivor],
-          detail: { conflicts: [{ league: 'wnba', idType: 'league_profile', externalId: P1 }] },
+          detail: {
+            conflicts: [
+              {
+                theirs: { league: 'wnba', idType: 'league_profile', externalId: P1 },
+                against: {
+                  claim: { league: 'wnba', idType: 'league_profile', externalId: P2 },
+                  owner: 'document',
+                },
+              },
+            ],
+          },
         },
       ],
       externalIds: [],
@@ -1127,6 +1167,181 @@ describe('conflicting profiles are held with their evidence and change nothing',
     expect(await holdsFor(P2)).toHaveLength(1);
     expect(await identityFingerprint([survivor, loser])).toEqual(idBefore);
     expect(await gameFingerprint(gameId)).toEqual(gameBefore);
+  });
+
+  it('three references, two agreeing and one contradicting the second: one hold names all three rows (home, the row owning the counter-claim, the candidate), the document is skipped', async () => {
+    const suffix = randomUUID();
+    const q = `q-${suffix}`;
+    const pId = `p-${suffix}`;
+    const n = `n-${suffix}`;
+    const s1 = `s1-${suffix}`;
+    const s2 = `s2-${suffix}`;
+    // Oldest: a game-sourced WNBA row Q with no profile claims. Then WNBA profile P (sport S1) and
+    // NCAAW profile N (sport S2).
+    const rowQ = (await gamePlayer('wnba', q, 'Three Way')).get(q) ?? '';
+    const rowP =
+      (
+        await applyPlayerProfile(
+          db,
+          'wnba',
+          profile(pId, 'Three Way', [{ source_id: s1, scope: 'WNBA', id_type: 'sport_profile' }]),
+          silentLog,
+        )
+      ).playerId ?? '';
+    const rowN =
+      (
+        await applyPlayerProfile(
+          db,
+          'ncaawb',
+          profile(n, 'Three Way', [{ source_id: s2, scope: 'NCAAW', id_type: 'sport_profile' }]),
+          silentLog,
+        )
+      ).playerId ?? '';
+    expect(new Set([rowQ, rowP, rowN]).size).toBe(3);
+    const idBefore = await identityFingerprint([rowQ, rowP, rowN]);
+    // An Unrivaled profile claims all three. Home = Q (oldest, no claims); P would be absorbed and
+    // bring S1; N then contradicts S1 with S2. The row that holds S1 is P, not the home row.
+    const refQ = { source_id: q, scope: 'WNBA', id_type: 'league_profile' };
+    const refP = { source_id: pId, scope: 'WNBA', id_type: 'league_profile' };
+    const refN = { source_id: n, scope: 'NCAAW', id_type: 'league_profile' };
+    const u = `u-${suffix}`;
+    const res = await applyPlayerProfile(
+      db,
+      'unrivaled',
+      contradictingProfile(u, suffix, [refQ, refP, refN]),
+      silentLog,
+    );
+    expect(res).toEqual({
+      playerId: null,
+      mergedFrom: [],
+      merges: [],
+      held: [
+        {
+          reason: 'conflicting_profiles',
+          reference: refN,
+          candidateIds: [rowQ, rowP, rowN],
+          detail: {
+            conflicts: [
+              {
+                theirs: { league: 'ncaawb', idType: 'sport_profile', externalId: s2 },
+                against: {
+                  claim: { league: 'wnba', idType: 'sport_profile', externalId: s1 },
+                  owner: rowP,
+                },
+              },
+            ],
+          },
+        },
+      ],
+      externalIds: [],
+      seasonLines: 0,
+    });
+    const holds = await heldDocuments(u);
+    expect(holds).toHaveLength(1);
+    expect(holds[0]).toMatchObject({ candidateIds: [rowQ, rowP, rowN], status: 'open' });
+    // Nothing merged (P was never absorbed), nothing linked, nothing written.
+    expect(await identityFingerprint([rowQ, rowP, rowN])).toEqual(idBefore);
+    for (const row of [rowQ, rowP, rowN]) expect(await resolveCanonical(db, row)).toBe(row);
+    expect(await seasonFootprint(`season-${suffix}`, `team-${suffix}`)).toEqual(NO_FOOTPRINT);
+  });
+
+  it('two candidates that each contradict the document itself: two holds (one per reference), each naming the home row and its candidate, the document skipped once', async () => {
+    const suffix = randomUUID();
+    const u = `u-${suffix}`;
+    const n = `n-${suffix}`;
+    const w = `w-${suffix}`;
+    const s0 = `s0-${suffix}`;
+    const s1 = `s1-${suffix}`;
+    const s2 = `s2-${suffix}`;
+    // Oldest: the document's own id, game-sourced (the home row). Then NCAAW profile N (sport S1)
+    // and WNBA profile W (sport S2).
+    const rowU = (await gamePlayer('unrivaled', u, 'Two Ways')).get(u) ?? '';
+    const rowN =
+      (
+        await applyPlayerProfile(
+          db,
+          'ncaawb',
+          profile(n, 'Two Ways', [{ source_id: s1, scope: 'NCAAW', id_type: 'sport_profile' }]),
+          silentLog,
+        )
+      ).playerId ?? '';
+    const rowW =
+      (
+        await applyPlayerProfile(
+          db,
+          'wnba',
+          profile(w, 'Two Ways', [{ source_id: s2, scope: 'WNBA', id_type: 'sport_profile' }]),
+          silentLog,
+        )
+      ).playerId ?? '';
+    expect(new Set([rowU, rowN, rowW]).size).toBe(3);
+    const idBefore = await identityFingerprint([rowU, rowN, rowW]);
+    // The Unrivaled profile carries sport id S0 of its own and references N and W: each of them
+    // contradicts the document, independently of the other.
+    const refS0 = { source_id: s0, scope: 'basketball', id_type: 'sport_profile' };
+    const refN = { source_id: n, scope: 'NCAAW', id_type: 'league_profile' };
+    const refW = { source_id: w, scope: 'WNBA', id_type: 'league_profile' };
+    const doc = contradictingProfile(u, suffix, [refS0, refN, refW]);
+    const res = await applyPlayerProfile(db, 'unrivaled', doc, silentLog);
+    expect(res.playerId).toBeNull();
+    expect(res.mergedFrom).toEqual([]);
+    const againstDoc = {
+      claim: { league: 'unrivaled', idType: 'sport_profile', externalId: s0 },
+      owner: 'document',
+    };
+    expect(res.held).toEqual([
+      {
+        reason: 'conflicting_profiles',
+        reference: refN,
+        candidateIds: [rowU, rowN],
+        detail: {
+          conflicts: [
+            {
+              theirs: { league: 'ncaawb', idType: 'sport_profile', externalId: s1 },
+              against: againstDoc,
+            },
+          ],
+        },
+      },
+      {
+        reason: 'conflicting_profiles',
+        reference: refW,
+        candidateIds: [rowU, rowW],
+        detail: {
+          conflicts: [
+            {
+              theirs: { league: 'wnba', idType: 'sport_profile', externalId: s2 },
+              against: againstDoc,
+            },
+          ],
+        },
+      },
+    ]);
+    const holds = await heldDocuments(u);
+    expect(holds).toHaveLength(2);
+    expect(holds.map((h) => h.candidateIds).sort()).toEqual(
+      [
+        [rowU, rowN],
+        [rowU, rowW],
+      ].sort(),
+    );
+    expect(holds.every((h) => h.status === 'open' && h.document !== null)).toBe(true);
+    // Skipped once: S0 linked nowhere, U still game-sourced, nothing else written.
+    const [s0Row] = await db<{ n: number }[]>`
+      select count(*)::int as n from public.player_external_ids where external_id = ${s0}`;
+    expect(s0Row?.n).toBe(0);
+    expect(await identityFingerprint([rowU, rowN, rowW])).toEqual(idBefore);
+    expect(await seasonFootprint(`season-${suffix}`, `team-${suffix}`)).toEqual(NO_FOOTPRINT);
+    // Re-applying: still two open holds, same candidates.
+    const again = await applyPlayerProfile(db, 'unrivaled', doc, silentLog);
+    expect(again.playerId).toBeNull();
+    expect(again.held).toHaveLength(2);
+    expect((await heldDocuments(u)).map((h) => h.candidateIds).sort()).toEqual(
+      [
+        [rowU, rowN],
+        [rowU, rowW],
+      ].sort(),
+    );
   });
 
   it('a matching sport-wide id across leagues still merges normally with a provenance row, and re-ingesting the unchanged profile is a no-op', async () => {
