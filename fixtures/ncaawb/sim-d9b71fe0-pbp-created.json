@@ -1,0 +1,46 @@
+{
+  "id": "2e36b340-9277-4b99-af20-b7ff7e86640e",
+  "status": "created",
+  "coverage": "full",
+  "scheduled": "2026-02-18T23:30:00+00:00",
+  "conference_game": true,
+  "track_on_court": false,
+  "entry_mode": "LDE",
+  "broadcasts": [
+    {
+      "type": "Internet",
+      "network": "B1G+"
+    }
+  ],
+  "time_zones": {
+    "venue": "US/Eastern",
+    "home": "US/Eastern",
+    "away": "US/Central"
+  },
+  "season": {
+    "id": "ec6ca218-4496-4d67-99e5-95bea992f4bf",
+    "year": 2025,
+    "type": "REG",
+    "name": "Regular Season"
+  },
+  "home": {
+    "name": "Spartans",
+    "alias": "MSU",
+    "market": "Michigan State",
+    "id": "ffe4ab56-ed35-42c6-97e8-6879352bff4c",
+    "points": 0,
+    "rank": 18,
+    "remaining_timeouts": 4
+  },
+  "away": {
+    "name": "Wildcats",
+    "alias": "NW",
+    "market": "Northwestern",
+    "id": "fc923213-ae54-4bb9-8ef4-f16d7a16dfe0",
+    "points": 0,
+    "rank": 0,
+    "remaining_timeouts": 4
+  },
+  "periods": [],
+  "time": 1771457585337
+}

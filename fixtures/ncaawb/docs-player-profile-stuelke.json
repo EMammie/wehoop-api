@@ -1,0 +1,114 @@
+{
+  "id": "29d82b92-40a0-4116-bf6d-f807901fbb7e",
+  "status": "ACT",
+  "full_name": "Hannah Stuelke",
+  "first_name": "Hannah",
+  "last_name": "Stuelke",
+  "abbr_name": "H.Stuelke",
+  "height": 74,
+  "position": "F",
+  "primary_position": "NA",
+  "jersey_number": "45",
+  "experience": "SR",
+  "birth_place": "Cedar Rapids, IA, USA",
+  "updated": "2025-10-21T23:30:00+00:00",
+  "league": {
+    "id": "affab7b6-647e-4304-bbe2-1f9d68cd0cea",
+    "name": "NCAA WOMEN",
+    "alias": "NCAAW"
+  },
+  "team": {
+    "id": "7269c5c7-6614-41d8-9415-7ca3243f6612",
+    "name": "Hawkeyes",
+    "market": "Iowa",
+    "alias": "IOWA"
+  },
+  "references": [
+    {
+      "source_id": "33673ce9-1d6f-4d97-86c9-1b7e548b7b38",
+      "scope": "basketball",
+      "id_type": "sport_profile"
+    }
+  ],
+  "seasons": [
+    {
+      "id": "a263b759-0702-45fb-803a-b1c0651da16f",
+      "year": 2024,
+      "type": "REG",
+      "teams": [
+        {
+          "id": "7269c5c7-6614-41d8-9415-7ca3243f6612",
+          "name": "Hawkeyes",
+          "market": "Iowa",
+          "alias": "IOWA",
+          "total": {
+            "games_played": 32,
+            "games_started": 32,
+            "minutes": 880,
+            "field_goals_made": 147,
+            "field_goals_att": 295,
+            "field_goals_pct": 0.498,
+            "two_points_made": 145,
+            "two_points_att": 278,
+            "two_points_pct": 0.522,
+            "three_points_made": 2,
+            "three_points_att": 17,
+            "three_points_pct": 0.118,
+            "blocked_att": 21,
+            "free_throws_made": 110,
+            "free_throws_att": 163,
+            "free_throws_pct": 0.675,
+            "offensive_rebounds": 78,
+            "defensive_rebounds": 169,
+            "rebounds": 247,
+            "assists": 71,
+            "turnovers": 72,
+            "assists_turnover_ratio": 0.99,
+            "steals": 29,
+            "blocks": 12,
+            "personal_fouls": 81,
+            "tech_fouls": 0,
+            "points": 406,
+            "flagrant_fouls": 1,
+            "ejections": 0,
+            "foulouts": 2,
+            "true_shooting_att": 366.72,
+            "true_shooting_pct": 0.554,
+            "efficiency": 492,
+            "field_goals_at_rim_made": 34,
+            "field_goals_at_rim_att": 51,
+            "field_goals_at_rim_pct": 0.667,
+            "field_goals_at_midrange_made": 1,
+            "field_goals_at_midrange_att": 8,
+            "field_goals_at_midrange_pct": 0.125,
+            "usage_pct": 24.47
+          },
+          "average": {
+            "minutes": 27.5,
+            "points": 12.7,
+            "off_rebounds": 2.44,
+            "def_rebounds": 5.28,
+            "rebounds": 7.72,
+            "assists": 2.2,
+            "steals": 0.91,
+            "blocks": 0.38,
+            "turnovers": 2.25,
+            "personal_fouls": 2.53,
+            "flagrant_fouls": 0.03,
+            "blocked_att": 0.66,
+            "field_goals_made": 4.59,
+            "field_goals_att": 9.22,
+            "three_points_made": 0.06,
+            "three_points_att": 0.53,
+            "free_throws_made": 3.44,
+            "free_throws_att": 5.09,
+            "two_points_made": 4.53,
+            "two_points_att": 8.69,
+            "efficiency": 15.38,
+            "true_shooting_att": 11.46
+          }
+        }
+      ]
+    }
+  ]
+}

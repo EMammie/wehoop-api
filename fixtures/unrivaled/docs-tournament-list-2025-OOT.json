@@ -1,0 +1,23 @@
+{
+  "league": {
+    "id": "844ee10a-00c8-4dc1-9c17-52598de2ef47",
+    "name": "Unrivaled",
+    "alias": "UNRIVALED"
+  },
+  "season": {
+    "id": "04cb26c7-b1d2-4e19-8fe4-c0a30814aa5c",
+    "year": 2025,
+    "type": "OOT"
+  },
+  "tournaments": [
+    {
+      "id": "28d4af13-bfa1-4c95-9f1b-30af6fd5b7ee",
+      "name": "2025 Unrivaled 1 on 1 Tournament",
+      "location": "Miami, FL, USA",
+      "status": "scheduled",
+      "start_date": "2025-02-10",
+      "end_date": "2025-02-14",
+      "parent_id": "39dbbe86-83b9-4f7a-80e1-becc451cc7f2"
+    }
+  ]
+}

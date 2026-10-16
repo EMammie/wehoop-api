@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createDb, type Db } from '../../src/db/client.js';
 import { type ApplyDeps, applyChanges, ensureGame } from '../../src/ingest/apply-changes.js';
-import { ensureTeams } from '../../src/ingest/identity.js';
+import { ensurePlayers, ensureTeams } from '../../src/ingest/identity.js';
 import { type RunHandle, startRun } from '../../src/ingest/runs.js';
 import type { NormalizedDocument, Observation, ObservationSource } from '../../src/ingest/types.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
@@ -84,7 +84,18 @@ export function observation(
   };
 }
 
-export function apply(deps: ApplyDeps, gameId: string, nd: NormalizedDocument, obs: Observation) {
+/** Like GameWatcher.process: identity first (players the document names), then applyChanges. */
+export async function apply(
+  deps: ApplyDeps,
+  gameId: string,
+  nd: NormalizedDocument,
+  obs: Observation,
+) {
+  if (nd.players.length > 0) {
+    const [g] = await deps.db<{ league: 'wnba' | 'ncaawb' | 'unrivaled' }[]>`
+      select league from public.games where id = ${gameId}`;
+    if (g) await ensurePlayers(deps.db, g.league, nd.players);
+  }
   return applyChanges(deps, gameId, nd.batch, obs);
 }
 

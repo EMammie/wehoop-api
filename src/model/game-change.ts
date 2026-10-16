@@ -27,11 +27,16 @@ const envelope = {
 
 export const EventDeleteBodySchema = z.object({ providerEventId: z.string() });
 
-/** Durable game-level state: status, score and the current period. */
+/**
+ * Durable game-level state: status, score and the current period. Unrivaled
+ * adds the Elam target once the target-score phase begins; it is omitted
+ * (never null) for every other game, so M1 bodies decode unchanged.
+ */
 export const StatusBodySchema = z.object({
   status: GameStatusSchema,
   score: ScoreSchema,
   period: PeriodRefSchema.nullable(),
+  elamTargetScore: z.int().positive().optional(),
 });
 
 /** Full line score replacement: one row per period played so far. */
@@ -64,20 +69,62 @@ export const TeamStatsSchema = z.object({
 });
 export type TeamStats = z.infer<typeof TeamStatsSchema>;
 
+/**
+ * Team box line. Keyed on the provider team id: every id inside a body is a
+ * provider id (plan §3); `teams.id` is a column on game_team_stats only.
+ */
 export const StatsTeamBodySchema = z.object({
-  teamId: z.uuid(),
   providerTeamId: z.string(),
   isHome: z.boolean(),
   stats: TeamStatsSchema,
 });
+export type StatsTeamBody = z.infer<typeof StatsTeamBodySchema>;
 
-/** Player stats arrive with identity resolution in M2; the body shape is reserved here. */
-export const StatsPlayerBodySchema = z.object({
-  playerId: z.uuid(),
-  teamId: z.uuid(),
-  providerPlayerId: z.string(),
-  stats: z.record(z.string(), z.unknown()),
+/** One player's box line. Typed on the game_player_stats columns; everything else in `extra`. */
+export const PlayerStatsSchema = z.object({
+  minutes: z.string().nullable(),
+  points: z.int().nullable(),
+  fgm: z.int().nullable(),
+  fga: z.int().nullable(),
+  tpm: z.int().nullable(),
+  tpa: z.int().nullable(),
+  ftm: z.int().nullable(),
+  fta: z.int().nullable(),
+  offRebounds: z.int().nullable(),
+  defRebounds: z.int().nullable(),
+  rebounds: z.int().nullable(),
+  assists: z.int().nullable(),
+  steals: z.int().nullable(),
+  blocks: z.int().nullable(),
+  turnovers: z.int().nullable(),
+  personalFouls: z.int().nullable(),
+  plusMinus: z.int().nullable(),
+  efficiency: z.int().nullable(),
+  extra: z.record(z.string(), z.unknown()),
 });
+export type PlayerStats = z.infer<typeof PlayerStatsSchema>;
+
+/**
+ * Player stats (M2). Keyed on `providerPlayerId` / `providerTeamId`, like every
+ * LiveEvent body: canonical uuids (`players.id`, `teams.id`) are columns on
+ * game_player_stats resolved by identity.ts and never enter the body or the
+ * content hash, so an identity merge never rewrites history (plan §3, ratified
+ * 2026-10-14). A client joins a provider id to a canonical player through
+ * `/v1/players/<league>:<providerId>`.
+ */
+export const StatsPlayerBodySchema = z.object({
+  providerPlayerId: z.string(),
+  providerTeamId: z.string(),
+  fullName: z.string(),
+  jersey: z.string().nullable(),
+  position: z.string().nullable(),
+  starter: z.boolean().nullable(),
+  played: z.boolean().nullable(),
+  onCourt: z.boolean().nullable(),
+  notPlayingReason: z.string().nullable(),
+  stats: PlayerStatsSchema,
+});
+export type StatsPlayerBody = z.infer<typeof StatsPlayerBodySchema>;
 
 export const GameChangeSchema = z.discriminatedUnion('type', [
   z.object({

@@ -1,4 +1,4 @@
-import type { TeamStats } from '../model/game-change.js';
+import type { PlayerStats, TeamStats } from '../model/game-change.js';
 import type { GameStatus, LiveEvent, PeriodRef, PeriodType, Score } from '../model/live-event.js';
 
 /** One normalized play, ready for play_events and the change stream. */
@@ -37,6 +37,8 @@ export interface GameView {
   /** true/false when the feed says so; null = unknown. */
   clockRunning: boolean | null;
   clockExtra: Record<string, unknown> | null;
+  /** Unrivaled Elam target once the target-score phase begins; null = not carried (omission is not change). */
+  elamTargetScore: number | null;
   /** Line score when the document carries one. */
   periods: Array<PeriodRef & { score: Score }>;
   providerUpdatedAt: string | null;
@@ -45,12 +47,29 @@ export interface GameView {
   coverage: string | null;
   venue: Record<string, unknown> | null;
   broadcasts: unknown[] | null;
+  title: string | null;
+  /** The document's `season` header, when present; linked to public.seasons by ensureGame. */
+  season: { providerSeasonId: string; year: number; type: string } | null;
 }
 
 export interface NormalizedTeamStats {
   providerTeamId: string;
   isHome: boolean;
   stats: TeamStats;
+}
+
+/** One player's box line as the summary reports it (provider ids; identity resolves uuids). */
+export interface NormalizedPlayerStats {
+  providerPlayerId: string;
+  providerTeamId: string;
+  fullName: string;
+  jersey: string | null;
+  position: string | null;
+  starter: boolean | null;
+  played: boolean | null;
+  onCourt: boolean | null;
+  notPlayingReason: string | null;
+  stats: PlayerStats;
 }
 
 /** An explicit provider deletion marker (`deleted_events[]` entry, push `operation=delete`). */
@@ -65,6 +84,7 @@ export interface NormalizedBatch {
   /** Explicit provider deletion markers. Absence from `events` never deletes. */
   deletedEvents: DeletionMarker[];
   teamStats: NormalizedTeamStats[];
+  playerStats: NormalizedPlayerStats[];
 }
 
 export type ObservationSource = 'push' | 'rest' | 'simulation' | 'fixture';
@@ -83,6 +103,17 @@ export interface Observation {
   gameView: GameView | null;
 }
 
+/** A player mentioned by a game document (roster line or play attribution): what identity needs. */
+export interface DocumentPlayer {
+  providerPlayerId: string;
+  providerTeamId: string | null;
+  fullName: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  jersey: string | null;
+  position: string | null;
+}
+
 /** What an adapter returns for one provider document. */
 export interface NormalizedDocument {
   batch: NormalizedBatch;
@@ -95,5 +126,7 @@ export interface NormalizedDocument {
     alias: string | null;
     isHome: boolean;
   }>;
+  /** Every player the document names, deduplicated by provider id. */
+  players: DocumentPlayer[];
   providerGameId: string;
 }

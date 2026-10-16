@@ -1,5 +1,5 @@
 import { canonicalJson } from './content-hash.js';
-import type { GameChange, TeamStats } from './game-change.js';
+import type { GameChange, StatsPlayerBody, TeamStats } from './game-change.js';
 import type { GameStatus, LiveEvent, PeriodRef, Score } from './live-event.js';
 import type { Snapshot } from './snapshot.js';
 
@@ -14,7 +14,10 @@ export interface GameState {
   period: PeriodRef | null;
   periods: Array<PeriodRef & { score: Score }>;
   events: Map<string, LiveEvent>;
+  /** Keyed on providerTeamId. */
   teamStats: Map<string, { isHome: boolean; stats: TeamStats }>;
+  /** Keyed on providerPlayerId: the body's identity field, stable across identity merges. */
+  playerStats: Map<string, StatsPlayerBody>;
 }
 
 export function stateFromSnapshot(s: Snapshot): GameState {
@@ -24,7 +27,10 @@ export function stateFromSnapshot(s: Snapshot): GameState {
     period: s.game.period,
     periods: s.periods.map((p) => ({ ...p })),
     events: new Map(s.events.map((e) => [e.providerEventId, e.body])),
-    teamStats: new Map(s.teamStats.map((t) => [t.teamId, { isHome: t.isHome, stats: t.stats }])),
+    teamStats: new Map(
+      s.teamStats.map((t) => [t.providerTeamId, { isHome: t.isHome, stats: t.stats }]),
+    ),
+    playerStats: new Map(s.playerStats.map((p) => [p.providerPlayerId, p])),
   };
 }
 
@@ -46,9 +52,10 @@ export function applyChange(state: GameState, c: GameChange): GameState {
       state.periods = c.body.periods.map((p) => ({ ...p }));
       break;
     case 'stats_team':
-      state.teamStats.set(c.body.teamId, { isHome: c.body.isHome, stats: c.body.stats });
+      state.teamStats.set(c.body.providerTeamId, { isHome: c.body.isHome, stats: c.body.stats });
       break;
     case 'stats_player':
+      state.playerStats.set(c.body.providerPlayerId, c.body);
       break;
   }
   return state;
@@ -66,6 +73,9 @@ export function canonicalState(state: GameState): string {
       .map(([providerEventId, body]) => ({ providerEventId, body })),
     teamStats: [...state.teamStats.entries()]
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([teamId, v]) => ({ teamId, ...v })),
+      .map(([providerTeamId, v]) => ({ providerTeamId, ...v })),
+    playerStats: [...state.playerStats.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([, v]) => v),
   });
 }

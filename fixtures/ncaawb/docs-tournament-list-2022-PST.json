@@ -1,0 +1,38 @@
+{
+  "league": {
+    "id": "affab7b6-647e-4304-bbe2-1f9d68cd0cea",
+    "name": "NCAA WOMEN",
+    "alias": "NCAAW"
+  },
+  "season": {
+    "id": "53f19b98-5b7f-413d-810f-58ddfcbf9a0f",
+    "year": 2022,
+    "type": "PST"
+  },
+  "tournaments": [
+    {
+      "id": "331cdf1b-d917-49fa-87d5-1e9327e90f7e",
+      "name": "WNIT",
+      "location": "Campus Sites",
+      "status": "closed",
+      "start_date": "2023-03-15",
+      "end_date": "2023-04-01"
+    },
+    {
+      "id": "46d2c89a-0b4b-402d-9df0-e1ed4173a8a2",
+      "name": "WBI",
+      "location": "Lexington, KY, USA",
+      "status": "closed",
+      "start_date": "2023-03-16",
+      "end_date": "2023-03-19"
+    },
+    {
+      "id": "c4903014-8c00-4083-a70c-bedcd501cda3",
+      "name": "NCAA Women's Division I Basketball Tournament",
+      "location": "Dallas, TX, USA",
+      "status": "closed",
+      "start_date": "2023-03-15",
+      "end_date": "2023-04-02"
+    }
+  ]
+}

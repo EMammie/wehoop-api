@@ -1,0 +1,158 @@
+{
+  "id": "838316ea-ab7b-4581-a1dd-74229d1970d5",
+  "status": "inprogress",
+  "coverage": "full",
+  "scheduled": "2025-01-18T00:00:00+00:00",
+  "lead_changes": 7,
+  "times_tied": 6,
+  "clock": "6:48",
+  "quarter": 1,
+  "possession_arrow": "0780b080-347b-407b-b8d6-fa109ec23908",
+  "track_on_court": true,
+  "entry_mode": "LDE",
+  "clock_decimal": "6:48",
+  "broadcasts": [
+    {
+      "type": "TV",
+      "locale": "National",
+      "network": "TNT",
+      "channel": "245"
+    }
+  ],
+  "time_zones": {
+    "venue": "US/Eastern",
+    "home": "US/Eastern",
+    "away": "US/Eastern"
+  },
+  "season": {
+    "id": "c86ab7c9-5408-44e6-af06-c22636262927",
+    "year": 2025,
+    "type": "REG",
+    "name": "Regular Season"
+  },
+  "home": {
+    "name": "Mist",
+    "alias": "MST",
+    "id": "0780b080-347b-407b-b8d6-fa109ec23908",
+    "points": 2,
+    "remaining_timeouts": 0
+  },
+  "periods": [
+    {
+      "type": "quarter",
+      "id": "c2a3e4bd-1eb2-4730-9460-0ea601ed6d6e",
+      "number": 1,
+      "sequence": 1,
+      "scoring": {
+        "home": {
+          "name": "Mist",
+          "id": "0780b080-347b-407b-b8d6-fa109ec23908",
+          "points": 2
+        },
+        "away": {
+          "name": "Lunar Owls",
+          "id": "67c22115-2385-458f-8632-a67a025fef55",
+          "points": 0
+        }
+      },
+      "events": [
+        {
+          "id": "49c5da0f-df85-4c1a-bc0e-4544157210ca",
+          "clock": "6:48",
+          "updated": "2025-11-13T22:17:08+00:00",
+          "description": "Breanna Stewart makes two point jump shot",
+          "sequence": 1763072228727,
+          "home_points": 2,
+          "away_points": 0,
+          "clock_decimal": "6:48",
+          "created": "2025-11-13T22:17:08+00:00",
+          "clock_type": "standard",
+          "event_type": "twopointmade",
+          "attribution": {
+            "name": "Mist",
+            "id": "0780b080-347b-407b-b8d6-fa109ec23908",
+            "team_basket": "right"
+          },
+          "location": {
+            "coord_x": 1042,
+            "coord_y": 140
+          },
+          "possession": {
+            "name": "Lunar Owls",
+            "id": "67c22115-2385-458f-8632-a67a025fef55"
+          },
+          "on_court": {
+            "home": {
+              "name": "Mist",
+              "id": "0780b080-347b-407b-b8d6-fa109ec23908",
+              "players": [
+                {
+                  "full_name": "Jewell Loyd",
+                  "jersey_number": "24",
+                  "id": "2387d221-be55-495a-b2b7-cddbce9addcc"
+                },
+                {
+                  "full_name": "Breanna Stewart",
+                  "jersey_number": "30",
+                  "id": "a00515fd-bdd9-44d1-83a5-597a99316c54"
+                },
+                {
+                  "full_name": "Courtney Vandersloot",
+                  "jersey_number": "25",
+                  "id": "9234b3d7-b5b7-4bb3-99d5-0ae9737c55a1"
+                }
+              ]
+            },
+            "away": {
+              "name": "Lunar Owls",
+              "id": "67c22115-2385-458f-8632-a67a025fef55",
+              "players": [
+                {
+                  "full_name": "Napheesa Collier",
+                  "jersey_number": "24",
+                  "id": "fd8d4b11-3d70-450a-b65c-016bec29cc9d"
+                },
+                {
+                  "full_name": "Skylar Diggins",
+                  "jersey_number": "4",
+                  "id": "bee3dbc6-82f7-4dc0-b097-0cb42a1c00a2"
+                },
+                {
+                  "full_name": "Allisha Gray",
+                  "jersey_number": "15",
+                  "id": "f0fef47c-4e5f-4b81-8875-3f01f8a0ea1b"
+                }
+              ]
+            }
+          },
+          "statistics": [
+            {
+              "type": "fieldgoal",
+              "made": true,
+              "shot_type": "jump shot",
+              "points": 2,
+              "shot_distance": 23.88,
+              "winning_basket": false,
+              "team": {
+                "name": "Mist",
+                "id": "0780b080-347b-407b-b8d6-fa109ec23908"
+              },
+              "player": {
+                "full_name": "Breanna Stewart",
+                "jersey_number": "30",
+                "id": "a00515fd-bdd9-44d1-83a5-597a99316c54"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "away": {
+    "name": "Lunar Owls",
+    "alias": "LNR",
+    "id": "67c22115-2385-458f-8632-a67a025fef55",
+    "points": 0,
+    "remaining_timeouts": 0
+  }
+}

@@ -182,3 +182,150 @@ where deleted_revision_at is not null and deleted_at is null;
 
 -- check: stats_observed_at_set | expect: 0
 select count(*) from public.game_team_stats where observed_at is null;
+
+-- check: client_views_use_security_invoker | expect: 4
+select count(*)
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind = 'v'
+  and n.nspname = 'public'
+  and c.relname in ('v_schedule', 'v_boxscore', 'v_standings', 'v_player_seasons')
+  and coalesce(
+    (select option_value::boolean
+     from pg_options_to_table(c.reloptions)
+     where option_name = 'security_invoker'),
+    false
+  );
+
+-- check: views_do_not_expose_watch_run_id | expect: 0
+select count(*)
+from information_schema.columns c
+join pg_class r on r.relname = c.table_name
+join pg_namespace n on n.oid = r.relnamespace and n.nspname = c.table_schema
+where c.table_schema = 'public'
+  and r.relkind = 'v'
+  and c.column_name = 'watch_run_id';
+
+-- check: anon_can_select_every_client_view | expect: 4
+select count(*)
+from information_schema.role_table_grants
+where grantee = 'anon'
+  and table_schema = 'public'
+  and privilege_type = 'SELECT'
+  and table_name in ('v_schedule', 'v_boxscore', 'v_standings', 'v_player_seasons');
+
+-- check: external_ids_point_at_canonical_players | expect: 0
+select count(*)
+from public.player_external_ids e
+join public.players p on p.id = e.player_id
+where p.merged_into is not null;
+
+-- check: merged_players_point_at_canonical_survivors | expect: 0
+select count(*)
+from public.players l
+join public.players s on s.id = l.merged_into
+where s.merged_into is not null;
+
+-- check: tombstoned_players_own_nothing | expect: 0
+select count(*)
+from public.players l
+where l.merged_into is not null
+  and (exists (select 1 from public.player_season_stats x where x.player_id = l.id)
+    or exists (select 1 from public.player_team_seasons x where x.player_id = l.id)
+    or exists (select 1 from public.game_player_stats x where x.player_id = l.id)
+    or exists (select 1 from public.play_events x where x.player_id = l.id));
+
+-- check: player_stats_observed_at_set | expect: 0
+select count(*) from public.game_player_stats where observed_at is null;
+
+-- check: elam_games_have_a_target | expect: 0
+select count(*)
+from public.games g
+where g.period_type = 'elam'
+  and g.elam_target_score is null;
+
+-- check: oot_games_belong_to_a_tournament | expect: 0
+select count(*)
+from public.games g
+join public.seasons s on s.id = g.season_id
+where s.type = 'OOT'
+  and g.tournament_id is null;
+
+-- check: stats_bodies_carry_no_canonical_uuid | expect: 0
+select count(*)
+from public.game_changes c
+where c.change_type in ('stats_player', 'stats_team')
+  and (c.body ? 'playerId' or c.body ? 'teamId');
+
+-- check: player_stats_provider_id_resolves_to_row_player | expect: 0
+select count(*)
+from public.game_player_stats ps
+join public.games g on g.id = ps.game_id
+where not exists (
+  select 1 from public.player_external_ids e
+  where e.provider = 'sportradar'
+    and e.league = g.league
+    and e.external_id = ps.provider_player_id
+    and e.player_id = ps.player_id
+);
+
+-- check: game_player_stats_pk_is_provider_keyed | expect: 1
+select count(*)
+from pg_constraint c
+where c.conrelid = 'public.game_player_stats'::regclass
+  and c.contype = 'p'
+  and (select array_agg(a.attname::text order by a.attnum)
+       from pg_attribute a where a.attrelid = c.conrelid and a.attnum = any(c.conkey))
+      = array['game_id', 'provider_player_id'];
+
+-- check: game_player_stats_one_row_per_provider_id_per_game | expect: 0
+select count(*) from (
+  select game_id, provider_player_id from public.game_player_stats group by 1, 2 having count(*) > 1
+) d;
+
+-- check: game_player_stats_never_point_at_tombstones | expect: 0
+select count(*)
+from public.game_player_stats s
+join public.players p on p.id = s.player_id
+where p.merged_into is not null;
+
+-- check: tombstones_have_merge_provenance | expect: 0
+select count(*)
+from public.players l
+where l.merged_into is not null
+  and not exists (select 1 from ingest.player_merges m where m.loser_id = l.id);
+
+-- check: merge_losers_are_tombstones | expect: 0
+select count(*)
+from ingest.player_merges m
+join public.players l on l.id = m.loser_id
+where l.merged_into is null;
+
+-- check: merge_survivors_are_or_resolve_to_the_current_survivor | expect: 0
+select count(*)
+from ingest.player_merges m
+join public.players l on l.id = m.loser_id
+join public.players s on s.id = m.survivor_id
+where l.merged_into <> m.survivor_id
+  and coalesce(s.merged_into, s.id) <> l.merged_into;
+
+-- check: open_hold_candidates_are_distinct_canonical_rows | expect: 0
+-- A conflict between rows that resolve to one canonical row is no conflict (own-id holds, [ownRow], are out of scope).
+select count(*)
+from ingest.player_merge_holds h
+where h.status = 'open'
+  and h.reason = 'conflicting_profiles'
+  and cardinality(h.candidate_ids) >= 2
+  and (select count(distinct coalesce(p.merged_into, p.id))
+         from public.players p where p.id = any(h.candidate_ids)) < 2;
+
+-- check: open_holds_preserve_their_document | expect: 0
+select count(*)
+from ingest.player_merge_holds
+where status = 'open' and document is null;
+
+-- check: merge_tables_closed_to_clients | expect: 0
+select (has_table_privilege('anon', 'ingest.player_merges', 'SELECT')::int
+      + has_table_privilege('anon', 'ingest.player_merge_holds', 'SELECT')::int
+      + has_table_privilege('authenticated', 'ingest.player_merges', 'SELECT')::int
+      + has_table_privilege('authenticated', 'ingest.player_merge_holds', 'SELECT')::int);
