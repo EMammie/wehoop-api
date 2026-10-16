@@ -310,13 +310,14 @@ where l.merged_into <> m.survivor_id
   and coalesce(s.merged_into, s.id) <> l.merged_into;
 
 -- check: open_hold_candidates_are_distinct_canonical_rows | expect: 0
+-- A conflict between rows that resolve to one canonical row is no conflict (own-id holds, [ownRow], are out of scope).
 select count(*)
 from ingest.player_merge_holds h
 where h.status = 'open'
   and h.reason = 'conflicting_profiles'
-  and cardinality(h.candidate_ids) = 2
-  and (select coalesce(merged_into, id) from public.players where id = h.candidate_ids[1])
-      = (select coalesce(merged_into, id) from public.players where id = h.candidate_ids[2]);
+  and cardinality(h.candidate_ids) >= 2
+  and (select count(distinct coalesce(p.merged_into, p.id))
+         from public.players p where p.id = any(h.candidate_ids)) < 2;
 
 -- check: open_holds_preserve_their_document | expect: 0
 select count(*)

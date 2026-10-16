@@ -558,7 +558,7 @@ interface ProfileClaim {
 }
 
 /** A claim with who holds it: the document being applied, or the canonical row (uuid) that owns the id. */
-interface OwnedClaim {
+export interface OwnedClaim {
   claim: ProfileClaim;
   owner: 'document' | string;
 }
