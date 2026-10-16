@@ -924,6 +924,122 @@ describe('conflicting profiles are held with their evidence and change nothing',
     expect(await seasonFootprint(`season-${suffix}`, `team-${suffix}`)).toEqual(NO_FOOTPRINT);
   });
 
+  it.each([
+    {
+      label: 'older provider revision received later',
+      storedRevision: 20,
+      incomingRevision: 10,
+      incomingObservation: 30,
+      accept: false,
+    },
+    {
+      label: 'newer provider revision observed earlier',
+      storedRevision: 20,
+      incomingRevision: 30,
+      incomingObservation: 10,
+      accept: true,
+    },
+    {
+      label: 'equal provider revision observed earlier',
+      storedRevision: 20,
+      incomingRevision: 20,
+      incomingObservation: 10,
+      accept: false,
+    },
+    {
+      label: 'no revisions, older observation',
+      storedRevision: null,
+      incomingRevision: null,
+      incomingObservation: 10,
+      accept: false,
+    },
+    {
+      label: 'no revisions, newer observation',
+      storedRevision: null,
+      incomingRevision: null,
+      incomingObservation: 30,
+      accept: true,
+    },
+    {
+      label: 'one revision missing, older observation',
+      storedRevision: 20,
+      incomingRevision: null,
+      incomingObservation: 10,
+      accept: false,
+    },
+  ])(
+    'held document freshness: $label',
+    async ({ storedRevision, incomingRevision, incomingObservation, accept }) => {
+      const suffix = randomUUID();
+      const w = `w-${suffix}`;
+      const n = `n-${suffix}`;
+      const u = `u-${suffix}`;
+      const a = await applyPlayerProfile(
+        db,
+        'wnba',
+        profile(w, 'Original WNBA', [
+          { source_id: `sport-a-${suffix}`, scope: 'WNBA', id_type: 'sport_profile' },
+        ]),
+        silentLog,
+      );
+      const b = await applyPlayerProfile(
+        db,
+        'ncaawb',
+        profile(n, 'Original NCAA', [
+          { source_id: `sport-b-${suffix}`, scope: 'NCAAW', id_type: 'sport_profile' },
+        ]),
+        silentLog,
+      );
+      if (!a.playerId || !b.playerId) throw new Error('candidate setup failed');
+      const identityBefore = await identityFingerprint([a.playerId, b.playerId]);
+      const doc = (name: string, revision: number | null) =>
+        PlayerProfileDocumentSchema.parse({
+          id: u,
+          full_name: name,
+          references: [
+            { source_id: w, scope: 'WNBA', id_type: 'league_profile' },
+            { source_id: n, scope: 'NCAAW', id_type: 'league_profile' },
+          ],
+          ...(revision === null ? {} : { updated: later(revision).toISOString() }),
+          future_provider_field: { retained: name },
+        });
+      const stored = doc('Stored held name', storedRevision);
+      expect(
+        (await applyPlayerProfile(db, 'unrivaled', stored, silentLog, { observedAt: later(20) }))
+          .playerId,
+      ).toBeNull();
+      const [before] =
+        await db`select * from ingest.player_merge_holds where trigger_document_id = ${u}`;
+      if (!before) throw new Error('hold missing');
+      const incoming = doc('Incoming held name', incomingRevision);
+      expect(
+        (
+          await applyPlayerProfile(db, 'unrivaled', incoming, silentLog, {
+            observedAt: later(incomingObservation),
+          })
+        ).playerId,
+      ).toBeNull();
+      const rows =
+        await db`select * from ingest.player_merge_holds where trigger_document_id = ${u}`;
+      expect(rows).toHaveLength(1);
+      const after = rows[0];
+      if (!after) throw new Error('hold missing');
+      if (accept) {
+        expect(after.document).toEqual(JSON.parse(JSON.stringify(incoming)));
+        expect(after.document_observed_at).toEqual(later(incomingObservation));
+        expect(after.id).toBe(before.id);
+        expect(after.created_at).toEqual(before.created_at);
+      } else {
+        // Reject the entire stale replacement: keep the matching evidence, run and timestamps too.
+        expect(after).toEqual(before);
+      }
+      expect(await identityFingerprint([a.playerId, b.playerId])).toEqual(identityBefore);
+      expect((await replayHeldDocument(db, after.id, silentLog)).playerId).toBeNull();
+      expect((await heldDocuments(u))[0]?.document).toEqual(after.document);
+      expect(await holdsFor(u)).toHaveLength(1);
+    },
+  );
+
   it('a held document is replayable from player_merge_holds.document alone: the replay reproduces the identical single open hold (same candidates and detail, body and document_updated_at refreshed) and changes nothing; a corrupted stored body is rejected by the schema', async () => {
     const suffix = randomUUID();
     const docs = suffixedDocs(suffix);

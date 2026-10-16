@@ -503,7 +503,9 @@ interface HeldDocument {
  * carried it. Re-applying the document never duplicates an open hold: the one
  * open row is refreshed with the stored body, the candidates, detail and run
  * as computed now (stored identity may have moved since the first write; a
- * resolution must see the current parties), and `document_updated_at`.
+ * resolution must see the current parties), and `document_updated_at`. Older
+ * inputs cannot replace the held evidence: compare provider revisions when
+ * both exist, then observation time for equal or unavailable revisions.
  */
 async function holdReference(
   tx: TransactionSql,
@@ -524,7 +526,17 @@ async function holdReference(
                  document = excluded.document,
                  document_observed_at = excluded.document_observed_at,
                  document_updated_at = now(),
-                 updated_at = now()`;
+                 updated_at = now()
+             where case
+               when player_merge_holds.document ->> 'updated' is not null
+                and excluded.document ->> 'updated' is not null
+                and (excluded.document ->> 'updated')::timestamptz <>
+                    (player_merge_holds.document ->> 'updated')::timestamptz
+               then (excluded.document ->> 'updated')::timestamptz >
+                    (player_merge_holds.document ->> 'updated')::timestamptz
+               else player_merge_holds.document_observed_at is null
+                 or excluded.document_observed_at >= player_merge_holds.document_observed_at
+             end`;
   log?.warn(
     { league: trigger.league, documentId: trigger.documentId, ...hold, metric: 'merge_held' },
     'identity reference held for reconciliation',
