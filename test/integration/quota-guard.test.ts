@@ -94,16 +94,26 @@ describe('QuotaGuard', () => {
       reason: 'below_reserve',
     });
     expect(await guard.checkCall(product, 'trial', first.id)).toMatchObject({ ok: true });
-    await guard.recordUse(first.id);
-    await guard.recordUse(first.id);
+    // Two calls made under the first reservation (what SportradarHttp logs + recordUse), 1 s apart.
+    for (const secondsAgo of [3, 2]) {
+      await db`insert into ingest.provider_calls (run_id, source, product, league, feed, url, status, quota_counted, called_at, reservation_id)
+               values (null, 'trial', ${product}, 'ncaawb', 'pbp', 'http://test/pbp.json', 200, true,
+                       now() - make_interval(secs => ${secondsAgo}), ${first.id})`;
+      await guard.recordUse(first.id);
+    }
     expect((await guard.reservation(first.id))?.usedCalls).toBe(2);
-    // Outstanding = reserved - used, so using budget frees nothing until released...
-    expect((await guard.status()).find((s) => s.product === product)?.reserved).toBe(68);
+    // used_30d counts the calls; outstanding = reserved - used (48 + 20); spendable stays 0.
+    expect((await guard.status()).find((s) => s.product === product)).toMatchObject({
+      used30d: 2,
+      remaining: 98,
+      reserved: 68,
+      spendable: 0,
+    });
     await guard.release(first.id);
     expect((await guard.reservation(first.id))?.releasedAt).toBeInstanceOf(Date);
     expect((await guard.status()).find((s) => s.product === product)).toMatchObject({
       reserved: 20,
-      spendable: 50,
+      spendable: 48,
     });
     // Simulation reservations are recorded (rehearsal evidence) but never counted or refused.
     const sim = await guard.reserve({
