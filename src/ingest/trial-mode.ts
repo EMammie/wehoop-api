@@ -1,4 +1,4 @@
-import type { Config } from '../config.js';
+import { type Config, SPORTRADAR_DEFAULT_BASE_URL } from '../config.js';
 import type { Db } from '../db/client.js';
 import type { LeagueAdapter } from '../leagues/adapter.js';
 import type { LeagueCode } from '../leagues/codes.js';
@@ -9,6 +9,7 @@ import { SportradarHttp } from '../providers/sportradar/http.js';
 import { rateLimiterFor } from '../providers/sportradar/rate-limiter.js';
 import { createResolver } from '../providers/sportradar/resolver.js';
 import { SeasonScheduleDocumentSchema } from '../providers/sportradar/schemas/schedule.js';
+import type { ResolverSource } from '../providers/sportradar/urls.js';
 import {
   type Budget,
   budgetFor,
@@ -30,6 +31,26 @@ import type { ObservationSource } from './types.js';
  * it through the ordinary watcher at the profile's cadence. Daily
  * `changes(date)` polling does not exist here at all.
  */
+
+/**
+ * `--speed` compresses the cadence for a rehearsal against a local stand-in host; against the
+ * real host it would burn a full-game reservation in minutes of a real game, and against the
+ * simulation service (natural pace) it is meaningless. Refused anywhere but a rehearsal host.
+ */
+export function assertSpeedAllowed(config: Pick<Config, 'mode' | 'sportradar'>, speed: number) {
+  if (speed === 1) return;
+  if (!Number.isInteger(speed) || speed < 1) throw new Error('--speed must be an integer >= 1');
+  if (config.mode === 'sim' || config.sportradar.baseUrl === SPORTRADAR_DEFAULT_BASE_URL) {
+    throw new Error(
+      `--speed ${speed} is only allowed against a rehearsal host (SPORTRADAR_BASE_URL on a loopback host, pnpm sim serve); against ${config.mode === 'sim' ? 'the simulation service' : 'api.sportradar.com'} the cadence must be real`,
+    );
+  }
+}
+
+/** The run/reservation source a resolver implies: trial, production, rehearsal (local stand-in), or simulation. */
+export function runSourceOf(resolverSource: ResolverSource): RunSource {
+  return resolverSource;
+}
 
 /** The provider season a calendar date falls in. NCAAWB seasons are named by their first year. */
 export function seasonFor(
@@ -119,12 +140,13 @@ export async function planDay(
     ...(opts.seasonYear !== undefined ? { year: opts.seasonYear } : {}),
     ...(opts.seasonType !== undefined ? { type: opts.seasonType } : {}),
   });
-  const source: RunSource = deps.config.mode === 'sim' ? 'simulation' : deps.config.mode;
-  if (source === 'simulation') {
+  if (deps.config.mode === 'sim') {
     throw new Error(
       'trial plan needs MODE=trial or MODE=production: the simulation service has no schedule feed',
     );
   }
+  const resolver = createResolver(deps.config, league);
+  const source = runSourceOf(resolver.source);
   const run = await startRun(deps.db, {
     kind: 'poll_schedule',
     league,
@@ -138,7 +160,7 @@ export async function planDay(
     league,
     product: deps.adapter.product,
     runId: run.id,
-    resolver: createResolver(deps.config, league),
+    resolver,
     limiter: rateLimiterFor(deps.adapter.product),
     guard: deps.guard,
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
@@ -209,7 +231,8 @@ export function planWatch(
   // Trial profiles apply to every polled source; the simulation cadence is for `--recording`
   // replays without a profile (worker legacy path).
   const cadence = cadenceFor({
-    source: source === 'simulation' || source === 'fixture' ? 'trial' : source,
+    source:
+      source === 'simulation' || source === 'fixture' || source === 'rehearsal' ? 'trial' : source,
     capabilities: adapter.capabilities,
     coverage,
     profile: chosen,
@@ -266,13 +289,15 @@ export async function runTrialWatch(
   opts: TrialWatchOptions,
 ): Promise<TrialWatchOutcome> {
   const { adapter, config, db, log } = deps;
-  const source: RunSource = config.mode === 'sim' ? 'simulation' : config.mode;
+  const resolver = createResolver(config, adapter.league, deps.sim);
+  const source = runSourceOf(resolver.source);
   const observationSource: ObservationSource = source === 'simulation' ? 'simulation' : 'rest';
   if (opts.game.status === 'closed') {
     throw new Error(`game ${opts.game.id} is already closed; nothing to watch`);
   }
   const plan = planWatch(adapter, source, opts.game.coverage, opts.profile);
   const speed = opts.speed ?? 1;
+  assertSpeedAllowed(config, speed);
   const cadence = speed === 1 ? plan.cadence : scaleCadence(plan.cadence, speed);
   const reservation = await deps.guard.reserve({
     product: adapter.product,
@@ -318,7 +343,7 @@ export async function runTrialWatch(
     league: adapter.league,
     product: adapter.product,
     runId: run.id,
-    resolver: createResolver(config, adapter.league, deps.sim),
+    resolver,
     limiter: rateLimiterFor(adapter.product),
     guard: deps.guard,
     reservationId: reservation.id,

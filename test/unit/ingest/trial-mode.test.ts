@@ -1,5 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { lagFromRecord, seasonFor } from '../../../src/ingest/trial-mode.js';
+import { loadConfig } from '../../../src/config.js';
+import { assertSpeedAllowed, lagFromRecord, seasonFor } from '../../../src/ingest/trial-mode.js';
+
+const base = {
+  DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:54322/postgres',
+  SUPABASE_URL: 'http://127.0.0.1:54321',
+  SUPABASE_SERVICE_ROLE_KEY: 'service',
+  DATABASE_SESSION_URL: 'postgresql://u:p@db.example.com:5432/postgres',
+  SPORTRADAR_NCAAWB_KEY: 'unit-test-key',
+};
+
+describe('assertSpeedAllowed (--speed only against a rehearsal host)', () => {
+  it('speed 1 is always fine; a compressed cadence is refused against api.sportradar.com and the simulation service', () => {
+    const trial = loadConfig({ ...base, MODE: 'trial' });
+    const rehearsal = loadConfig({
+      ...base,
+      MODE: 'trial',
+      SPORTRADAR_BASE_URL: 'http://127.0.0.1:8787',
+    });
+    const sim = loadConfig({ ...base, MODE: 'sim' });
+    expect(() => assertSpeedAllowed(trial, 1)).not.toThrow();
+    expect(() => assertSpeedAllowed(rehearsal, 60)).not.toThrow();
+    expect(() => assertSpeedAllowed(trial, 30)).toThrow(/only allowed against a rehearsal host/);
+    expect(() => assertSpeedAllowed(sim, 30)).toThrow(/simulation service/);
+    expect(() => assertSpeedAllowed(rehearsal, 0)).toThrow(/integer/);
+  });
+});
 
 describe('seasonFor', () => {
   it('NCAAWB seasons are named by their first year; WNBA and Unrivaled by the calendar year', () => {

@@ -134,6 +134,7 @@ export function cadenceFor(args: {
   if (args.source === 'simulation' || args.source === 'fixture') {
     return full ? SIM_CADENCE.full : SIM_CADENCE.scoreOnly;
   }
+  // trial, production, rehearsal: the profile cadences (a rehearsal is the trial path on a stand-in host).
   const profile = args.profile ?? defaultProfileFor(args.coverage);
   if (!profileAllowed(profile, args.coverage)) {
     throw new Error(

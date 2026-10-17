@@ -11,6 +11,7 @@ import { type Feed, type FeedParams, isGameFeed } from '../providers/sportradar/
 import { type ApplyDeps, type ApplyResult, applyChanges, ensureGame } from './apply-changes.js';
 import type { Cadence } from './cadence.js';
 import { ensurePlayers, ensureSeason, ensureTeams } from './identity.js';
+import { QuotaRefusedError } from './quota-guard.js';
 import {
   appendRecordedDocument,
   type RecordedDocument,
@@ -354,6 +355,9 @@ export async function cadenceLoop(
       );
       status = out?.status ?? status;
     } catch (err) {
+      // No budget: stop the watch (the run ends as error, the reservation is released) instead
+      // of issuing a guard query per tick forever.
+      if (err instanceof QuotaRefusedError) throw err;
       failed++;
       log.error({ err, feed, calls }, 'fetch failed; retrying at the next due time');
     }
