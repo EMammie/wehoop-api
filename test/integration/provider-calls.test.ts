@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { QuotaGuard } from '../../src/ingest/quota-guard.js';
 import { SportradarHttp } from '../../src/providers/sportradar/http.js';
+import { RateLimiter } from '../../src/providers/sportradar/rate-limiter.js';
 import {
   ProdUrlResolver,
   redactUrl,
@@ -44,16 +46,28 @@ describe('provider_calls accounting (CLAUDE.md non-negotiable 8)', () => {
     const doc = await sim.getJson('pbp', z.object({ ok: z.boolean() }));
     expect(doc.data.ok).toBe(true);
     expect(doc.requestedAt.getTime()).toBeLessThanOrEqual(doc.receivedAt.getTime());
+    const resolver = new ProdUrlResolver({
+      league: 'wnba',
+      accessLevel: 'trial',
+      apiKey: 'not-a-real-key',
+    });
+    // A counted source must be rate-limited and quota-guarded by construction.
+    expect(
+      () => new SportradarHttp({ db, log: silentLog, league: 'wnba', runId: null, resolver }),
+    ).toThrow(/RateLimiter and a QuotaGuard/);
     const trial = new SportradarHttp({
       db,
       log: silentLog,
       league: 'wnba',
       runId: null,
       fetchImpl: fakeFetch(),
-      resolver: new ProdUrlResolver({
-        league: 'wnba',
-        accessLevel: 'trial',
-        apiKey: 'not-a-real-key',
+      resolver,
+      limiter: new RateLimiter({ minIntervalMs: 0 }),
+      // The seeded wnba row is unverified; the config override stands in for the console limit.
+      guard: new QuotaGuard({
+        db,
+        log: silentLog,
+        overrides: { wnba: { limit30d: 1000, reserve: 100 } },
       }),
     });
     await trial.getJson('summary', z.object({ ok: z.boolean() }), { gameId: 'g1' });

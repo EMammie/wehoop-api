@@ -9,6 +9,14 @@
  * SportradarHttp that talks to that product, so two watchers on one trial key
  * cannot overlap.
  */
+/**
+ * 1 s slots with a 50 ms margin: the provider measures spacing on arrival, and
+ * two requests dispatched exactly 1 s apart can arrive a few ms closer once
+ * the keep-alive connection is warm (seen against the local fake provider).
+ * `provider_calls.called_at` spacing therefore stays >= 1 s with room to spare.
+ */
+export const DEFAULT_MIN_INTERVAL_MS = 1050;
+
 export class RateLimiter {
   private nextSlot: number | null = null;
   readonly minIntervalMs: number;
@@ -22,7 +30,7 @@ export class RateLimiter {
       sleep?: (ms: number) => Promise<void>;
     } = {},
   ) {
-    this.minIntervalMs = opts.minIntervalMs ?? 1000;
+    this.minIntervalMs = opts.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
     this.now = opts.now ?? (() => Date.now());
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
@@ -50,7 +58,10 @@ export class RateLimiter {
 const registry = new Map<string, RateLimiter>();
 
 /** The process-wide limiter for one product (quota bucket). */
-export function rateLimiterFor(product: string, minIntervalMs = 1000): RateLimiter {
+export function rateLimiterFor(
+  product: string,
+  minIntervalMs = DEFAULT_MIN_INTERVAL_MS,
+): RateLimiter {
   let limiter = registry.get(product);
   if (!limiter) {
     limiter = new RateLimiter({ minIntervalMs });
