@@ -281,7 +281,12 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
           { game: { ...game, status: 'scheduled' }, profile: 'full', speed: SPEED },
         ),
       ).rejects.toMatchObject({ reason: 'below_reserve' });
-      expect(server.stats.requests).toBe(2); // the loop stopped at the first refusal
+      // Two calls allowed (pbp, then summary at t=0), the third guard check refuses before any HTTP.
+      expect({
+        seen: guard.seen,
+        served: server.stats.served,
+        requests: server.stats.requests,
+      }).toEqual({ seen: 3, served: 2, requests: 2 });
       const [res] = await guard.reservations({ product });
       const last = (await guard.reservations({ product })).at(-1);
       expect(res).toBeDefined();
