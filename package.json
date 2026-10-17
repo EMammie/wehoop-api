@@ -15,6 +15,7 @@
     "dev:worker": "tsx src/bin/worker.ts",
     "sim": "tsx src/bin/sim.ts",
     "subscribe": "tsx src/bin/subscribe.ts",
+    "trial": "tsx src/bin/trial.ts",
     "build": "tsc -p tsconfig.json --outDir dist",
     "release:tag": "tsx src/bin/release-tag.ts",
     "supabase": "supabase",
