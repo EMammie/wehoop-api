@@ -9,6 +9,7 @@ import { createDb } from '../db/client.js';
 import { budgetFor, TRIAL_PROFILES, type TrialProfile } from '../ingest/cadence.js';
 import { QuotaGuard, QuotaRefusedError } from '../ingest/quota-guard.js';
 import {
+  assertSpeedAllowed,
   gamesOn,
   heldProfileImpact,
   lagFromRecord,
@@ -37,6 +38,9 @@ import { createLogger } from '../logger.js';
  *   the watch ends. `--speed` compresses the cadence for a rehearsal against
  *   `pnpm sim serve`; never use it on a live game.
  * pnpm trial status [--json]        ingest.v_quota (with QUOTA_* overrides applied) and reservations
+ * pnpm trial release --reservation <id> | --stale
+ *   Release a reservation a killed watcher left open (the next worker start and every new
+ *   reservation do this for runs that are no longer running; this is the manual escape).
  * pnpm trial holds [--json]         open player_merge_holds and whether they touch a watched game
  * pnpm trial lag --record <jsonl> [--game <uuid>]
  *   median / p95 subscriber lag from a `pnpm subscribe --record` file: from the event's
@@ -65,6 +69,8 @@ async function main() {
       product: { type: 'string' },
       'limit-30d': { type: 'string' },
       reserve: { type: 'string' },
+      reservation: { type: 'string' },
+      stale: { type: 'boolean', default: false },
     },
     allowPositionals: true,
     strict: true,
@@ -144,6 +150,11 @@ async function main() {
         if (profile && !(TRIAL_PROFILES as readonly string[]).includes(profile))
           usage(`--profile must be one of ${TRIAL_PROFILES.join('|')}`);
         const speed = intArg('speed', args.speed, 1) ?? 1;
+        try {
+          assertSpeedAllowed(config, speed);
+        } catch (err) {
+          usage((err as Error).message);
+        }
         if (config.mode === 'sim' && !args.recording)
           usage('MODE=sim needs --recording <id> (the trial flow against the simulation host)');
         const game = await resolveGame(db, league, args.game ?? '');
@@ -209,6 +220,29 @@ async function main() {
         }
         break;
       }
+      case 'release': {
+        // Operator escape for a reservation left open (watcher killed before its release).
+        const id = intArg('reservation', args.reservation, 1);
+        if (id === undefined && !args.stale) usage('--reservation <id> or --stale is required');
+        if (id !== undefined) {
+          const before = await guard.reservation(id);
+          if (!before) {
+            console.error(`reservation ${id} not found`);
+            process.exit(66);
+          }
+          await guard.release(id);
+          console.log(
+            `reservation #${id} ${before.releasedAt ? 'was already released' : 'released'} (reserved ${before.reservedCalls}, used ${before.usedCalls})`,
+          );
+        }
+        if (args.stale) {
+          const ids = await guard.releaseStale();
+          console.log(
+            `released ${ids.length} reservation(s) whose watch run has ended${ids.length ? `: ${ids.join(', ')}` : ''}`,
+          );
+        }
+        break;
+      }
       case 'holds': {
         const impact = await heldProfileImpact(db);
         if (args.json) console.log(JSON.stringify(impact));
@@ -265,7 +299,7 @@ async function main() {
         break;
       }
       default:
-        usage('usage: pnpm trial plan|watch|status|holds|lag|quota (see src/bin/trial.ts)');
+        usage('usage: pnpm trial plan|watch|status|release|holds|lag|quota (see src/bin/trial.ts)');
     }
   } catch (err) {
     if (err instanceof QuotaRefusedError) {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { QuotaGuard, QuotaRefusedError } from '../../src/ingest/quota-guard.js';
+import { endRun, startRun } from '../../src/ingest/runs.js';
 import { silentLog, testDb } from '../helpers/db.js';
 
 /**
@@ -130,6 +131,49 @@ describe('QuotaGuard', () => {
     await expect(
       guard.reserve({ product, gameId: null, profile: 'full', calls: 0, source: 'trial' }),
     ).rejects.toThrow(/positive integer/);
+  });
+
+  it('a reservation whose watch run ended without a release (kill -9) holds no budget: the next reserve releases it', async () => {
+    const guard = new QuotaGuard({
+      db,
+      log: silentLog,
+      overrides: { [product]: { limit30d: 100, reserve: 30 } },
+    });
+    // used_30d is 2 from the previous test: spendable = 100 - 2 - 0 - 30 = 68.
+    const stale = await guard.reserve({
+      product,
+      gameId: null,
+      profile: 'full',
+      calls: 60,
+      source: 'trial',
+    });
+    const run = await startRun(db, {
+      kind: 'watch_game',
+      league: 'ncaawb',
+      gameId: null,
+      source: 'trial',
+    });
+    await guard.attachRun(stale.id, run.id);
+    expect((await guard.status()).find((s) => s.product === product)?.spendable).toBe(8);
+    // The worker dies: the next lock holder marks the run aborted; nobody releases the reservation.
+    await endRun(db, run.id, 'aborted', 'worker died; marked aborted by the next lock holder');
+    expect((await guard.status()).find((s) => s.product === product)?.reserved).toBe(0); // ignored once the run ended
+    const next = await guard.reserve({
+      product,
+      gameId: null,
+      profile: 'full',
+      calls: 60,
+      source: 'trial',
+    });
+    expect(next.id).not.toBe(stale.id);
+    expect((await guard.reservation(stale.id))?.releasedAt).toBeInstanceOf(Date); // auto-released on reserve
+    expect((await guard.status()).find((s) => s.product === product)).toMatchObject({
+      reserved: 60,
+      spendable: 8,
+    });
+    await guard.release(next.id);
+    // Manual escape: pnpm trial release --stale releases nothing more now.
+    expect(await guard.releaseStale(product)).toEqual([]);
   });
 
   it('stamping verified_at (pnpm trial quota) lets the guard spend without an override', async () => {

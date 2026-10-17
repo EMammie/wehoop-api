@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type Config, loadConfig } from '../../src/config.js';
-import { QuotaGuard, type QuotaRefusedError } from '../../src/ingest/quota-guard.js';
+import type { Db } from '../../src/db/client.js';
+import { QuotaGuard, QuotaRefusedError } from '../../src/ingest/quota-guard.js';
 import { readRecording, relabelRecording } from '../../src/ingest/recording.js';
 import { planDay, resolveGame, runTrialWatch } from '../../src/ingest/trial-mode.js';
 import { ncaawbAdapter } from '../../src/leagues/ncaawb/adapter.js';
@@ -19,12 +20,15 @@ import { counts, silentLog, testDb } from '../helpers/db.js';
  * The trial flow end to end (plan §4 "Trial mode", §7 M3) against the local
  * fake provider standing in for api.sportradar.com: MODE=trial, a key made up
  * in this test (never from .env), SPORTRADAR_BASE_URL pointed at the fake
- * server, the recording time-scaled 1000x. Proves: `plan` = exactly one
- * quota-counted schedule call; `watch` reserves the derived budget, links it
- * to a watch_game run, rate-limits every call (no 429 from the server, >= 1 s
- * between called_at per product), counts each call against the reservation,
- * and releases it; an extended_boxscore game emits only status/period while
- * live and its stats once closed; a reservation below reserve is refused.
+ * server (a loopback host, so the resolver source is `rehearsal`: rate-limited
+ * and guarded like trial, never quota-counted), the recording time-scaled
+ * 1000x. Proves: `plan` = exactly one schedule call; `watch` reserves the
+ * derived budget, links it to a watch_game run, rate-limits every call (no
+ * 429 from the server, >= 1 s between called_at per product), counts each
+ * call against the reservation, and releases it; an extended_boxscore game
+ * emits only status/period while live and its stats once closed; a trial
+ * reservation below reserve is refused before any call; an in-loop refusal
+ * ends the watch as an error with the reservation released.
  */
 const FULL = new URL('../../fixtures/ncaawb/sim-d9b71fe0-replay.compact.jsonl.gz', import.meta.url)
   .pathname;
@@ -76,8 +80,30 @@ async function minGapMs(): Promise<number | null> {
   const [row] = await db<{ ms: number | null }[]>`
     select (extract(epoch from min(gap)) * 1000)::int as ms from (
       select called_at - lag(called_at) over (order by called_at, id) as gap
-      from ingest.provider_calls where product = ${product} and quota_counted) g`;
+      from ingest.provider_calls
+      where product = ${product} and source in ('trial', 'production', 'rehearsal')) g`;
   return row?.ms ?? null;
+}
+
+/** A guard that refuses every call after the first `allowed` ones: the in-loop refusal path. */
+class RefusingGuard extends QuotaGuard {
+  seen = 0;
+  constructor(
+    db: Db,
+    private readonly allowed: number,
+  ) {
+    super({ db, log });
+  }
+  override async assertCall(
+    product: string,
+    source: Parameters<QuotaGuard['assertCall']>[1],
+    reservationId: number | null = null,
+  ) {
+    if (++this.seen > this.allowed) {
+      throw new QuotaRefusedError(product, 'below_reserve', null, 'injected: budget exhausted');
+    }
+    return super.assertCall(product, source, reservationId);
+  }
 }
 
 beforeAll(async () => {
@@ -110,7 +136,7 @@ afterAll(async () => {
 });
 
 describe('trial flow against the fake provider (MODE=trial, made-up key, local host)', () => {
-  it('full game: plan makes one counted schedule call; watch reserves 332, rate-limits, counts and releases', async () => {
+  it('full game: plan makes one schedule call; watch reserves 332, rate-limits, counts and releases (rehearsal: never quota-counted)', async () => {
     const server = await startFakeProvider({ replayFile: fullCopy, speed: SPEED });
     try {
       const config = configFor(server);
@@ -126,7 +152,11 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       >`
         select feed, quota_counted as "quotaCounted", url, source::text as source
         from ingest.provider_calls where product = ${product} order by id`;
-      expect(schedCall).toMatchObject({ feed: 'schedule', quotaCounted: true, source: 'trial' });
+      expect(schedCall).toMatchObject({
+        feed: 'schedule',
+        quotaCounted: false,
+        source: 'rehearsal',
+      });
       expect(schedCall?.url).toContain('/games/2025/REG/schedule.json');
       expect(schedCall?.url).not.toContain(FAKE_KEY);
 
@@ -142,7 +172,7 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       expect(out.reservation).toMatchObject({
         profile: 'full',
         reservedCalls: 332,
-        source: 'trial',
+        source: 'rehearsal',
         runId: out.runId,
         gameId: game.id,
       });
@@ -153,7 +183,7 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       const calls = await callRows(out.reservation.id);
       expect(calls).toHaveLength(out.reservation.usedCalls);
       for (const c of calls) {
-        expect(c).toMatchObject({ source: 'trial', quotaCounted: true, product, status: 200 });
+        expect(c).toMatchObject({ source: 'rehearsal', quotaCounted: false, product, status: 200 });
         expect(c.url).not.toContain(FAKE_KEY);
       }
       expect(new Set(calls.map((c) => c.feed))).toEqual(new Set(['pbp', 'boxscore', 'summary']));
@@ -164,7 +194,16 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       expect(server.stats.rejected401).toBe(0);
       const [run] = await db<{ kind: string; source: string; status: string; gameId: string }[]>`
         select kind, source::text as source, status, game_id as "gameId" from ingest.ingestion_runs where id = ${out.runId}`;
-      expect(run).toEqual({ kind: 'watch_game', source: 'trial', status: 'ok', gameId: game.id });
+      expect(run).toEqual({
+        kind: 'watch_game',
+        source: 'rehearsal',
+        status: 'ok',
+        gameId: game.id,
+      });
+      // A rehearsal spends no quota: the product's used_30d and reserved stay at zero.
+      const [q] = await db<{ used: number; reserved: number }[]>`
+        select used_30d as used, reserved from ingest.v_quota where product = ${product}`;
+      expect(q).toEqual({ used: 0, reserved: 0 });
       const c = await counts(db, game.id);
       expect(c.watchRunId).toBe(String(out.runId));
       expect(c.events).toBeGreaterThan(200);
@@ -177,17 +216,27 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
     }
   }, 120_000);
 
-  it('a reservation that would dip below reserve is refused before any call', async () => {
+  it('a trial reservation that would dip below reserve is refused before any call', async () => {
     const tight = `m3-tight-${randomUUID().slice(0, 8)}`;
     await db`insert into ingest.product_quotas (product, limit_30d, qps, reserve, note, verified_at)
              values (${tight}, 400, 1, 100, 'integration: too small for a full game', now())`;
     const server = await startFakeProvider({ replayFile: fullCopy, speed: SPEED });
     try {
-      const config = configFor(server);
+      // Against the default host (source trial) the guard refuses at reservation time, before the
+      // resolver is ever asked for a URL; the made-up key never leaves the process.
+      const config = loadConfig({
+        DATABASE_URL: process.env.DATABASE_URL,
+        DATABASE_SESSION_URL: process.env.DATABASE_URL,
+        SUPABASE_URL: process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321',
+        SUPABASE_SERVICE_ROLE_KEY: 'not-used-here',
+        MODE: 'trial',
+        SPORTRADAR_NCAAWB_KEY: FAKE_KEY,
+      });
       const guard = new QuotaGuard({ db, log });
       const game = await resolveGame(db, 'ncaawb', fullId);
       if (!game) throw new Error('game missing');
       await db`update public.games set status = 'scheduled' where id = ${game.id}`; // re-open for the attempt
+      // Real cadence (no --speed: refused against the real host); the guard refuses first anyway.
       await expect(
         runTrialWatch(
           {
@@ -199,11 +248,15 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
             pulse: null,
             isStopped: () => false,
           },
-          { game: { ...game, status: 'scheduled' }, profile: 'full', speed: SPEED },
+          { game: { ...game, status: 'scheduled' }, profile: 'full' },
         ),
       ).rejects.toMatchObject({ reason: 'below_reserve' } satisfies Partial<QuotaRefusedError>);
       expect(await guard.reservations({ product: tight })).toEqual([]);
       expect(server.stats.requests).toBe(0);
+      const [calls] = await db<
+        { n: number }[]
+      >`select count(*)::int as n from ingest.provider_calls where product = ${tight}`;
+      expect(calls?.n).toBe(0);
       const [n] = await db<{ n: number }[]>`
         select count(*)::int as n from ingest.ingestion_runs where kind = 'watch_game' and game_id = ${game.id} and status = 'running'`;
       expect(n?.n).toBe(0);
@@ -211,6 +264,36 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       await server.close();
       await db`update public.games set status = 'closed' where provider_game_id = ${fullId}`;
       await db`delete from ingest.product_quotas where product = ${tight}`;
+    }
+  });
+
+  it('an in-loop quota refusal ends the watch as an error and releases the reservation', async () => {
+    const server = await startFakeProvider({ replayFile: fullCopy, speed: SPEED });
+    try {
+      const config = configFor(server);
+      const guard = new RefusingGuard(db, 2);
+      const game = await resolveGame(db, 'ncaawb', fullId);
+      if (!game) throw new Error('game missing');
+      await db`update public.games set status = 'scheduled' where id = ${game.id}`;
+      await expect(
+        runTrialWatch(
+          { db, log, config, adapter, guard, pulse: null, isStopped: () => false },
+          { game: { ...game, status: 'scheduled' }, profile: 'full', speed: SPEED },
+        ),
+      ).rejects.toMatchObject({ reason: 'below_reserve' });
+      expect(server.stats.requests).toBe(2); // the loop stopped at the first refusal
+      const [res] = await guard.reservations({ product });
+      const last = (await guard.reservations({ product })).at(-1);
+      expect(res).toBeDefined();
+      expect(last?.releasedAt).toBeInstanceOf(Date);
+      expect(last?.usedCalls).toBe(2);
+      const [run] = await db<{ status: string; error: string | null }[]>`
+        select status, error from ingest.ingestion_runs where id = ${last?.runId ?? 0}`;
+      expect(run?.status).toBe('error');
+      expect(run?.error).toMatch(/quota refused/);
+    } finally {
+      await server.close();
+      await db`update public.games set status = 'closed' where provider_game_id = ${fullId}`;
     }
   });
 

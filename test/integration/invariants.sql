@@ -330,10 +330,10 @@ select (has_table_privilege('anon', 'ingest.player_merges', 'SELECT')::int
       + has_table_privilege('authenticated', 'ingest.player_merges', 'SELECT')::int
       + has_table_privilege('authenticated', 'ingest.player_merge_holds', 'SELECT')::int);
 
--- check: sim_and_fixture_calls_never_count_quota | expect: 0
+-- check: sim_fixture_and_rehearsal_calls_never_count_quota | expect: 0
 select count(*)
 from ingest.provider_calls
-where quota_counted and source in ('simulation', 'fixture');
+where quota_counted and source in ('simulation', 'fixture', 'rehearsal');
 
 -- check: trial_and_production_calls_always_count_quota | expect: 0
 select count(*)
@@ -347,7 +347,7 @@ select count(*) from ingest.provider_calls where quota_counted and product is nu
 select count(*)
 from ingest.ingestion_runs r
 where r.kind = 'watch_game'
-  and r.source in ('trial', 'production')
+  and r.source in ('trial', 'production', 'rehearsal')
   and not exists (select 1 from ingest.budget_reservations b where b.run_id = r.id);
 
 -- check: counted_calls_spaced_at_least_one_second_per_product | expect: 0
@@ -358,6 +358,21 @@ from (
   where quota_counted
 ) g
 where g.gap < interval '1 second';
+
+-- check: rate_limited_calls_spaced_at_least_one_second_per_product | expect: 0
+select count(*)
+from (
+  select called_at - lag(called_at) over (partition by product order by called_at, id) as gap
+  from ingest.provider_calls
+  where source in ('trial', 'production', 'rehearsal')
+) g
+where g.gap < interval '1 second';
+
+-- check: no_open_reservation_for_a_finished_watch_run | expect: 0
+select count(*)
+from ingest.budget_reservations b
+join ingest.ingestion_runs r on r.id = b.run_id
+where b.released_at is null and r.status <> 'running';
 
 -- check: reservation_used_calls_match_provider_calls | expect: 0
 select count(*)

@@ -14,7 +14,7 @@ import {
 import { QuotaGuard, QuotaRefusedError } from '../ingest/quota-guard.js';
 import { ReferenceIngester } from '../ingest/reference.js';
 import { endRun, startRun } from '../ingest/runs.js';
-import { resolveGame, runTrialWatch } from '../ingest/trial-mode.js';
+import { assertSpeedAllowed, resolveGame, runTrialWatch } from '../ingest/trial-mode.js';
 import { LeagueCodeSchema } from '../leagues/codes.js';
 import { adapterFor } from '../leagues/registry.js';
 import { OutboxPublisher } from '../live/outbox-publisher.js';
@@ -102,6 +102,12 @@ async function main() {
   const league = LeagueCodeSchema.parse(args.league);
   const adapter = adapterFor(league);
   const speed = intArg('speed', args.speed, 1) ?? 1;
+  try {
+    assertSpeedAllowed(config, speed);
+  } catch (err) {
+    log.error({ speed }, (err as Error).message);
+    process.exit(64);
+  }
   const profile = args.profile as TrialProfile | undefined;
   if (profile && !(TRIAL_PROFILES as readonly string[]).includes(profile)) {
     log.error({ profile }, `--profile must be one of ${TRIAL_PROFILES.join('|')}`);
@@ -184,7 +190,19 @@ async function main() {
       error = coalesce(error, 'worker died; marked aborted by the next lock holder')
     where status = 'running' and kind in ('replay', 'watch_game') returning id::text`;
   const orphanedIds = orphaned.map((r) => Number(r.id));
-  if (orphanedIds.length > 0) log.warn({ runs: orphanedIds }, 'aborted orphaned runs');
+  if (orphanedIds.length > 0) {
+    log.warn({ runs: orphanedIds }, 'aborted orphaned runs');
+    // Their budget reservations never reached runTrialWatch's release (kill -9, host restart).
+    const released = await db<{ id: string }[]>`
+      update ingest.budget_reservations set released_at = now(),
+        note = coalesce(note, '') || ' [released by the next lock holder: watch run died]'
+      where run_id = any(${orphanedIds}) and released_at is null returning id::text`;
+    if (released.length > 0)
+      log.warn(
+        { reservations: released.map((r) => Number(r.id)) },
+        'released orphaned reservations',
+      );
+  }
 
   // Run + source.
   const untilClosed = args.until === 'closed';
