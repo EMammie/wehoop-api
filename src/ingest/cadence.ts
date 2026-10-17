@@ -28,12 +28,19 @@ const MIN = 60_000;
 const GAME_HORIZON_MS = 150 * MIN;
 const CLOSING: GameFeed[] = ['summary', 'boxscore'];
 
-/** Plan §4: full = pbp/30 s + boxscore/5 min; extended = summary/60 s + 1 boxscore at +120 min; lean-full = pbp/60 s. */
+/**
+ * Plan §4: full = pbp/30 s + box-score statistics/5 min; extended = summary/60 s
+ * + 1 boxscore at +120 min; lean-full = pbp/60 s + statistics/10 min.
+ * In Sportradar v8 the team and player statistics live in the Game Summary
+ * document; the Game Boxscore feed carries only the line score and leaders
+ * (fixtures/ncaawb/sim-d9b71fe0-{summary,boxscore}-q1.json). The periodic
+ * "boxscore" of the plan is therefore the summary feed; the budgets are the same.
+ */
 export const PROFILE_CADENCE: Record<TrialProfile, Cadence> = {
   full: {
     pbpMs: 30_000,
-    summaryMs: null,
-    boxscoreMs: 5 * MIN,
+    summaryMs: 5 * MIN,
+    boxscoreMs: null,
     boxscoreAtMs: [],
     horizonMs: GAME_HORIZON_MS,
     closing: CLOSING,
@@ -48,8 +55,8 @@ export const PROFILE_CADENCE: Record<TrialProfile, Cadence> = {
   },
   'lean-full': {
     pbpMs: 60_000,
-    summaryMs: null,
-    boxscoreMs: 10 * MIN,
+    summaryMs: 10 * MIN,
+    boxscoreMs: null,
     boxscoreAtMs: [],
     horizonMs: GAME_HORIZON_MS,
     closing: CLOSING,

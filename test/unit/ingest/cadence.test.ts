@@ -12,11 +12,11 @@ import { ncaawbAdapter } from '../../../src/leagues/ncaawb/adapter.js';
 import { wnbaAdapter } from '../../../src/leagues/wnba/adapter.js';
 
 describe('trial profiles: budgets derived from the cadence constants (plan §4)', () => {
-  it('full ≈ 330: pbp every 30 s + boxscore every 5 min over 2.5 h, plus the closing pair', () => {
+  it('full ≈ 330: pbp every 30 s + statistics (summary) every 5 min over 2.5 h, plus the closing pair', () => {
     expect(budgetFor(PROFILE_CADENCE.full)).toEqual({
       pbp: 300,
-      summary: 0,
-      boxscore: 30,
+      summary: 30,
+      boxscore: 0,
       closing: 2,
       total: 332,
     });
@@ -30,11 +30,11 @@ describe('trial profiles: budgets derived from the cadence constants (plan §4)'
       total: 153,
     });
   });
-  it('lean-full ≈ 165: pbp every 60 s + boxscore every 10 min, plus closing', () => {
+  it('lean-full ≈ 165: pbp every 60 s + statistics every 10 min, plus closing', () => {
     expect(budgetFor(PROFILE_CADENCE['lean-full'])).toEqual({
       pbp: 150,
-      summary: 0,
-      boxscore: 15,
+      summary: 15,
+      boxscore: 0,
       closing: 2,
       total: 167,
     });
@@ -102,7 +102,7 @@ describe('cadenceFor (source, capabilities, coverage)', () => {
   });
   it('scaleCadence compresses intervals and horizon for a rehearsal without changing the budget', () => {
     const scaled = scaleCadence(PROFILE_CADENCE.full, 30);
-    expect(scaled).toMatchObject({ pbpMs: 1000, boxscoreMs: 10_000, horizonMs: 300_000 });
+    expect(scaled).toMatchObject({ pbpMs: 1000, summaryMs: 10_000, horizonMs: 300_000 });
     expect(budgetFor(scaled)).toEqual(budgetFor(PROFILE_CADENCE.full));
     expect(scaleCadence(PROFILE_CADENCE.extended, 60).boxscoreAtMs).toEqual([120_000]);
     expect(() => scaleCadence(PROFILE_CADENCE.full, 0)).toThrow();

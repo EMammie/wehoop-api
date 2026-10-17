@@ -447,6 +447,11 @@ export interface LagStats {
   changes: number;
   /** receivedAt - event wallClock, for event changes carrying a wallClock (provider time -> subscriber). */
   wallClock: { n: number; medianMs: number | null; p95Ms: number | null };
+  /**
+   * receivedAt - the event's provider revision (`updated`, play_events.provider_updated_at), for
+   * feeds without wall_clock (NCAAWB pbp carries none). Needs the game's play_events (`--game`).
+   */
+  providerUpdated: { n: number; medianMs: number | null; p95Ms: number | null };
   /** receivedAt - change.ts (applyChanges commit -> subscriber): the pipeline's own lag. */
   pipeline: { n: number; medianMs: number | null; p95Ms: number | null };
 }
@@ -457,9 +462,23 @@ function quantile(sorted: number[], q: number): number | null {
   return sorted[i] ?? null;
 }
 
-/** Lag statistics from `pnpm subscribe --record` lines (`{via, receivedAt, change}`). */
-export function lagFromRecord(lines: string[]): LagStats {
+/** The provider revision time of each play event (`pnpm trial lag --game`), for feeds without wall_clock. */
+export async function providerRevisions(db: Db, gameId: string): Promise<Map<string, string>> {
+  const rows = await db<{ providerEventId: string; updatedAt: Date | null }[]>`
+    select provider_event_id as "providerEventId", provider_updated_at as "updatedAt"
+    from public.play_events where game_id = ${gameId}`;
+  const out = new Map<string, string>();
+  for (const r of rows) if (r.updatedAt) out.set(r.providerEventId, r.updatedAt.toISOString());
+  return out;
+}
+
+/**
+ * Lag statistics from `pnpm subscribe --record` lines (`{via, receivedAt, change}`).
+ * `revisions` (provider event id -> `updated` ISO) enables the provider-revision lag.
+ */
+export function lagFromRecord(lines: string[], revisions?: Map<string, string>): LagStats {
   const wall: number[] = [];
+  const revised: number[] = [];
   const pipe: number[] = [];
   let changes = 0;
   for (const raw of lines) {
@@ -472,18 +491,27 @@ export function lagFromRecord(lines: string[]): LagStats {
     const received = Date.parse(parsed.receivedAt);
     pipe.push(received - Date.parse(change.data.ts));
     const body = change.data.body as { wallClock?: string | null };
-    if (
-      (change.data.type === 'event_insert' || change.data.type === 'event_update') &&
-      typeof body.wallClock === 'string'
-    ) {
+    const c = change.data;
+    const providerEventId =
+      c.type === 'event_insert' || c.type === 'event_update' ? c.providerEventId : null;
+    if (providerEventId !== null && typeof body.wallClock === 'string') {
       wall.push(received - Date.parse(body.wallClock));
     }
+    const updated = providerEventId !== null ? revisions?.get(providerEventId) : undefined;
+    if (updated) revised.push(received - Date.parse(updated));
   }
   wall.sort((a, b) => a - b);
+  revised.sort((a, b) => a - b);
   pipe.sort((a, b) => a - b);
+  const stats = (xs: number[]) => ({
+    n: xs.length,
+    medianMs: quantile(xs, 0.5),
+    p95Ms: quantile(xs, 0.95),
+  });
   return {
     changes,
-    wallClock: { n: wall.length, medianMs: quantile(wall, 0.5), p95Ms: quantile(wall, 0.95) },
-    pipeline: { n: pipe.length, medianMs: quantile(pipe, 0.5), p95Ms: quantile(pipe, 0.95) },
+    wallClock: stats(wall),
+    providerUpdated: stats(revised),
+    pipeline: stats(pipe),
   };
 }

@@ -14,6 +14,7 @@ import {
   lagFromRecord,
   planDay,
   planWatch,
+  providerRevisions,
   resolveGame,
 } from '../ingest/trial-mode.js';
 import { LeagueCodeSchema } from '../leagues/codes.js';
@@ -37,7 +38,9 @@ import { createLogger } from '../logger.js';
  *   `pnpm sim serve`; never use it on a live game.
  * pnpm trial status [--json]        ingest.v_quota (with QUOTA_* overrides applied) and reservations
  * pnpm trial holds [--json]         open player_merge_holds and whether they touch a watched game
- * pnpm trial lag --record <jsonl>   median / p95 subscriber lag from a `pnpm subscribe --record` file
+ * pnpm trial lag --record <jsonl> [--game <uuid>]
+ *   median / p95 subscriber lag from a `pnpm subscribe --record` file: from the event's
+ *   wall_clock, from its provider revision (`updated`, needs --game), and from the change's ts
  * pnpm trial quota --product ncaawb --limit-30d 1000 [--reserve 100] [--note "console 2026-11-01"]
  *   Operator confirmation of the console limit: writes ingest.product_quotas
  *   and stamps verified_at. QuotaGuard refuses every call until this is done
@@ -83,10 +86,12 @@ async function main() {
     return parsed.data;
   };
 
+  const db = createDb(config.db.url);
   if (cmd === 'lag') {
     if (!args.record) usage('--record <file.jsonl> is required');
     const lines = readFileSync(args.record ?? '', 'utf8').split('\n');
-    const stats = lagFromRecord(lines);
+    const revisions = args.game ? await providerRevisions(db, args.game) : undefined;
+    const stats = lagFromRecord(lines, revisions);
     if (args.json) console.log(JSON.stringify(stats));
     else {
       console.log(`changes received via broadcast: ${stats.changes}`);
@@ -94,13 +99,16 @@ async function main() {
         `wall_clock lag (event changes with wallClock, n=${stats.wallClock.n}): median ${fmt(stats.wallClock.medianMs)} p95 ${fmt(stats.wallClock.p95Ms)}`,
       );
       console.log(
+        `provider revision lag (receivedAt - play_events.provider_updated_at, n=${stats.providerUpdated.n}${args.game ? '' : '; pass --game <uuid>'}): median ${fmt(stats.providerUpdated.medianMs)} p95 ${fmt(stats.providerUpdated.p95Ms)}`,
+      );
+      console.log(
         `pipeline lag (change.ts -> received, n=${stats.pipeline.n}): median ${fmt(stats.pipeline.medianMs)} p95 ${fmt(stats.pipeline.p95Ms)}`,
       );
     }
+    await db.end({ timeout: 2 });
     return;
   }
 
-  const db = createDb(config.db.url);
   const guard = new QuotaGuard({ db, log, overrides: config.quotaOverrides });
   try {
     switch (cmd) {

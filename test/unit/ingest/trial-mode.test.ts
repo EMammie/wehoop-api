@@ -90,10 +90,22 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
     const stats = lagFromRecord(lines);
     expect(stats.changes).toBe(4); // catch-up lines are not live delivery
     expect(stats.wallClock).toEqual({ n: 2, medianMs: 2200, p95Ms: 2500 });
+    expect(stats.providerUpdated).toEqual({ n: 0, medianMs: null, p95Ms: null });
     expect(stats.pipeline).toEqual({ n: 4, medianMs: 200, p95Ms: 500 });
+    // Feeds without wall_clock (NCAAWB): lag from the stored provider revision of each event.
+    const revisions = new Map([
+      ['e1', '2026-11-08T01:00:00.000Z'],
+      ['e4', '2026-11-08T01:00:03.300Z'],
+    ]);
+    expect(lagFromRecord(lines, revisions).providerUpdated).toEqual({
+      n: 2,
+      medianMs: 1000,
+      p95Ms: 1500,
+    });
     expect(lagFromRecord([])).toEqual({
       changes: 0,
       wallClock: { n: 0, medianMs: null, p95Ms: null },
+      providerUpdated: { n: 0, medianMs: null, p95Ms: null },
       pipeline: { n: 0, medianMs: null, p95Ms: null },
     });
   });
