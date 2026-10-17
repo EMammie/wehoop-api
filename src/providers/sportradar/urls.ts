@@ -41,8 +41,16 @@ export interface ResolvedUrl {
  * UrlResolver: builds request URLs for one league. Production and simulation
  * differ only here; SportradarHttp is identical for both.
  */
+/**
+ * Where calls go, for quota and rate-limit purposes: `trial`/`production` count
+ * toward the product quota; `rehearsal` is the production URL shape against a
+ * local stand-in host (rate-limited, never counted); `simulation` is the replay
+ * service (neither).
+ */
+export type ResolverSource = 'production' | 'trial' | 'rehearsal' | 'simulation';
+
 export interface UrlResolver {
-  readonly source: 'production' | 'trial' | 'simulation';
+  readonly source: ResolverSource;
   resolve(feed: Feed, params: FeedParams): ResolvedUrl;
 }
 
@@ -85,11 +93,16 @@ export class SimulationUrlResolver implements UrlResolver {
  * The key is held in a non-enumerable field: `util.inspect`, `JSON.stringify`
  * and error messages never show it.
  */
+export const SPORTRADAR_DEFAULT_BASE_URL = 'https://api.sportradar.com';
+
 export class ProdUrlResolver implements UrlResolver {
-  readonly source: 'production' | 'trial';
+  /** `trial`/`production` against the real host; `rehearsal` when `baseUrl` is a local stand-in. */
+  readonly source: 'production' | 'trial' | 'rehearsal';
   readonly league: LeagueCode;
   readonly accessLevel: 'trial' | 'production';
   readonly baseUrl: string;
+  /** True when calls go to a stand-in host (`pnpm sim serve`), not api.sportradar.com. */
+  readonly rehearsal: boolean;
   private readonly apiKey!: string;
 
   constructor(opts: {
@@ -100,10 +113,11 @@ export class ProdUrlResolver implements UrlResolver {
   }) {
     if (!opts.apiKey)
       throw new Error(`${opts.league} ${opts.accessLevel} resolver needs an API key`);
-    this.source = opts.accessLevel;
     this.league = opts.league;
     this.accessLevel = opts.accessLevel;
-    this.baseUrl = opts.baseUrl ?? 'https://api.sportradar.com';
+    this.baseUrl = opts.baseUrl ?? SPORTRADAR_DEFAULT_BASE_URL;
+    this.rehearsal = this.baseUrl !== SPORTRADAR_DEFAULT_BASE_URL;
+    this.source = this.rehearsal ? 'rehearsal' : opts.accessLevel;
     Object.defineProperty(this, 'apiKey', {
       value: opts.apiKey,
       enumerable: false,
@@ -117,6 +131,7 @@ export class ProdUrlResolver implements UrlResolver {
         league: this.league,
         accessLevel: this.accessLevel,
         baseUrl: this.baseUrl,
+        source: this.source,
         apiKey: '[redacted]',
       },
     };

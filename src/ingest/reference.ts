@@ -40,7 +40,7 @@ import {
   ensureTournament,
   type TeamFacts,
 } from './identity.js';
-import { type RunHandle, startRun } from './runs.js';
+import { type RunHandle, type RunSource, startRun } from './runs.js';
 import type { GameView, ObservationSource } from './types.js';
 
 /**
@@ -60,7 +60,7 @@ export interface ReferenceDeps {
   log: Logger;
   league: LeagueCode;
   source: ObservationSource;
-  runSource: 'production' | 'trial' | 'simulation' | 'fixture';
+  runSource: RunSource;
   /** Attribute every batch to this run instead of opening a `poll_schedule` run lazily. */
   run?: RunHandle;
 }

@@ -76,6 +76,11 @@ export function countsTowardQuota(source: RunSource): boolean {
   return source === 'trial' || source === 'production';
 }
 
+/** Trial, production, and a rehearsal against a local stand-in host are all rate-limited and guarded. */
+export function needsRateLimit(source: RunSource): boolean {
+  return countsTowardQuota(source) || source === 'rehearsal';
+}
+
 /**
  * QuotaGuard (plan §4 "Rate/quota"): reads ingest.v_quota per product and
  * ingest.product_quotas (seeded from console limits; config override), and
@@ -129,7 +134,9 @@ export class QuotaGuard {
              (select coalesce(sum(greatest(br.reserved_calls - br.used_calls, 0)), 0)::int
                 from ingest.budget_reservations br
                where br.product = q.product and br.released_at is null
-                 and br.source in ('trial', 'production')) as reserved
+                 and br.source in ('trial', 'production')
+                 and (br.run_id is null or exists (select 1 from ingest.ingestion_runs ir
+                                                    where ir.id = br.run_id and ir.status = 'running'))) as reserved
       from ingest.product_quotas q
       where ${product === null ? db`true` : db`q.product = ${product}`}
       order by q.product
@@ -225,6 +232,15 @@ export class QuotaGuard {
       throw new Error(`reservation needs a positive integer call count, got ${req.calls}`);
     }
     return this.deps.db.begin(async (tx) => {
+      // A watcher killed before its release (SIGKILL, host restart) leaves its reservation open
+      // while the next lock holder marks the run aborted; such reservations hold no budget.
+      const stale = await releaseStale(tx, req.product);
+      if (stale.length > 0) {
+        this.deps.log.warn(
+          { product: req.product, reservations: stale },
+          'released reservations whose watch run is no longer running',
+        );
+      }
       const [row] = await this.rows(tx, req.product, true);
       if (countsTowardQuota(req.source)) {
         const d = this.decide(req.product, row, req.calls);
@@ -279,6 +295,11 @@ export class QuotaGuard {
       .db`update ingest.budget_reservations set used_calls = used_calls + 1 where id = ${reservationId}`;
   }
 
+  /** Release every open reservation whose watch run has ended (`pnpm trial release --stale`). */
+  async releaseStale(product?: string): Promise<number[]> {
+    return releaseStale(this.deps.db, product ?? null);
+  }
+
   /** The watcher is done: unused budget returns to the product. */
   async release(reservationId: number): Promise<void> {
     await this.deps.db`update ingest.budget_reservations set released_at = now()
@@ -306,6 +327,18 @@ export class QuotaGuard {
       order by id`;
     return rows.map(toReservation);
   }
+}
+
+async function releaseStale(db: Sql | TransactionSql, product: string | null): Promise<number[]> {
+  const rows = await db<{ id: string }[]>`
+    update ingest.budget_reservations b set released_at = now(),
+      note = coalesce(b.note, '') || ' [released: watch run ended without release]'
+    where b.released_at is null
+      and ${product === null ? db`true` : db`b.product = ${product}`}
+      and b.run_id is not null
+      and exists (select 1 from ingest.ingestion_runs ir where ir.id = b.run_id and ir.status <> 'running')
+    returning b.id::text`;
+  return rows.map((r) => Number(r.id));
 }
 
 interface ReservationRow {

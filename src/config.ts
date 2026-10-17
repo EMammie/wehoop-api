@@ -6,7 +6,19 @@ export type Mode = z.infer<typeof Mode>;
 
 const emptyToUndefined = (v: unknown) => (v === '' ? undefined : v);
 
-export const SPORTRADAR_DEFAULT_BASE_URL = 'https://api.sportradar.com';
+export { SPORTRADAR_DEFAULT_BASE_URL } from './providers/sportradar/urls.js';
+
+import { SPORTRADAR_DEFAULT_BASE_URL } from './providers/sportradar/urls.js';
+
+/** The host override may only point at this machine: the key travels in `x-api-key`. */
+export function isLoopbackUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
+  } catch {
+    return false;
+  }
+}
 
 /** `QUOTA_<PRODUCT>=<limit_30d>[/<reserve>]`: the console limit, typed by the operator. */
 const QuotaOverride = z.preprocess(
@@ -115,10 +127,16 @@ export function loadConfig(source: Record<string, string | undefined> = process.
   if (e.MODE === 'production' && e.SPORTRADAR_ACCESS_LEVEL !== 'production') {
     problems.push('SPORTRADAR_ACCESS_LEVEL must be "production" when MODE=production');
   }
-  if (e.MODE === 'production' && e.SPORTRADAR_BASE_URL !== SPORTRADAR_DEFAULT_BASE_URL) {
-    problems.push(
-      `SPORTRADAR_BASE_URL must be ${SPORTRADAR_DEFAULT_BASE_URL} when MODE=production (the override exists for local rehearsal servers only)`,
-    );
+  if (e.SPORTRADAR_BASE_URL !== SPORTRADAR_DEFAULT_BASE_URL) {
+    if (e.MODE === 'production') {
+      problems.push(
+        `SPORTRADAR_BASE_URL must be ${SPORTRADAR_DEFAULT_BASE_URL} when MODE=production (the override exists for local rehearsal servers only)`,
+      );
+    } else if (!isLoopbackUrl(e.SPORTRADAR_BASE_URL)) {
+      problems.push(
+        'SPORTRADAR_BASE_URL may only point at a loopback host (127.0.0.1, localhost, ::1): the API key is sent to it',
+      );
+    }
   }
   const sessionUrl = e.DATABASE_SESSION_URL ?? e.DATABASE_URL;
   if (looksLikeTransactionPooler(sessionUrl)) {

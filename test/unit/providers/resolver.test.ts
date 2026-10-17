@@ -77,16 +77,53 @@ describe('createResolver (MODE selects production vs simulation)', () => {
     );
   });
 
-  it('the rehearsal host override is honoured outside production', () => {
+  it('a loopback host override makes a `rehearsal` resolver (limited, never counted); any other host is refused', () => {
     const config = loadConfig({
       ...base,
       MODE: 'trial',
       SPORTRADAR_NCAAWB_KEY: FAKE_KEY,
       SPORTRADAR_BASE_URL: 'http://127.0.0.1:8787',
     });
-    expect(createResolver(config, 'ncaawb').resolve('summary', { gameId: 'g' }).url).toBe(
+    const r = createResolver(config, 'ncaawb');
+    expect(r.source).toBe('rehearsal');
+    expect((r as ProdUrlResolver).rehearsal).toBe(true);
+    expect(r.resolve('summary', { gameId: 'g' }).url).toBe(
       'http://127.0.0.1:8787/ncaawb/trial/v8/en/games/g/summary.json',
     );
+    expect(
+      createResolver(
+        loadConfig({ ...base, MODE: 'trial', SPORTRADAR_NCAAWB_KEY: FAKE_KEY }),
+        'ncaawb',
+      ).source,
+    ).toBe('trial');
+    for (const host of ['http://localhost:8787', 'http://[::1]:8787']) {
+      expect(
+        createResolver(
+          loadConfig({
+            ...base,
+            MODE: 'trial',
+            SPORTRADAR_NCAAWB_KEY: FAKE_KEY,
+            SPORTRADAR_BASE_URL: host,
+          }),
+          'ncaawb',
+        ).source,
+      ).toBe('rehearsal');
+    }
+    // The key travels in x-api-key: the override may never point off this machine.
+    for (const host of [
+      'http://evil.example.com',
+      'https://api.sportradar.com.attacker.net',
+      'http://10.0.0.5:8787',
+    ]) {
+      expect(() =>
+        loadConfig({
+          ...base,
+          MODE: 'trial',
+          SPORTRADAR_NCAAWB_KEY: FAKE_KEY,
+          SPORTRADAR_BASE_URL: host,
+        }),
+      ).toThrow(/loopback/);
+    }
   });
 });
 

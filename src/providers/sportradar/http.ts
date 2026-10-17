@@ -1,6 +1,6 @@
 import type { ZodType } from 'zod';
 import type { Db } from '../../db/client.js';
-import { countsTowardQuota, type QuotaGuard } from '../../ingest/quota-guard.js';
+import { countsTowardQuota, needsRateLimit, type QuotaGuard } from '../../ingest/quota-guard.js';
 import type { LeagueCode } from '../../leagues/codes.js';
 import type { Logger } from '../../logger.js';
 import type { RateLimiter } from './rate-limiter.js';
@@ -68,7 +68,7 @@ export class SportradarHttp {
     if (deps.db === null && deps.resolver.source !== 'simulation') {
       throw new Error('SportradarHttp without a database is only allowed for simulation sources');
     }
-    if (countsTowardQuota(deps.resolver.source) && (!deps.limiter || !deps.guard)) {
+    if (needsRateLimit(deps.resolver.source) && (!deps.limiter || !deps.guard)) {
       throw new Error(
         `SportradarHttp for a ${deps.resolver.source} source needs a RateLimiter and a QuotaGuard`,
       );
@@ -87,9 +87,11 @@ export class SportradarHttp {
   ): Promise<FetchedDocument<T>> {
     const { url, headers } = this.deps.resolver.resolve(feed, params);
     const source = this.deps.resolver.source;
+    // `rehearsal` (local stand-in host) is limited and guarded like trial but never counted.
     const counted = countsTowardQuota(source);
+    const limited = needsRateLimit(source);
     const reservationId = this.deps.reservationId ?? null;
-    if (counted && this.deps.guard) {
+    if (limited && this.deps.guard) {
       try {
         await this.deps.guard.assertCall(this.product, source, reservationId);
       } catch (err) {
@@ -99,7 +101,7 @@ export class SportradarHttp {
     }
     const fetchImpl = this.deps.fetchImpl ?? fetch;
     let requestedAt = new Date();
-    if (counted && this.deps.limiter) requestedAt = new Date(await this.deps.limiter.waitForSlot());
+    if (limited && this.deps.limiter) requestedAt = new Date(await this.deps.limiter.waitForSlot());
     const started = performance.now();
     let status = 0;
     let bytes = 0;
