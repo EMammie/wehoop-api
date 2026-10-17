@@ -268,3 +268,40 @@ export async function compactRecording(
   const kept = keep.filter(Boolean).length;
   return { perFeed, kept, total: keys.length };
 }
+
+export interface RelabelOptions {
+  /** `coverage` written onto every game document (`extended_boxscore` for the score-only rehearsal). */
+  coverage: string;
+  /** Replace the recording's provider game id everywhere (so the relabelled game is a distinct row). */
+  gameId?: { from: string; to: string };
+}
+
+/**
+ * Re-label a recording's coverage (plan §7 M3: the simulation service exposes
+ * only `full` recordings, so the extended_boxscore watcher path is proven on a
+ * documented re-labelling of the committed compact fixture). Every line is
+ * rewritten with `body.coverage = coverage`; with `gameId`, the provider game
+ * id is replaced textually before parsing (ids appear in nested references).
+ * Nothing else changes: the documents are the recording's own, in order.
+ */
+export async function relabelRecording(
+  inPath: string,
+  outPath: string,
+  opts: RelabelOptions,
+): Promise<{ docs: number; relabelled: number }> {
+  const writer = new GzipLineWriter(outPath);
+  let docs = 0;
+  let relabelled = 0;
+  for await (const raw of readRecordingLines(inPath)) {
+    docs++;
+    const text = opts.gameId ? raw.replaceAll(opts.gameId.from, opts.gameId.to) : raw;
+    const line = RecordedDocumentSchema.parse(JSON.parse(text));
+    if (line.body && typeof line.body === 'object') {
+      (line.body as Record<string, unknown>).coverage = opts.coverage;
+      relabelled++;
+    }
+    await writer.write(JSON.stringify(line));
+  }
+  await writer.close();
+  return { docs, relabelled };
+}

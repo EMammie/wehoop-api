@@ -61,6 +61,8 @@ export interface ReferenceDeps {
   league: LeagueCode;
   source: ObservationSource;
   runSource: 'production' | 'trial' | 'simulation' | 'fixture';
+  /** Attribute every batch to this run instead of opening a `poll_schedule` run lazily. */
+  run?: RunHandle;
 }
 
 export interface ReferenceOutcome {
@@ -75,6 +77,8 @@ export interface ReferenceOutcome {
   merged: number;
   /** Profile references held for reconciliation (ingest.player_merge_holds) instead of linked or merged. */
   held: number;
+  /** Profile documents skipped whole (own id held or conflicting_profiles): counted here, never in `players`. */
+  profilesSkipped: number;
   /** Game-level batches rejected or superseded by the freshness policy. */
   stale: number;
 }
@@ -88,13 +92,16 @@ const EMPTY: Omit<ReferenceOutcome, 'feed'> = {
   tournaments: 0,
   merged: 0,
   held: 0,
+  profilesSkipped: 0,
   stale: 0,
 };
 
 export class ReferenceIngester {
   private run: RunHandle | null = null;
 
-  constructor(private readonly deps: ReferenceDeps) {}
+  constructor(private readonly deps: ReferenceDeps) {
+    this.run = deps.run ?? null;
+  }
 
   /** The generation-less run every schedule-derived game batch is attributed to. */
   private async runHandle(): Promise<RunHandle> {
@@ -396,7 +403,8 @@ export class ReferenceIngester {
       runId: run.id,
       observedAt,
     });
-    out.players++;
+    if (result.playerId !== null) out.players++;
+    else out.profilesSkipped++;
     out.merged += result.mergedFrom.length;
     out.held += result.held.length;
     out.seasonLines += result.seasonLines;

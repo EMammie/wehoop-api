@@ -14,7 +14,9 @@ import { ChangesPageSchema, SnapshotSchema } from '../model/snapshot.js';
  * key (or an anonymous-sign-in guest JWT, the real iOS session), then runs
  * the reconnect contract (src/live/subscriber.ts) against the Hono API.
  * Logs `catch-up` whenever it pages /changes. `--record` appends every
- * applied GameChange as JSONL with how it arrived (broadcast | catch-up | buffer).
+ * applied GameChange as JSONL with how it arrived (broadcast | catch-up | buffer)
+ * and `receivedAt` (our clock), which `pnpm trial lag --record` turns into the
+ * median subscriber lag from `wall_clock` and from the change's own `ts`.
  */
 async function main() {
   const { values: args } = parseArgs({
@@ -70,7 +72,12 @@ async function main() {
   const subscriber = new GameSubscriber(gameId, api, {
     log,
     onChange: (c, via) => {
-      if (args.record) appendFileSync(args.record, `${JSON.stringify({ via, change: c })}\n`);
+      if (args.record) {
+        appendFileSync(
+          args.record,
+          `${JSON.stringify({ via, receivedAt: new Date().toISOString(), change: c })}\n`,
+        );
+      }
     },
     onSnapshot: (snap, reason) => {
       if (reason === 'closed') {

@@ -329,3 +329,50 @@ select (has_table_privilege('anon', 'ingest.player_merges', 'SELECT')::int
       + has_table_privilege('anon', 'ingest.player_merge_holds', 'SELECT')::int
       + has_table_privilege('authenticated', 'ingest.player_merges', 'SELECT')::int
       + has_table_privilege('authenticated', 'ingest.player_merge_holds', 'SELECT')::int);
+
+-- check: sim_and_fixture_calls_never_count_quota | expect: 0
+select count(*)
+from ingest.provider_calls
+where quota_counted and source in ('simulation', 'fixture');
+
+-- check: trial_and_production_calls_always_count_quota | expect: 0
+select count(*)
+from ingest.provider_calls
+where not quota_counted and source in ('trial', 'production');
+
+-- check: quota_counted_calls_carry_a_product | expect: 0
+select count(*) from ingest.provider_calls where quota_counted and product is null;
+
+-- check: trial_watch_runs_have_a_reservation | expect: 0
+select count(*)
+from ingest.ingestion_runs r
+where r.kind = 'watch_game'
+  and r.source in ('trial', 'production')
+  and not exists (select 1 from ingest.budget_reservations b where b.run_id = r.id);
+
+-- check: counted_calls_spaced_at_least_one_second_per_product | expect: 0
+select count(*)
+from (
+  select called_at - lag(called_at) over (partition by product order by called_at, id) as gap
+  from ingest.provider_calls
+  where quota_counted
+) g
+where g.gap < interval '1 second';
+
+-- check: reservation_used_calls_match_provider_calls | expect: 0
+select count(*)
+from ingest.budget_reservations b
+where b.used_calls <> (select count(*) from ingest.provider_calls c where c.reservation_id = b.id);
+
+-- check: counted_reservations_are_trial_or_production | expect: 0
+select count(*)
+from ingest.budget_reservations b
+join ingest.provider_calls c on c.reservation_id = b.id
+where c.quota_counted <> (b.source in ('trial', 'production'));
+
+-- check: quota_tables_closed_to_clients | expect: 0
+select count(*)
+from information_schema.role_table_grants
+where table_schema = 'ingest'
+  and table_name in ('product_quotas', 'provider_calls', 'budget_reservations', 'v_quota')
+  and grantee in ('anon', 'authenticated');

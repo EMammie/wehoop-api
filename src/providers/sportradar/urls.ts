@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import type { LeagueCode } from '../../leagues/codes.js';
 
 /** Game feeds (per game) and reference feeds (per season / tournament / player / team). */
@@ -80,24 +81,53 @@ export class SimulationUrlResolver implements UrlResolver {
  * Production / trial URLs: `https://api.sportradar.com/{league}/{access}/v8/en/...`
  * with the key in the `x-api-key` header. Paths follow the public v8 docs for
  * all three products (identical shapes). Nothing here performs a request;
- * M3 wires the rate limiter and quota guard in front of it.
+ * SportradarHttp puts the rate limiter and quota guard in front of it.
+ * The key is held in a non-enumerable field: `util.inspect`, `JSON.stringify`
+ * and error messages never show it.
  */
 export class ProdUrlResolver implements UrlResolver {
   readonly source: 'production' | 'trial';
-  constructor(
-    private readonly opts: {
-      league: LeagueCode;
-      accessLevel: 'trial' | 'production';
-      apiKey: string;
-      baseUrl?: string;
-    },
-  ) {
+  readonly league: LeagueCode;
+  readonly accessLevel: 'trial' | 'production';
+  readonly baseUrl: string;
+  private readonly apiKey!: string;
+
+  constructor(opts: {
+    league: LeagueCode;
+    accessLevel: 'trial' | 'production';
+    apiKey: string;
+    baseUrl?: string;
+  }) {
+    if (!opts.apiKey)
+      throw new Error(`${opts.league} ${opts.accessLevel} resolver needs an API key`);
     this.source = opts.accessLevel;
+    this.league = opts.league;
+    this.accessLevel = opts.accessLevel;
+    this.baseUrl = opts.baseUrl ?? 'https://api.sportradar.com';
+    Object.defineProperty(this, 'apiKey', {
+      value: opts.apiKey,
+      enumerable: false,
+      writable: false,
+    });
+  }
+
+  [inspect.custom]() {
+    return {
+      ProdUrlResolver: {
+        league: this.league,
+        accessLevel: this.accessLevel,
+        baseUrl: this.baseUrl,
+        apiKey: '[redacted]',
+      },
+    };
+  }
+
+  toJSON() {
+    return { league: this.league, accessLevel: this.accessLevel, baseUrl: this.baseUrl };
   }
 
   resolve(feed: Feed, params: FeedParams): ResolvedUrl {
-    const base = this.opts.baseUrl ?? 'https://api.sportradar.com';
-    const root = `${base}/${this.opts.league}/${this.opts.accessLevel}/v8/en`;
+    const root = `${this.baseUrl}/${this.league}/${this.accessLevel}/v8/en`;
     const need = <K extends keyof FeedParams>(key: K): NonNullable<FeedParams[K]> => {
       const v = params[key];
       if (v === undefined) throw new Error(`${feed} needs ${key}`);
@@ -136,7 +166,7 @@ export class ProdUrlResolver implements UrlResolver {
         path = `/seasons/${enc(need('seasonYear'))}/${enc(need('seasonType'))}/leaders.json`;
         break;
     }
-    return { url: `${root}${path}`, headers: { 'x-api-key': this.opts.apiKey } };
+    return { url: `${root}${path}`, headers: { 'x-api-key': this.apiKey } };
   }
 }
 

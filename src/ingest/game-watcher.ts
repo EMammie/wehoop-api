@@ -7,8 +7,9 @@ import type { FetchedDocument, SportradarHttp } from '../providers/sportradar/ht
 import { BoxscoreDocumentSchema } from '../providers/sportradar/schemas/boxscore.js';
 import { PbpDocumentSchema } from '../providers/sportradar/schemas/pbp.js';
 import { SummaryDocumentSchema } from '../providers/sportradar/schemas/summary.js';
-import { type Feed, isGameFeed } from '../providers/sportradar/urls.js';
+import { type Feed, type FeedParams, isGameFeed } from '../providers/sportradar/urls.js';
 import { type ApplyDeps, type ApplyResult, applyChanges, ensureGame } from './apply-changes.js';
+import type { Cadence } from './cadence.js';
 import { ensurePlayers, ensureSeason, ensureTeams } from './identity.js';
 import {
   appendRecordedDocument,
@@ -33,9 +34,11 @@ export class HttpDocumentSource implements DocumentSource {
     private readonly http: SportradarHttp,
     readonly observationSource: ObservationSource,
     private readonly recordTo: string | null = null,
+    /** Feed parameters (the provider game id for production URLs; ignored by the simulation resolver). */
+    private readonly params: FeedParams = {},
   ) {}
   async fetch<T>(feed: Feed, schema: ZodType<T>): Promise<FetchedDocument<T>> {
-    const doc = await this.http.getJson(feed, schema);
+    const doc = await this.http.getJson(feed, schema, this.params);
     if (this.recordTo) appendRecordedDocument(this.recordTo, toRecordedDocument(feed, doc));
     return doc;
   }
@@ -156,6 +159,26 @@ export class GameWatcher {
     return { gameId, status: this.lastStatus ?? status, result };
   }
 
+  /**
+   * Bind the watcher to a game row that already exists (trial mode: `pnpm trial plan` created it
+   * from the schedule; no automatic discovery). Same side effects as the first document's
+   * `ensure`, without needing a document.
+   */
+  async attach(gameId: string): Promise<void> {
+    if (this.gameId === gameId) return;
+    if (this.gameId) throw new Error(`watcher already bound to game ${this.gameId}`);
+    const [row] = await this.deps.db<{ id: string; status: string }[]>`
+      select id, status::text as status from public.games where id = ${gameId}`;
+    if (!row) throw new Error(`game ${gameId} does not exist`);
+    await this.deps
+      .db`update ingest.ingestion_runs set game_id = ${gameId} where id = ${this.deps.run.id}`;
+    this.gameId = gameId;
+    this.lastStatus = row.status;
+    this.deps.log.info({ gameId, status: row.status }, 'watcher attached to game row');
+    this.deps.onGameKnown?.(gameId);
+    this.deps.pulse?.start(gameId);
+  }
+
   private async ensure(nd: NormalizedDocument): Promise<string> {
     if (this.gameId) return this.gameId;
     const teamIds = await ensureTeams(this.deps.db, this.deps.adapter.league, nd.teams);
@@ -273,6 +296,117 @@ export async function pollLoop(
   }
   return status;
 }
+
+export interface CadenceLoopOptions {
+  untilClosed: boolean;
+  isStopped: () => boolean;
+  /** Called after every fetch (budget accounting / evidence). */
+  onCall?: (feed: Feed) => void;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface CadenceOutcome {
+  status: string | null;
+  calls: number;
+  failed: number;
+  elapsedMs: number;
+}
+
+/**
+ * Cadence-driven loop (trial / production REST, plan §4): each feed is fetched
+ * at its own interval from the watch start (first poll at t=0), one-off
+ * boxscores at their offsets, and the closing summary + boxscore once the
+ * game is `closed`. The horizon is a planning number: a game that runs long
+ * (overtime) keeps being watched; the quota guard, not the horizon, is what
+ * refuses calls. A fetch that fails is logged and retried at its next due time.
+ */
+export async function cadenceLoop(
+  watcher: GameWatcher,
+  source: DocumentSource,
+  log: Logger,
+  cadence: Cadence,
+  opts: CadenceLoopOptions,
+): Promise<CadenceOutcome> {
+  const now = opts.now ?? (() => Date.now());
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const startedAt = now();
+  const schemaFor = (feed: GameFeedName) =>
+    feed === 'pbp'
+      ? PbpDocumentSchema
+      : feed === 'summary'
+        ? SummaryDocumentSchema
+        : BoxscoreDocumentSchema;
+  let status: string | null = null;
+  let calls = 0;
+  let failed = 0;
+  let horizonWarned = false;
+  const fetchOne = async (feed: GameFeedName): Promise<void> => {
+    try {
+      const doc = await source.fetch(feed, schemaFor(feed));
+      calls++;
+      opts.onCall?.(feed);
+      const out = await watcher.process(
+        feed,
+        JSON.parse(doc.rawText),
+        doc.requestedAt,
+        source.observationSource,
+      );
+      status = out?.status ?? status;
+    } catch (err) {
+      failed++;
+      log.error({ err, feed, calls }, 'fetch failed; retrying at the next due time');
+    }
+  };
+  // Periodic feeds: next due time per feed. One-offs: a sorted queue of offsets.
+  const periodic: Array<{ feed: GameFeedName; everyMs: number; nextAt: number }> = [];
+  if (cadence.pbpMs !== null)
+    periodic.push({ feed: 'pbp', everyMs: cadence.pbpMs, nextAt: startedAt });
+  if (cadence.summaryMs !== null)
+    periodic.push({ feed: 'summary', everyMs: cadence.summaryMs, nextAt: startedAt });
+  if (cadence.boxscoreMs !== null)
+    periodic.push({ feed: 'boxscore', everyMs: cadence.boxscoreMs, nextAt: startedAt });
+  const oneOffs = [...cadence.boxscoreAtMs].sort((a, b) => a - b).map((ms) => startedAt + ms);
+  while (!opts.isStopped()) {
+    const t = now();
+    for (const p of periodic) {
+      if (t >= p.nextAt) {
+        await fetchOne(p.feed);
+        // Keep the grid anchored to the start, skipping slots a slow fetch already passed.
+        while (p.nextAt <= now()) p.nextAt += p.everyMs;
+      }
+    }
+    while (oneOffs.length > 0 && t >= (oneOffs[0] ?? Number.POSITIVE_INFINITY)) {
+      oneOffs.shift();
+      await fetchOne('boxscore');
+    }
+    if (status === 'closed' && opts.untilClosed) {
+      for (const feed of cadence.closing) await fetchOne(feed);
+      log.info({ calls, failed, elapsedMs: now() - startedAt }, 'game closed');
+      return { status, calls, failed, elapsedMs: now() - startedAt };
+    }
+    if (!horizonWarned && now() - startedAt >= cadence.horizonMs) {
+      horizonWarned = true;
+      log.warn(
+        { calls, horizonMs: cadence.horizonMs },
+        'watch horizon reached; game not closed, continuing under the quota guard',
+      );
+    }
+    const dueTimes = [
+      ...periodic.map((p) => p.nextAt),
+      ...(oneOffs.length ? [oneOffs[0] ?? 0] : []),
+    ];
+    if (dueTimes.length === 0) {
+      log.warn('cadence polls nothing; stopping');
+      break;
+    }
+    const waitMs = Math.max(0, Math.min(...dueTimes) - now());
+    await sleep(Math.min(waitMs, 1000));
+  }
+  return { status, calls, failed, elapsedMs: now() - startedAt };
+}
+
+type GameFeedName = 'pbp' | 'summary' | 'boxscore';
 
 export interface ReplayOutcome {
   status: string | null;

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { createSessionDb, tryAcquireWorkerLock } from '../db/session-client.js';
+import { TRIAL_PROFILES, type TrialProfile } from '../ingest/cadence.js';
 import { createFaultInjector } from '../ingest/fault.js';
 import {
   GameWatcher,
@@ -10,8 +11,10 @@ import {
   pollLoop,
   replayRecording,
 } from '../ingest/game-watcher.js';
+import { QuotaGuard, QuotaRefusedError } from '../ingest/quota-guard.js';
 import { ReferenceIngester } from '../ingest/reference.js';
 import { endRun, startRun } from '../ingest/runs.js';
+import { resolveGame, runTrialWatch } from '../ingest/trial-mode.js';
 import { LeagueCodeSchema } from '../leagues/codes.js';
 import { adapterFor } from '../leagues/registry.js';
 import { OutboxPublisher } from '../live/outbox-publisher.js';
@@ -29,6 +32,10 @@ import { SimulationUrlResolver } from '../providers/sportradar/urls.js';
  *     [--session <id> | --new-session] [--poll-interval 3000] [--summary-every 10]
  *     [--max-polls N] [--record-to <file.jsonl>]
  *   pnpm dev:worker --mode sim --league wnba --replay-file <file.jsonl> [--pace 0]
+ *   pnpm dev:worker --mode trial --league ncaawb --game <uuid|providerId> --profile full|extended|lean-full
+ *     [--speed N] [--note "..."]            (what `pnpm trial watch` runs: budget reservation + cadence loop)
+ *   pnpm dev:worker --mode sim --league ncaawb --game <id> --profile full --recording <id>
+ *                                           (the same trial flow against the simulation host; never counted)
  *   [--lock-wait 60]  seconds to wait for the single-ingester lock (a killed worker's lock lingers briefly)
  *   [--drain-timeout 60]  seconds the final drain may wait for backing-off outbox rows before exiting
  *
@@ -65,6 +72,10 @@ async function main() {
       'max-docs': { type: 'string' },
       'lock-wait': { type: 'string', default: '60' },
       'drain-timeout': { type: 'string', default: '60' },
+      game: { type: 'string' },
+      profile: { type: 'string' },
+      speed: { type: 'string' },
+      note: { type: 'string' },
     },
     strict: true,
   });
@@ -90,12 +101,22 @@ async function main() {
   const drainTimeoutMs = (intArg('drain-timeout', args['drain-timeout'], 1) ?? 60) * 1000;
   const league = LeagueCodeSchema.parse(args.league);
   const adapter = adapterFor(league);
-  if (config.mode !== 'sim' && !args['replay-file']) {
-    log.error({ mode: config.mode }, 'only MODE=sim (simulation recordings) is supported until M3');
+  const speed = intArg('speed', args.speed, 1) ?? 1;
+  const profile = args.profile as TrialProfile | undefined;
+  if (profile && !(TRIAL_PROFILES as readonly string[]).includes(profile)) {
+    log.error({ profile }, `--profile must be one of ${TRIAL_PROFILES.join('|')}`);
     process.exit(64);
   }
-  if (!args.recording && !args['replay-file']) {
-    log.error('one of --recording <id> or --replay-file <path> is required');
+  const trialWatch = args.game !== undefined;
+  if (config.mode !== 'sim' && !args['replay-file'] && !trialWatch) {
+    log.error(
+      { mode: config.mode },
+      `MODE=${config.mode} watches one planned game: --game <id> --profile <p> (pnpm trial watch); no automatic discovery`,
+    );
+    process.exit(64);
+  }
+  if (config.mode === 'sim' && !args.recording && !args['replay-file']) {
+    log.error('one of --recording <id> or --replay-file <path> is required in MODE=sim');
     process.exit(64);
   }
 
@@ -170,6 +191,10 @@ async function main() {
   let runMeta: Record<string, unknown> = {};
   let sessionId: string | null = null;
   const sim = new SimulationClient({ playbackUrl: config.sportradar.playbackUrl });
+  if (args.recording && config.mode !== 'sim') {
+    log.error({ mode: config.mode }, '--recording is only meaningful in MODE=sim');
+    process.exit(64);
+  }
   if (args.recording) {
     const rec = await sim.getRecording(args.recording);
     if (!rec) {
@@ -201,6 +226,113 @@ async function main() {
   } else {
     runMeta = { replayFile: args['replay-file'] };
   }
+  // A signal stops the loop; the normal tail (final drain, closing pulse, run end) still runs.
+  // A second signal shortens whatever remains of the final drain window to 3 s.
+  let stoppedBy: string | null = null;
+  let wakeIdle: (() => void) | null = null;
+  let drainDeadline = Number.POSITIVE_INFINITY;
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      if (stoppedBy) {
+        drainDeadline = Math.min(drainDeadline, Date.now() + 3_000);
+        log.warn({ signal }, 'second signal; final drain window shortened to 3 s');
+        return;
+      }
+      stopRequested = true;
+      stoppedBy = signal;
+      log.warn({ signal }, 'stop requested; finishing the in-flight document, then draining');
+      wakeIdle?.();
+    });
+  }
+  const finalDrain = () =>
+    publisher.drainUntilEmpty(drainTimeoutMs, { deadline: () => drainDeadline });
+  const exitAfterTail = async (left: { pending: number; dead: number }) => {
+    shuttingDown = true;
+    await session.end({ timeout: 2 });
+    await db.end({ timeout: 2 });
+    if (left.pending > 0) {
+      log.error(
+        { pending: left.pending, dead: left.dead, drainTimeoutMs },
+        'exiting with unpublished outbox rows (EX_TEMPFAIL 75); a restart publishes them',
+      );
+      process.exit(75);
+    }
+    process.exit(0);
+  };
+
+  if (trialWatch) {
+    // Trial / production watch of ONE planned game (plan §4 "Trial mode"): the game row comes
+    // from `pnpm trial plan`; the budget is reserved before the first call; calls are
+    // rate-limited, quota-guarded and counted (never in MODE=sim).
+    const guard = new QuotaGuard({ db, log, overrides: config.quotaOverrides });
+    const game = await resolveGame(db, league, args.game ?? '');
+    if (!game) {
+      log.error({ game: args.game, league }, 'game not found; run `pnpm trial plan` first');
+      process.exit(66);
+    }
+    let gameIdKnown: string | null = null;
+    try {
+      const outcome = await runTrialWatch(
+        {
+          db,
+          log,
+          config,
+          adapter,
+          guard,
+          pulse,
+          fault,
+          isStopped: () => stopRequested,
+          onGameKnown: (gameId) => {
+            gameIdKnown = gameId;
+            console.log(`GAME_ID=${gameId}`);
+          },
+          ...(sessionId && args.recording
+            ? { sim: { recordingId: args.recording, sessionId } }
+            : {}),
+        },
+        {
+          game,
+          ...(profile ? { profile } : {}),
+          speed,
+          note: args.note ?? null,
+          untilClosed,
+        },
+      );
+      pulse.stop();
+      const left = await finalDrain();
+      if (gameIdKnown) await pulse.sendOnce(gameIdKnown);
+      publisher.stop();
+      log.info(
+        {
+          runId: outcome.runId,
+          gameId: game.id,
+          reservationId: outcome.reservation.id,
+          reserved: outcome.reservation.reservedCalls,
+          used: outcome.reservation.usedCalls,
+          refused: outcome.refused,
+          finalStatus: outcome.status,
+          changes: outcome.changes,
+          stale: outcome.stale,
+          unpublished: left,
+          stoppedBy,
+        },
+        'trial watch finished',
+      );
+      await exitAfterTail(left);
+    } catch (err) {
+      if (err instanceof QuotaRefusedError) {
+        log.error({ product: err.product, reason: err.reason, status: err.status }, err.message);
+        shuttingDown = true;
+        await session.end({ timeout: 2 });
+        await db.end({ timeout: 2 });
+        process.exit(69);
+      }
+      log.error({ err }, 'trial watch failed');
+      process.exit(1);
+    }
+    return;
+  }
+
   const run = await startRun(db, {
     kind: 'replay',
     league,
@@ -230,27 +362,6 @@ async function main() {
       console.log(`GAME_ID=${gameId}`);
     },
   });
-
-  // A signal stops the loop; the normal tail (final drain, closing pulse, run end) still runs.
-  // A second signal shortens whatever remains of the final drain window to 3 s.
-  let stoppedBy: string | null = null;
-  let wakeIdle: (() => void) | null = null;
-  let drainDeadline = Number.POSITIVE_INFINITY;
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    process.on(signal, () => {
-      if (stoppedBy) {
-        drainDeadline = Math.min(drainDeadline, Date.now() + 3_000);
-        log.warn({ signal }, 'second signal; final drain window shortened to 3 s');
-        return;
-      }
-      stopRequested = true;
-      stoppedBy = signal;
-      log.warn({ signal }, 'stop requested; finishing the in-flight document, then draining');
-      wakeIdle?.();
-    });
-  }
-  const finalDrain = () =>
-    publisher.drainUntilEmpty(drainTimeoutMs, { deadline: () => drainDeadline });
 
   let finalStatus: string | null = null;
   let replayedDocs: number | null = null;
@@ -313,17 +424,7 @@ async function main() {
       'replay finished',
     );
     if (untilClosed || args['max-polls'] || args['replay-file'] || stoppedBy) {
-      shuttingDown = true;
-      await session.end({ timeout: 2 });
-      await db.end({ timeout: 2 });
-      if (left.pending > 0) {
-        log.error(
-          { pending: left.pending, dead: left.dead, drainTimeoutMs },
-          'exiting with unpublished outbox rows (EX_TEMPFAIL 75); a restart publishes them',
-        );
-        process.exit(75);
-      }
-      process.exit(0);
+      await exitAfterTail(left);
     }
     await new Promise<void>((resolve) => {
       wakeIdle = resolve; // keep publishing until signalled
