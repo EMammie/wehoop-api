@@ -903,7 +903,7 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
       select observation->>'detail' as detail from ingest.stale_observations where game_id = ${gameId}`;
     expect(stale?.detail ?? '').toContain('3-lagging-view');
     const [g2] = await db<{ status: string; period: number | null; seq: number | null }[]>`
-      select status::text as status, current_period_sequence as period, current_period as seq from public.games where id = ${gameId}`;
+      select status::text as status, current_period as period, current_period_sequence as seq from public.games where id = ${gameId}`;
     expect(g2).toEqual({ status: 'inprogress', period: 3, seq: 3 });
     const mid = await counts(db, gameId);
     // Its team and player stats were still reconciled per entity (the only changes it produced).

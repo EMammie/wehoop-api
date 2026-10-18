@@ -508,6 +508,28 @@ describe('freshness §4 rule 3 lagging view (rev 4.6)', () => {
     // No stored events at all: any positioned event is newer than nothing.
     const fresh = decideBatch(p3(), summary({ eventPositions: [pos(1, 1)] }), []);
     expect(fresh.kind === 'accept' && fresh.gameLevel).toBe('write');
+    // A document that explicitly retracts the stored newest event (the period-3 opener was an
+    // error) and carries a newer remaining event is judged on what remains, as in 2(c): write.
+    const retracting = decideBatch(
+      stored({ status: 'inprogress', currentPeriodSequence: 3 }),
+      summary({
+        gameView: view({ period: { number: 2, type: 'quarter', sequence: 2 } }),
+        eventPositions: [pos(2, 250)],
+        deletedEvents: [{ providerEventId: 'e2', updatedAt: null }],
+      }),
+      [storedEv('e1', 2, 240), storedEv('e2', 3, 300)],
+    );
+    expect(retracting.kind === 'accept' && retracting.gameLevel).toBe('write');
+    // Without the retraction the same document is lagging.
+    const notRetracting = decideBatch(
+      stored({ status: 'inprogress', currentPeriodSequence: 3 }),
+      summary({
+        gameView: view({ period: { number: 2, type: 'quarter', sequence: 2 } }),
+        eventPositions: [pos(2, 250)],
+      }),
+      [storedEv('e1', 2, 240), storedEv('e2', 3, 300)],
+    );
+    expect(notRetracting.kind === 'accept' && notRetracting.gameLevel).toBe('superseded');
     // A lower score at the same phase and period still follows observedAt (a waved-off basket).
     const lowerScore = decideBatch(
       p3(),

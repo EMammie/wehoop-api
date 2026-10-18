@@ -342,7 +342,7 @@ export function decideBatch(
 export function laggingView(
   stored: Pick<StoredGameForFreshness, 'status' | 'currentPeriodSequence' | 'lastSeq'>,
   gameView: GameView,
-  input: Pick<BatchInput, 'eventPositions'>,
+  input: Pick<BatchInput, 'eventPositions' | 'deletedEvents'>,
   storedEvents: StoredEventForFreshness[],
 ): string | null {
   const storedPhase = phaseOf(stored.status);
@@ -363,7 +363,12 @@ export function laggingView(
   }
   if (why === null) return null;
   // Newer event evidence proves the provider has moved on: the view is a correction, not a cache.
-  const storedNewest = newestPosition(storedEvents.filter((e) => !e.deleted));
+  // As in 2(c), the stored side excludes events this document explicitly retracts, so a document
+  // deleting the stored newest event and reverting the view with it is judged on what remains.
+  const deleted = new Set(input.deletedEvents.map((d) => d.providerEventId));
+  const storedNewest = newestPosition(
+    storedEvents.filter((e) => !e.deleted && !deleted.has(e.providerEventId)),
+  );
   const incomingNewest = newestPosition(input.eventPositions);
   if (
     incomingNewest !== null &&
