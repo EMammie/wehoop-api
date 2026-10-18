@@ -1,0 +1,73 @@
+# Hosted PR review (plan §6, M4): the reviewer checklist from .claude/agents/reviewer.md run by
+# Claude Code on every non-draft pull request, read-only, posting one sticky comment.
+# Requires the repository secret ANTHROPIC_API_KEY (owner action; nothing runs without it).
+name: claude-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+
+jobs:
+  review:
+    name: hosted review
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          use_sticky_comment: true
+          claude_args: >-
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)"
+          prompt: |
+            You are the read-only reviewer for wehoop-api (see .claude/agents/reviewer.md and CLAUDE.md).
+            Review pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}:
+            run `gh pr diff ${{ github.event.pull_request.number }}` and read the changed files in full.
+            Never edit files, never run anything that writes, never print the contents of any .env* file.
+
+            Checklist, in priority order:
+            1. Change-stream invariants: every durable write inside one transaction that locks the game
+               row, runs the freshness check, allocates exactly n seqs for n real changes, appends
+               game_changes and inserts broadcast_outbox with the change id as PK. Nothing outside
+               src/ingest/apply-changes.ts writes game state. game_changes is never updated or deleted
+               except by the retention job.
+            2. Freshness (docs/PLAN.md §4): can an older batch regress state? Does hash inequality alone
+               trigger an update? Observation writes separated from durable writes?
+            3. Idempotency: the same normalized batch twice yields zero changes.
+            4. Transactions and connections: advisory lock and LISTEN only on the session connection;
+               no HTTP inside a transaction.
+            5. Zod at every boundary (provider payloads, env, inbound HTTP params); .loose() only at the top level.
+            6. Access control: new public tables have RLS + select-only policy; nothing in ingest is granted
+               to anon/authenticated; views use security_invoker; no Realtime insert policy.
+            7. Quota accounting: trial/production calls log provider_calls with product and quota_counted=true;
+               simulation/fixture/rehearsal calls never count.
+            8. League quirks, 9. contract drift (GameChange, pulse, /changes shape), 10. do tests assert behaviour,
+            11. any `any`, swallowed errors, logging that could leak a secret.
+            Also check `git diff --stat` for files outside the author's write boundary
+            (implementer never touches devlog/, .github/ or .claude/; validator writes only devlog/evidence/).
+
+            Post ONE review comment with `gh pr comment ${{ github.event.pull_request.number }} --body-file -`
+            in this exact format:
+
+            ## Hosted review: <branch> (<n> blockers, <n> should, <n> nit)
+            [blocker] path:line – issue – fix
+            [should]  path:line – issue – fix
+            [nit]     path:line – issue – fix
+            ## Verdict
+            BLOCKED | APPROVED-WITH-SHOULDS | APPROVED
+
+            A blocker violates a CLAUDE.md non-negotiable, can corrupt or regress state, leaks data, or
+            makes an acceptance item untestable. Every finding has a file:line and a concrete fix. No praise padding.
