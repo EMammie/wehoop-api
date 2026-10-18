@@ -14,6 +14,7 @@ import {
 import { QuotaGuard, QuotaRefusedError } from '../ingest/quota-guard.js';
 import { ReferenceIngester } from '../ingest/reference.js';
 import { endRun, startRun } from '../ingest/runs.js';
+import { Scheduler } from '../ingest/scheduler.js';
 import { assertSpeedAllowed, resolveGame, runTrialWatch } from '../ingest/trial-mode.js';
 import { LeagueCodeSchema } from '../leagues/codes.js';
 import { adapterFor } from '../leagues/registry.js';
@@ -39,6 +40,11 @@ import { SimulationUrlResolver } from '../providers/sportradar/urls.js';
  *                                            every 5 min; needs a production-shaped host, never the simulation service)
  *   pnpm dev:worker --mode sim --league ncaawb --game <id> --profile full --recording <id>
  *                                           (the same trial flow against the simulation host; never counted)
+ *   pnpm dev:worker --mode production          (no --game: the production scheduler, src/ingest/scheduler.ts:
+ *                                            idle holding the lock, drain the outbox, poll the daily schedule
+ *                                            per league with a key, start coverage-aware watches near tip-off)
+ *   pnpm worker:rehearsal --schedule --speed N  (the same scheduler against the fake provider; MODE=trial needs
+ *                                            the explicit flag and a loopback host, never the real one)
  *   [--lock-wait 60]  seconds to wait for the single-ingester lock (a killed worker's lock lingers briefly)
  *   [--drain-timeout 60]  seconds the final drain may wait for backing-off outbox rows before exiting
  *
@@ -80,6 +86,7 @@ async function main() {
       speed: { type: 'string' },
       note: { type: 'string' },
       push: { type: 'boolean', default: false },
+      schedule: { type: 'boolean', default: false },
     },
     strict: true,
   });
@@ -125,10 +132,25 @@ async function main() {
     );
     process.exit(64);
   }
-  if (config.mode !== 'sim' && !args['replay-file'] && !trialWatch) {
+  // The scheduler (plan §4) is the production default; in trial mode it exists only for a
+  // rehearsal against a loopback host (`--schedule`), never against api.sportradar.com: a trial
+  // key watches exactly the one game the operator planned.
+  const scheduler =
+    !trialWatch &&
+    !args['replay-file'] &&
+    !args.recording &&
+    (config.mode === 'production' || (args.schedule && config.rehearsal));
+  if (args.schedule && !scheduler) {
+    log.error(
+      { mode: config.mode, rehearsal: config.rehearsal },
+      '--schedule runs the production scheduler: MODE=production, or MODE=trial against a loopback rehearsal host; not with --game / --replay-file / --recording',
+    );
+    process.exit(64);
+  }
+  if (config.mode !== 'sim' && !args['replay-file'] && !trialWatch && !scheduler) {
     log.error(
       { mode: config.mode },
-      `MODE=${config.mode} watches one planned game: --game <id> --profile <p> (pnpm trial watch); no automatic discovery`,
+      `MODE=${config.mode} watches one planned game: --game <id> --profile <p> (pnpm trial watch); no automatic discovery (the scheduler runs in MODE=production, or with --schedule on a rehearsal host)`,
     );
     process.exit(64);
   }
@@ -300,6 +322,40 @@ async function main() {
     }
     process.exit(0);
   };
+
+  if (scheduler) {
+    const leagues = (['wnba', 'ncaawb', 'unrivaled'] as const).filter(
+      (l) => config.sportradar.keys[l] !== undefined,
+    );
+    const guard = new QuotaGuard({ db, log, overrides: config.quotaOverrides });
+    const sched = new Scheduler({
+      db,
+      log,
+      config,
+      guard,
+      pulse,
+      fault,
+      leagues,
+      isStopped: () => stopRequested,
+      // A rehearsal ticks faster so the fake provider's compressed game is noticed in time.
+      ...(config.rehearsal ? { tickMs: Math.max(1000, Math.round(60_000 / speed)) } : {}),
+    });
+    log.info({ leagues, mode: config.mode, rehearsal: config.rehearsal }, 'scheduler mode');
+    wakeIdle = () => undefined;
+    try {
+      await sched.run();
+    } catch (err) {
+      log.error({ err }, 'scheduler failed');
+      process.exit(1);
+    }
+    pulse.stop();
+    const left = await finalDrain();
+    publisher.stop();
+    scoreboard.stop();
+    log.info({ stats: sched.stats, unpublished: left, stoppedBy }, 'scheduler finished');
+    await exitAfterTail(left);
+    return;
+  }
 
   if (trialWatch) {
     // Trial / production watch of ONE planned game (plan §4 "Trial mode"): the game row comes
