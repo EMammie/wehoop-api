@@ -245,6 +245,67 @@ describe('PushStream', () => {
     expect(n).toBe(2);
   });
 
+  it('a connection that delivers no line keeps the backoff growing; the shared attempt budget stops the stream for good', async () => {
+    const s = await pushServer((res) => {
+      res.flushHeaders(); // accepts (200), then closes without a line
+      setTimeout(() => res.destroy(), 5);
+    });
+    server = s.server;
+    const delays: number[] = [];
+    const budget = { remaining: 3 };
+    const stream = new PushStream({
+      db: null,
+      log,
+      resolver: resolverFor(s.url),
+      league: 'wnba',
+      runId: null,
+      feed: 'push_events',
+      backoffMinMs: 10,
+      backoffMaxMs: 1000,
+      random: () => 0.5,
+      attemptBudget: budget,
+      onLine: () => undefined,
+      onStateChange: (st) => {
+        if (st.status === 'backoff' && st.lastError) delays.push(Date.now());
+      },
+    });
+    await stream.start();
+    expect(stream.state.attempts).toBe(3);
+    expect(budget.remaining).toBe(0);
+    expect(stream.state.status).toBe('stopped');
+    expect(stream.state.lastError).toMatch(/allowance exhausted/);
+    expect(stream.state.connections).toBe(3); // every attempt connected (200) and was cut
+    expect(s.connections()).toBe(3);
+  });
+
+  it('a line longer than 1 MiB without a newline aborts the connection (reconnect), never a parse', async () => {
+    const s = await pushServer((res, n) => {
+      if (n === 1) {
+        res.write('x'.repeat(600 * 1024));
+        setTimeout(() => res.write('y'.repeat(600 * 1024)), 5);
+        return;
+      }
+      res.write(`${JSON.stringify(events[0])}\n`);
+    });
+    server = s.server;
+    const stream = new PushStream({
+      db: null,
+      log,
+      resolver: resolverFor(s.url),
+      league: 'wnba',
+      runId: null,
+      feed: 'push_events',
+      backoffMinMs: 10,
+      backoffMaxMs: 20,
+      onLine: () => undefined,
+    });
+    void stream.start();
+    await until(() => stream.state.connections === 2);
+    await stream.stop();
+    expect(stream.state.lines).toBe(1);
+    expect(s.connections()).toBe(2);
+  });
+
   it('refuses a rate-limited source without limiter and guard, and a counted source without a database', () => {
     const base = {
       log,

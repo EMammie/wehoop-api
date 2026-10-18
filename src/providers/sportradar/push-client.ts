@@ -1,5 +1,10 @@
 import type { Db } from '../../db/client.js';
-import { countsTowardQuota, needsRateLimit, type QuotaGuard } from '../../ingest/quota-guard.js';
+import {
+  countsTowardQuota,
+  needsRateLimit,
+  type QuotaGuard,
+  QuotaRefusedError,
+} from '../../ingest/quota-guard.js';
 import type { LeagueCode } from '../../leagues/codes.js';
 import type { Logger } from '../../logger.js';
 import type { RateLimiter } from './rate-limiter.js';
@@ -96,11 +101,19 @@ export interface PushStreamDeps {
   watchdogMs?: number;
   backoffMinMs?: number;
   backoffMaxMs?: number;
+  /**
+   * Connection attempts this stream may still make, shared with the other streams of one watch
+   * (PUSH_CONNECTION_ALLOWANCE): every attempt decrements it; at zero the stream stops for good
+   * (status `stopped`, `lastError` says why) and the REST cadence stays in charge.
+   */
+  attemptBudget?: { remaining: number };
   random?: () => number;
   now?: () => number;
 }
 
 export const PUSH_WATCHDOG_MS = 15_000;
+/** A single NDJSON line longer than this is a broken stream, not a message: abort and reconnect. */
+export const PUSH_MAX_LINE_BYTES = 1024 * 1024;
 export const PUSH_BACKOFF_MIN_MS = 1_000;
 export const PUSH_BACKOFF_MAX_MS = 30_000;
 
@@ -214,6 +227,16 @@ export class PushStream {
     const limited = needsRateLimit(source);
     const fetchImpl = this.deps.fetchImpl ?? fetch;
     while (!this.stopped) {
+      const budget = this.deps.attemptBudget;
+      if (budget && budget.remaining <= 0) {
+        this.state.lastError = 'connection allowance exhausted; REST reconciliation continues';
+        log.error(
+          { feed, attempts: this.state.attempts },
+          'push stream stopped: connection allowance exhausted',
+        );
+        break;
+      }
+      if (budget) budget.remaining--;
       this.state.attempts++;
       this.setStatus('connecting');
       const controller = new AbortController();
@@ -221,15 +244,29 @@ export class PushStream {
       let callId: number | null = null;
       let status = 0;
       let bytesThisConnection = 0;
+      let linesThisConnection = 0;
+      /** Set once the request is sent: a failed attempt is still a provider call (status null). */
+      let requestedAt: Date | null = null;
       const started = performance.now();
       try {
         if (limited && this.deps.guard) {
-          await this.deps.guard.assertCall(this.product, source, this.deps.reservationId ?? null);
+          try {
+            await this.deps.guard.assertCall(this.product, source, this.deps.reservationId ?? null);
+          } catch (err) {
+            if (err instanceof QuotaRefusedError) {
+              // No budget: retrying every 30 s would only repeat the refusal; REST decides when to stop.
+              this.state.lastError = err.message.slice(0, 500);
+              log.error({ feed, reason: err.reason }, 'push stream stopped: quota refused');
+              this.stopped = true;
+              break;
+            }
+            throw err;
+          }
         }
-        let requestedAt = new Date(this.now());
-        if (limited && this.deps.limiter)
-          requestedAt = new Date(await this.deps.limiter.waitForSlot());
+        let slotAt = new Date(this.now());
+        if (limited && this.deps.limiter) slotAt = new Date(await this.deps.limiter.waitForSlot());
         if (this.stopped) break;
+        requestedAt = slotAt;
         // Connection phase is covered by the same watchdog: a host that accepts and never answers trips it.
         this.resetWatchdog(controller);
         const res = await fetchImpl(url, {
@@ -256,7 +293,8 @@ export class PushStream {
         this.state.connectedAt = new Date(this.now());
         this.state.disconnectedSince = null;
         this.state.lastError = null;
-        this.consecutiveFailures = 0;
+        // consecutiveFailures resets only once this connection delivers a line: a host that
+        // accepts and closes immediately keeps backing off instead of reconnecting every second.
         this.setStatus('connected');
         log.info(
           { feed, connections: this.state.connections, downMs, status },
@@ -285,11 +323,23 @@ export class PushStream {
           this.state.lastByteAt = receivedAt;
           this.resetWatchdog(controller);
           buffer += decoder.decode(chunk, { stream: true });
+          if (buffer.length > PUSH_MAX_LINE_BYTES) {
+            throw new Error(
+              `sportradar ${feed}: push line too long (${buffer.length} bytes without a newline)`,
+            );
+          }
           let nl = buffer.indexOf('\n');
           while (nl >= 0) {
             const raw = buffer.slice(0, nl);
             buffer = buffer.slice(nl + 1);
+            if (raw.trim()) {
+              linesThisConnection++;
+              if (linesThisConnection === 1) this.consecutiveFailures = 0;
+            }
+            // The handler may wait on the database; that is not the provider going silent.
+            this.clearWatchdog();
             await this.handleLine(raw, receivedAt);
+            if (!controller.signal.aborted) this.resetWatchdog(controller);
             nl = buffer.indexOf('\n');
           }
         }
@@ -317,6 +367,11 @@ export class PushStream {
         );
         await this.sleepInterruptible(delay);
       } finally {
+        // A request that never got an answer (watchdog on connect, socket/TLS error, stop
+        // mid-connect) is still a provider call: log it with a null status, like SportradarHttp.
+        if (callId === null && requestedAt !== null) {
+          callId = await this.logCall(url, 0, Math.round(performance.now() - started), requestedAt);
+        }
         if (callId !== null) await this.updateCallBytes(callId, bytesThisConnection);
         if (this.controller === controller) this.controller = null;
       }
