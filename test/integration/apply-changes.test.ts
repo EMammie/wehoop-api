@@ -837,4 +837,77 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     expect(c.changes).toBe(c.lastSeq);
     expect(c.outbox).toBe(c.changes);
   });
+
+  /**
+   * Status "flicker" within ONE generation (M3 corrective pass, external review; evidence M3
+   * finding 3 notes the case "did not occur in these runs"). Sportradar caches the summary /
+   * boxscore feed longer than pbp, so inside one watch a summary REQUESTED later (newer
+   * `observedAt`) can carry OLDER game-level content: `halftime` / period 2 while the pbp
+   * already showed period 3 in progress. Plan §4 rule 3 as written says game-level fields
+   * follow the newest `observedAt`, and rule 2(b) (period behind stored) only gates a NEW
+   * generation, so today this emits a durable `status` change back to halftime / period 2 and a
+   * second one when the next pbp document restores period 3: two regressive seqs broadcast to
+   * every client. The desired behaviour asserted here (the lagging view is
+   * `superseded_observation` for game-level fields, nothing durable moves) is NOT the current
+   * contract, so the test is `it.fails`: it documents the gap without silently changing the
+   * plan. Proposed rule and the owner's decision: see the M3 corrective-pass handoff.
+   */
+  it.fails('same generation: a later summary carrying provider-cached older game-level content (halftime/P2 after pbp P3) must not regress status', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    const p3 = {
+      ...nd,
+      gameView: nd.gameView
+        ? {
+            ...nd.gameView,
+            status: 'inprogress' as const,
+            period: { number: 3, type: 'quarter' as const, sequence: 3 },
+            clock: '7:25',
+            score: { home: 40, away: 38 },
+          }
+        : null,
+    };
+    const r1 = await apply(deps, gameId, p3, observation(run, p3, later(30)));
+    expect(r1.outcome === 'applied' && r1.changes.some((c) => c.type === 'status')).toBe(true);
+    const stored = await counts(db, gameId);
+    const [g1] = await db<{ status: string; period: number | null }[]>`
+      select status::text as status, current_period as period from public.games where id = ${gameId}`;
+    expect(g1).toEqual({ status: 'inprogress', period: 3 });
+
+    // Same generation, requested 30 s later, but the provider served a cached halftime summary.
+    const sum = summaryQ1();
+    const laggingSummary = {
+      ...sum,
+      gameView: sum.gameView
+        ? {
+            ...sum.gameView,
+            status: 'halftime' as const,
+            period: { number: 2, type: 'quarter' as const, sequence: 2 },
+            clock: '0:00',
+            score: { home: 40, away: 38 }, // same score: nothing in the batch is newer than stored
+          }
+        : null,
+    };
+    const r2 = await apply(
+      deps,
+      gameId,
+      laggingSummary,
+      observation(run, laggingSummary, later(60), { source: 'rest' }),
+    );
+    // Desired: game-level view superseded, logged, no durable status/period change.
+    expect(r2.outcome === 'applied' && r2.gameLevel).toBe('superseded');
+    expect(r2.outcome === 'applied' && r2.changes.filter((c) => c.type === 'status')).toEqual([]);
+    expect(await staleReasons(db, gameId)).toEqual({ superseded_observation: 1 });
+    const [g2] = await db<{ status: string; period: number | null }[]>`
+      select status::text as status, current_period as period from public.games where id = ${gameId}`;
+    expect(g2).toEqual({ status: 'inprogress', period: 3 });
+
+    // The next pbp (period 3 again) then has nothing to restore: no flip-back change either.
+    const r3 = await apply(deps, gameId, p3, observation(run, p3, later(90)));
+    expect(r3.outcome === 'applied' && r3.changes.filter((c) => c.type === 'status')).toEqual([]);
+    const [statusChanges] = await db<{ n: number }[]>`
+      select count(*)::int as n from public.game_changes where game_id = ${gameId} and type = 'status' and seq > ${stored.lastSeq}`;
+    expect(statusChanges?.n).toBe(0);
+  });
 });
