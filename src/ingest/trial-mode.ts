@@ -319,6 +319,9 @@ export function planWatch(
   };
 }
 
+/** A stream reconnect needs no backfill when a REST pbp document was applied this recently (live time). */
+export const BACKFILL_SKIP_MS = 60_000;
+
 /** Push-mode knobs (tests compress the watchdog and the backoff; production uses the defaults). */
 export interface PushWatchOptions {
   watchdogMs?: number;
@@ -330,6 +333,10 @@ export interface PushWatchOutcome {
   streams: PushStreamState[];
   ingest: PushIngestStats;
   backfills: number;
+  /** Reconnects that needed no backfill because a pbp document was applied in the last 60 s. */
+  backfillsSkipped: number;
+  /** Connection attempts left of PUSH_CONNECTION_ALLOWANCE. */
+  connectionBudgetLeft: number;
 }
 
 function hasPush(resolver: UrlResolver): resolver is UrlResolver & PushUrlResolver {
@@ -476,25 +483,28 @@ export async function runTrialWatch(
   await watcher.attach(opts.game.id);
   let status: string | null = null;
   let pushOutcome: PushWatchOutcome | undefined;
-  const push =
-    pushOpts !== null && hasPush(resolver)
-      ? await openPushStreams({
-          db,
-          log,
-          adapter,
-          run,
-          game: opts.game,
-          source,
-          observationSource,
-          resolver,
-          guard: deps.guard,
-          reservationId: reservation.id,
-          apply: { db, log, ...(deps.fault ? { fault: deps.fault } : {}) },
-          options: pushOpts,
-          ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
-        })
-      : null;
+  let push: Awaited<ReturnType<typeof openPushStreams>> | null = null;
   try {
+    // Inside the try: a failure to open the streams must still end the run and release the budget.
+    if (pushOpts !== null && hasPush(resolver)) {
+      push = await openPushStreams({
+        db,
+        log,
+        adapter,
+        run,
+        game: opts.game,
+        source,
+        observationSource,
+        resolver,
+        guard: deps.guard,
+        reservationId: reservation.id,
+        apply: { db, log, ...(deps.fault ? { fault: deps.fault } : {}) },
+        options: pushOpts,
+        // Like the cadence, the "recent pbp" window is game time: 60 s live, 60 s / speed in a rehearsal.
+        backfillSkipMs: Math.max(1, Math.round(BACKFILL_SKIP_MS / speed)),
+        ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      });
+    }
     const out = await cadenceLoop(watcher, docs, log, cadence, {
       untilClosed: opts.untilClosed ?? true,
       isStopped: deps.isStopped,
@@ -503,10 +513,19 @@ export async function runTrialWatch(
     if (push) pushOutcome = await push.close('ok');
     await endRun(db, run.id, deps.isStopped() ? 'aborted' : 'ok');
   } catch (err) {
-    if (push) pushOutcome = await push.close('error', (err as Error).message);
+    if (push) {
+      try {
+        pushOutcome = await push.close('error', (err as Error).message);
+      } catch (closeErr) {
+        log.error({ err: closeErr }, 'push streams did not close cleanly');
+      }
+    }
     await endRun(db, run.id, 'error', (err as Error).message);
     throw err;
   } finally {
+    // This game's pulse timer ends with its watch (the scheduler watches many games); the caller
+    // still sends the closing pulse (`sendOnce`) after its final drain.
+    deps.pulse?.stop(opts.game.id);
     await deps.guard.release(reservation.id);
   }
   const final = (await deps.guard.reservation(reservation.id)) ?? reservation;
@@ -551,6 +570,8 @@ interface OpenPushArgs {
   reservationId: number;
   apply: Parameters<typeof runBackfill>[0]['apply'];
   options: PushWatchOptions;
+  /** A reconnect skips its backfill when a pbp document was applied within this window (60 s; scaled by --speed). */
+  backfillSkipMs: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -579,7 +600,24 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
   });
   const subRun = await ingest.start();
   let backfills = 0;
+  let backfillsSkipped = 0;
   const backfill = async (info: { connections: number; downMs: number }) => {
+    // A pbp document applied in the last 60 s (the REST reconciliation or an earlier backfill of
+    // this generation) already covers the outage: do not spend another call.
+    const [recent] = await db<{ n: number }[]>`
+      select count(*)::int as n from ingest.provider_calls c
+      where c.feed = 'pbp' and c.status = 200
+        and c.called_at > now() - make_interval(secs => ${a.backfillSkipMs / 1000}::float8)
+        and (c.run_id = ${a.run.id}
+             or c.run_id in (select id from ingest.ingestion_runs where parent_run_id = ${a.run.id}))`;
+    if ((recent?.n ?? 0) > 0) {
+      backfillsSkipped++;
+      log.info(
+        { ...info, gameId: a.game.id },
+        'backfill skipped: a pbp document was applied in the last 60 s',
+      );
+      return;
+    }
     backfills++;
     await runBackfill(
       {
@@ -618,6 +656,9 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
     'push_events',
     ...(adapter.capabilities.pushClock ? ['push_clock' as const] : []),
   ];
+  // PUSH_CONNECTION_ALLOWANCE is the cap for the whole watch: both streams draw on one budget and
+  // stop for good when it is spent; the 5-minute REST cadence keeps the game moving.
+  const attemptBudget = { remaining: PUSH_CONNECTION_ALLOWANCE };
   const states = new Map<PushFeed, PushStreamState>();
   let metaWrite: Promise<void> = Promise.resolve();
   const mirror = (state: PushStreamState) => {
@@ -654,6 +695,7 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
       params: { providerGameId: a.game.providerGameId },
       onLine: (line, at) => ingest.handle(line, at).then(() => undefined),
       onStateChange: mirror,
+      attemptBudget,
       ...(feed === 'push_events' ? { onReconnect: backfill } : {}),
       ...(a.options.watchdogMs !== undefined ? { watchdogMs: a.options.watchdogMs } : {}),
       ...(a.options.backoffMinMs !== undefined ? { backoffMinMs: a.options.backoffMinMs } : {}),
@@ -664,16 +706,21 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
   });
   for (const s of streams) void s.start();
   log.info({ feeds, runId: subRun.id, watchId: subRun.watchId }, 'push streams opened');
+  let closed: PushWatchOutcome | null = null;
   return {
     async close(status, error) {
+      if (closed) return closed; // idempotent: an error path never ends the sub-run twice
       await Promise.all(streams.map((s) => s.stop()));
       await metaWrite;
       await ingest.end(status, error);
-      return {
+      closed = {
         streams: streams.map((s) => s.state),
         ingest: ingest.stats,
         backfills,
+        backfillsSkipped,
+        connectionBudgetLeft: attemptBudget.remaining,
       };
+      return closed;
     },
   };
 }
