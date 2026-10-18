@@ -10,6 +10,7 @@ import { SportradarHttp } from '../providers/sportradar/http.js';
 import { rateLimiterFor } from '../providers/sportradar/rate-limiter.js';
 import { createResolver } from '../providers/sportradar/resolver.js';
 import { DailyScheduleDocumentSchema } from '../providers/sportradar/schemas/schedule.js';
+import { coverageIsFull } from './cadence.js';
 import type { FaultInjector } from './fault.js';
 import { phaseOf } from './freshness.js';
 import { needsRateLimit, type QuotaGuard, QuotaRefusedError } from './quota-guard.js';
@@ -46,6 +47,10 @@ export interface SchedulerOptions {
   windowAfterMs?: number;
   /** Never start a watch on a game whose tip-off is older than this (default 6 h). */
   maxLateStartMs?: number;
+  /** A failed watch is retried after this, doubling per failure (default 10 min, capped at 6 h). */
+  watchRetryMs?: number;
+  /** A failed schedule poll is retried after this (default 5 min). */
+  pollRetryMs?: number;
 }
 
 export interface SchedulerDeps extends SchedulerOptions {
@@ -165,6 +170,10 @@ export class Scheduler {
   };
   readonly running = new Map<string, Promise<void>>();
   readonly lastSchedulePoll = new Map<LeagueCode, Date>();
+  /** After a failed poll: when to try again (independent of the 06:00 / hourly rules). */
+  readonly nextPollAt = new Map<LeagueCode, Date>();
+  /** Games whose watch failed: attempts so far and when the next attempt may start. */
+  readonly failedWatches = new Map<string, { attempts: number; nextAt: Date }>();
   private readonly opts: Required<SchedulerOptions>;
 
   constructor(private readonly deps: SchedulerDeps) {
@@ -174,6 +183,8 @@ export class Scheduler {
       windowBeforeMs: deps.windowBeforeMs ?? 30 * 60_000,
       windowAfterMs: deps.windowAfterMs ?? 4 * 3_600_000,
       maxLateStartMs: deps.maxLateStartMs ?? 6 * 3_600_000,
+      watchRetryMs: deps.watchRetryMs ?? 10 * 60_000,
+      pollRetryMs: deps.pollRetryMs ?? 5 * 60_000,
     };
   }
 
@@ -192,28 +203,38 @@ export class Scheduler {
       const to = new Date(now.getTime() + 2 * 86_400_000);
       let games = await this.loadGames(league, from, to);
       const window = inGameWindow(games, now, this.opts);
-      if (shouldPollSchedule(now, this.lastSchedulePoll.get(league) ?? null, window)) {
+      const retryAt = this.nextPollAt.get(league);
+      const due = retryAt
+        ? now.getTime() >= retryAt.getTime()
+        : shouldPollSchedule(now, this.lastSchedulePoll.get(league) ?? null, window);
+      if (due) {
         const dates = scheduleDates(now);
         try {
           await (this.deps.pollSchedule ?? this.defaultPollSchedule.bind(this))(adapter, dates);
           this.stats.schedulePolls++;
           this.lastSchedulePoll.set(league, now);
+          this.nextPollAt.delete(league);
           games = await this.loadGames(league, from, to);
         } catch (err) {
           this.stats.schedulePollFailures++;
-          // A refusal (quota) or a provider error: try again next tick, never crash the loop.
-          this.lastSchedulePoll.set(league, now);
+          // A refusal (quota) or a provider error: retry in pollRetryMs, never crash the loop, and
+          // never wait for tomorrow's 06:00 because of one failure.
+          this.nextPollAt.set(league, new Date(now.getTime() + this.opts.pollRetryMs));
           this.deps.log.error({ err, league, dates }, 'schedule poll failed');
         }
       }
-      for (const game of gamesToWatch(games, now, new Set(this.running.keys()), this.opts)) {
+      const blocked = new Set(this.running.keys());
+      for (const [gameId, f] of this.failedWatches) {
+        if (now.getTime() < f.nextAt.getTime()) blocked.add(gameId);
+      }
+      for (const game of gamesToWatch(games, now, blocked, this.opts)) {
         this.startWatch(adapter, game);
       }
     }
   }
 
   private startWatch(adapter: LeagueAdapter, game: GameRow): void {
-    const push = adapter.capabilities.pushEvents && game.coverage === 'full';
+    const push = adapter.capabilities.pushEvents && coverageIsFull(game.coverage);
     this.stats.watchesStarted++;
     this.deps.log.info(
       {
@@ -229,9 +250,19 @@ export class Scheduler {
     const p = (this.deps.watch ?? this.defaultWatch.bind(this))(adapter, game, push)
       .then(() => {
         this.stats.watchesFinished++;
+        this.failedWatches.delete(game.id);
       })
       .catch((err) => {
         this.stats.watchesFailed++;
+        // Exponential retry window (>= watchRetryMs, doubling, capped at 6 h): a quota refusal,
+        // a 5xx or "already closed" must not open a new generation and reservation every tick.
+        const prev = this.failedWatches.get(game.id);
+        const attempts = (prev?.attempts ?? 0) + 1;
+        const wait = Math.min(6 * 3_600_000, this.opts.watchRetryMs * 2 ** (attempts - 1));
+        this.failedWatches.set(game.id, {
+          attempts,
+          nextAt: new Date(this.now().getTime() + wait),
+        });
         if (err instanceof QuotaRefusedError)
           this.deps.log.error(
             { gameId: game.id, product: err.product, reason: err.reason },
@@ -325,19 +356,24 @@ export class Scheduler {
 
   private async defaultWatch(adapter: LeagueAdapter, game: GameRow, push: boolean): Promise<void> {
     const { db, log, config, guard, pulse } = this.deps;
-    await runTrialWatch(
-      {
-        db,
-        log,
-        config,
-        adapter,
-        guard,
-        pulse,
-        ...(this.deps.fault ? { fault: this.deps.fault } : {}),
-        isStopped: this.deps.isStopped,
-        ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
-      },
-      { game, push, untilClosed: true, note: 'scheduler' },
-    );
+    try {
+      await runTrialWatch(
+        {
+          db,
+          log,
+          config,
+          adapter,
+          guard,
+          pulse,
+          ...(this.deps.fault ? { fault: this.deps.fault } : {}),
+          isStopped: this.deps.isStopped,
+          ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+        },
+        { game, push, untilClosed: true, note: 'scheduler' },
+      );
+    } finally {
+      // The closing pulse (plan §4: once when the game closes); the per-game timer ended with the watch.
+      await pulse?.sendOnce(game.id);
+    }
   }
 }
