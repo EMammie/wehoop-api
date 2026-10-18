@@ -20,6 +20,37 @@ export function isLoopbackUrl(url: string): boolean {
   }
 }
 
+/** The local dev/integration Supabase stack (`supabase/config.toml`, db port 54322): `supabase db reset` and `pnpm test:int` destroy it. */
+export const DEV_STACK_DB_PORT = 54322;
+
+/**
+ * Does this connection string point at the dev/integration stack? Host 127.0.0.1 / localhost /
+ * ::1 AND port 54322. The persistent trial stack (`supabase-trial/`, port 55322) is not it.
+ */
+export function isDevStackUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.hostname;
+    const loopback =
+      host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
+    return loopback && u.port === String(DEV_STACK_DB_PORT);
+  } catch {
+    return false;
+  }
+}
+
+/** `host:port` of a connection string, never its credentials (for preflight output and errors). */
+export function describeDbUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.hostname}:${u.port || '5432'}`;
+  } catch {
+    return '<unparseable>';
+  }
+}
+
+const Flag = z.preprocess(emptyToUndefined, z.enum(['0', '1']).default('0'));
+
 /** `QUOTA_<PRODUCT>=<limit_30d>[/<reserve>]`: the console limit, typed by the operator. */
 const QuotaOverride = z.preprocess(
   emptyToUndefined,
@@ -54,6 +85,8 @@ const EnvSchema = z.object({
   QUOTA_WNBA: QuotaOverride,
   QUOTA_NCAAWB: QuotaOverride,
   QUOTA_UNRIVALED: QuotaOverride,
+  /** Explicit consent to run trial/production against the dev stack (its quota ledger dies on `db reset`). */
+  TRIAL_ALLOW_DEV_DB: Flag,
 
   PORT: z.coerce.number().int().positive().default(3000),
   ADMIN_BEARER_TOKEN: z.preprocess(emptyToUndefined, z.string().optional()),
@@ -88,6 +121,10 @@ export interface Config {
   };
   /** Console limits typed by the operator (`QUOTA_<PRODUCT>`); override ingest.product_quotas. */
   quotaOverrides: Record<string, { limit30d: number; reserve: number }>;
+  /** True when DATABASE_URL (or the session URL) is the dev/integration stack (127.0.0.1:54322). */
+  devStackDb: boolean;
+  /** True when calls go to a loopback stand-in host (`pnpm sim serve`), never to api.sportradar.com. */
+  rehearsal: boolean;
   api: { port: number; adminBearerToken?: string; baseUrl: string };
   /** Crash-point fault injection (see src/ingest/fault.ts). Null unless WEHOOP_FAULT is set. */
   fault: FaultSpec | null;
@@ -144,6 +181,19 @@ export function loadConfig(source: Record<string, string | undefined> = process.
       'DATABASE_SESSION_URL points at a transaction-mode pooler (port 6543 / pgbouncer=true); advisory locks and LISTEN would silently not work',
     );
   }
+  // Ledger protection (rev 4.6). The quota ledger (ingest.provider_calls, budget_reservations,
+  // product_quotas.verified_at, provider_rate_slots) is the only record of what a trial key has
+  // spent; Sportradar keeps counting whether or not we remember. The dev stack is reset by
+  // `supabase db reset` and by `pnpm test:int`, so a live run must use the persistent trial
+  // stack (`supabase-trial/`, port 55322) unless the operator says otherwise explicitly. A
+  // rehearsal (loopback SPORTRADAR_BASE_URL) spends nothing and is exempt.
+  const rehearsal = e.SPORTRADAR_BASE_URL !== SPORTRADAR_DEFAULT_BASE_URL;
+  const devStackDb = isDevStackUrl(e.DATABASE_URL) || isDevStackUrl(sessionUrl);
+  if (e.MODE !== 'sim' && !rehearsal && devStackDb && e.TRIAL_ALLOW_DEV_DB !== '1') {
+    problems.push(
+      `DATABASE_URL points at the dev/integration stack (${describeDbUrl(e.DATABASE_URL)}) while MODE=${e.MODE} would spend real quota: \`supabase db reset\` and \`pnpm test:int\` erase that database, and with it the quota ledger (provider_calls, reservations, verified limits, rate slots) while Sportradar still counts every call. Point DATABASE_URL / DATABASE_SESSION_URL / SUPABASE_* at the persistent trial stack (\`pnpm trial:db start\`, port 55322, see .env.example) or set TRIAL_ALLOW_DEV_DB=1 to accept the loss`,
+    );
+  }
   if (problems.length > 0) throw new Error(`Invalid environment:\n  ${problems.join('\n  ')}`);
 
   return {
@@ -171,6 +221,8 @@ export function loadConfig(source: Record<string, string | undefined> = process.
       ...(e.QUOTA_NCAAWB ? { ncaawb: e.QUOTA_NCAAWB } : {}),
       ...(e.QUOTA_UNRIVALED ? { unrivaled: e.QUOTA_UNRIVALED } : {}),
     },
+    devStackDb,
+    rehearsal,
     api: {
       port: e.PORT,
       ...(e.ADMIN_BEARER_TOKEN ? { adminBearerToken: e.ADMIN_BEARER_TOKEN } : {}),

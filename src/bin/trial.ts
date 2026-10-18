@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { budgetFor, TRIAL_PROFILES, type TrialProfile } from '../ingest/cadence.js';
+import { runPreflight } from '../ingest/preflight.js';
 import { QuotaGuard, QuotaRefusedError } from '../ingest/quota-guard.js';
 import {
   assertSpeedAllowed,
@@ -49,6 +50,14 @@ import { createLogger } from '../logger.js';
  *   Operator confirmation of the console limit: writes ingest.product_quotas
  *   and stamps verified_at. QuotaGuard refuses every call until this is done
  *   (or QUOTA_<PRODUCT> is set in env).
+ * pnpm trial preflight              (pnpm preflight:live / preflight:rehearsal)
+ *   What a live run would do, with no secret in the output: mode, access level, provider
+ *   hostname, key present/missing per product, quota state per product, database host:port and
+ *   whether it is the dev stack. Exit 0 when ready, 65 with one line per problem otherwise.
+ *
+ * Environment files are loaded by the scripts, not here (`tsx` loads no .env):
+ *   pnpm trial:live <cmd>       node --env-file=.env --env-file=.env.trial --import tsx src/bin/trial.ts
+ *   pnpm trial:rehearsal <cmd>  node --env-file=.env --env-file=.env.rehearsal --import tsx src/bin/trial.ts
  */
 async function main() {
   const { values: args, positionals } = parseArgs({
@@ -77,6 +86,10 @@ async function main() {
   });
   const cmd = positionals[0];
   const env = args.mode ? { ...process.env, MODE: args.mode } : process.env;
+  if (cmd === 'preflight') {
+    // Before loadConfig: a refused configuration is itself a preflight finding, not a stack trace.
+    process.exit(await runPreflight(env, (line) => console.log(line)));
+  }
   const config = loadConfig(env);
   const log = createLogger({ level: config.logLevel });
   const league = LeagueCodeSchema.parse(args.league);
@@ -299,7 +312,9 @@ async function main() {
         break;
       }
       default:
-        usage('usage: pnpm trial plan|watch|status|release|holds|lag|quota (see src/bin/trial.ts)');
+        usage(
+          'usage: pnpm trial plan|watch|status|release|holds|lag|quota|preflight (see src/bin/trial.ts)',
+        );
     }
   } catch (err) {
     if (err instanceof QuotaRefusedError) {

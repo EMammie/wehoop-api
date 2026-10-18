@@ -4,9 +4,11 @@ import { loadConfig } from '../../../src/config.js';
 import { createResolver, KEY_ENV_NAMES } from '../../../src/providers/sportradar/resolver.js';
 import { ProdUrlResolver, SimulationUrlResolver } from '../../../src/providers/sportradar/urls.js';
 
+// Not the dev stack (55322 is the persistent trial stack): MODE=trial on 54322 is refused by the
+// ledger guard (rev 4.6, test/unit/config.test.ts), and no resolver is built here anyway.
 const base = {
-  DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:54322/postgres',
-  SUPABASE_URL: 'http://127.0.0.1:54321',
+  DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:55322/postgres',
+  SUPABASE_URL: 'http://127.0.0.1:55321',
   SUPABASE_SERVICE_ROLE_KEY: 'service',
   DATABASE_SESSION_URL: 'postgresql://u:p@db.example.com:5432/postgres',
 };

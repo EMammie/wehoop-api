@@ -8,6 +8,8 @@ const base = {
   SUPABASE_SERVICE_ROLE_KEY: 'service',
   DATABASE_SESSION_URL: 'postgresql://u:p@db.example.com:5432/postgres',
   SPORTRADAR_NCAAWB_KEY: 'unit-test-key',
+  // These configs point at the dev stack on purpose (nothing is called); the ledger guard needs consent.
+  TRIAL_ALLOW_DEV_DB: '1',
 };
 
 describe('assertSpeedAllowed (--speed only against a rehearsal host)', () => {

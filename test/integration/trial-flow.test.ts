@@ -231,6 +231,8 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
         SUPABASE_SERVICE_ROLE_KEY: 'not-used-here',
         MODE: 'trial',
         SPORTRADAR_NCAAWB_KEY: FAKE_KEY,
+        // Real-host shape on the dev stack: the ledger guard (rev 4.6) wants explicit consent.
+        TRIAL_ALLOW_DEV_DB: '1',
       });
       const guard = new QuotaGuard({ db, log });
       const game = await resolveGame(db, 'ncaawb', fullId);

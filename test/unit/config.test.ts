@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadConfig } from '../../src/config.js';
+import { describeDbUrl, isDevStackUrl, loadConfig } from '../../src/config.js';
 
 const base = {
   DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:54322/postgres',
@@ -21,8 +21,10 @@ describe('loadConfig', () => {
     expect(c.sportradar.keys.wnba).toBeUndefined();
   });
 
+  // Not the dev stack: the ledger-protection check below is about 127.0.0.1:54322 specifically.
   const trialOk = {
     ...base,
+    DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:55322/postgres',
     MODE: 'trial',
     SUPABASE_SERVICE_ROLE_KEY: 'x',
     DATABASE_SESSION_URL: 'postgresql://u:p@db.example.com:5432/postgres',
@@ -70,5 +72,60 @@ describe('loadConfig', () => {
       DATABASE_SESSION_URL: 'postgresql://u:p@db.example.com:5432/postgres',
     });
     expect(c.db.sessionUrl).toContain('db.example.com');
+  });
+
+  describe('ledger protection: trial/production never run against the dev stack by accident (rev 4.6)', () => {
+    const devDb = 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
+    const trialStackDb = 'postgresql://postgres:postgres@127.0.0.1:55322/postgres';
+
+    it('isDevStackUrl: loopback host AND port 54322 only; describeDbUrl never shows credentials', () => {
+      expect(isDevStackUrl(devDb)).toBe(true);
+      expect(isDevStackUrl('postgresql://u:p@localhost:54322/postgres')).toBe(true);
+      expect(isDevStackUrl(trialStackDb)).toBe(false);
+      expect(isDevStackUrl('postgresql://u:p@db.example.com:54322/postgres')).toBe(false);
+      expect(isDevStackUrl('nope')).toBe(false);
+      expect(describeDbUrl('postgresql://postgres:secret-pw@127.0.0.1:54322/postgres')).toBe(
+        '127.0.0.1:54322',
+      );
+      expect(
+        describeDbUrl('postgresql://postgres:secret-pw@127.0.0.1:54322/postgres'),
+      ).not.toContain('secret-pw');
+    });
+
+    it('refuses MODE=trial and MODE=production on the dev stack unless TRIAL_ALLOW_DEV_DB=1', () => {
+      const onDev = { ...trialOk, DATABASE_URL: devDb, DATABASE_SESSION_URL: devDb };
+      expect(() => loadConfig(onDev)).toThrow(
+        /dev\/integration stack[\s\S]*supabase db reset[\s\S]*quota ledger/,
+      );
+      expect(() => loadConfig(onDev)).not.toThrow(/postgres:postgres/); // no credentials in the message
+      expect(() =>
+        loadConfig({ ...onDev, MODE: 'production', SPORTRADAR_ACCESS_LEVEL: 'production' }),
+      ).toThrow(/dev\/integration stack/);
+      // The session URL alone pointing at the dev stack is enough to refuse.
+      expect(() => loadConfig({ ...trialOk, DATABASE_SESSION_URL: devDb })).toThrow(
+        /dev\/integration stack/,
+      );
+      const allowed = loadConfig({ ...onDev, TRIAL_ALLOW_DEV_DB: '1' });
+      expect(allowed.devStackDb).toBe(true);
+      expect(allowed.rehearsal).toBe(false);
+      expect(() => loadConfig({ ...onDev, TRIAL_ALLOW_DEV_DB: 'yes' })).toThrow(
+        /TRIAL_ALLOW_DEV_DB/,
+      );
+    });
+
+    it('a rehearsal (loopback SPORTRADAR_BASE_URL) and sim mode are exempt; the trial stack needs no flag', () => {
+      const onDev = { ...trialOk, DATABASE_URL: devDb, DATABASE_SESSION_URL: devDb };
+      const rehearsal = loadConfig({ ...onDev, SPORTRADAR_BASE_URL: 'http://127.0.0.1:8787' });
+      expect(rehearsal.rehearsal).toBe(true);
+      expect(rehearsal.devStackDb).toBe(true);
+      expect(() => loadConfig({ ...base, MODE: 'sim' })).not.toThrow();
+      const trialStack = loadConfig({
+        ...trialOk,
+        DATABASE_URL: trialStackDb,
+        DATABASE_SESSION_URL: trialStackDb,
+      });
+      expect(trialStack.devStackDb).toBe(false);
+      expect(trialStack.rehearsal).toBe(false);
+    });
   });
 });
