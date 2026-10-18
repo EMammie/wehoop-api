@@ -60,10 +60,16 @@ import { type Feed, SimulationUrlResolver } from '../providers/sportradar/urls.j
  *   so the score-only watcher path can be replayed from a committed fixture
  *   (`relabelRecording`). Documented in fixtures/ncaawb/README.md.
  * pnpm sim serve --replay-file <file.jsonl[.gz]> [--port 8787] [--speed 30]
+ *     [--push-drop-after <s> [--push-drop-for <s>] [--push-drop-every <s>]] [--heartbeat <s>]
  *   Local stand-in for api.sportradar.com (src/providers/sportradar/fake-provider.ts):
  *   serves the recording time-scaled over the production URL shape, 401 without
  *   x-api-key, 429 under 1 s spacing. For `MODE=trial SPORTRADAR_BASE_URL=http://127.0.0.1:8787`
  *   rehearsals of `pnpm trial plan|watch` with a made-up key; never counts real quota.
+ *   M4: also streams the recording's pbp deltas as push lines on
+ *   /stream/en/{events,clock}/subscribe (heartbeat every --heartbeat s, default 5) and
+ *   drops / refuses push connections for --push-drop-for s (default 30) starting
+ *   --push-drop-after s after start, repeating every --push-drop-every s when given;
+ *   `curl -X POST 'http://127.0.0.1:8787/_fault/push-drop?for=30000'` opens a window on demand.
  */
 async function readFileBytes(path: string): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -93,6 +99,10 @@ async function main() {
       'replay-file': { type: 'string' },
       port: { type: 'string', default: '8787' },
       speed: { type: 'string', default: '30' },
+      'push-drop-after': { type: 'string' },
+      'push-drop-for': { type: 'string', default: '30' },
+      'push-drop-every': { type: 'string' },
+      heartbeat: { type: 'string', default: '5' },
     },
     allowPositionals: true,
     strict: true,
@@ -179,14 +189,27 @@ async function main() {
   if (cmd === 'serve') {
     if (!args['replay-file']) throw new Error('--replay-file <file> is required');
     const log = createLogger({ level: config.logLevel });
+    const dropAfter = intArg('push-drop-after', args['push-drop-after'], null);
+    const dropFor = intArg('push-drop-for', args['push-drop-for'], 30) ?? 30;
+    const dropEvery = intArg('push-drop-every', args['push-drop-every'], null);
     const server = await startFakeProvider({
       replayFile: args['replay-file'],
       speed: intArg('speed', args.speed, 30) ?? 30,
       port: intArg('port', args.port, 8787) ?? 8787,
+      heartbeatMs: (intArg('heartbeat', args.heartbeat, 5) ?? 5) * 1000,
+      ...(dropAfter !== null
+        ? {
+            pushDrop: {
+              afterMs: dropAfter * 1000,
+              forMs: dropFor * 1000,
+              ...(dropEvery !== null ? { everyMs: dropEvery * 1000 } : {}),
+            },
+          }
+        : {}),
       log,
     });
     console.log(
-      `FAKE_PROVIDER_URL=${server.url} game=${server.providerGameId} documents=${server.documents} speed=${args.speed}x`,
+      `FAKE_PROVIDER_URL=${server.url} game=${server.providerGameId} documents=${server.documents} pushLines=${server.pushLines.events}+${server.pushLines.clocks} speed=${args.speed}x${dropAfter !== null ? ` pushDrop=after ${dropAfter}s for ${dropFor}s${dropEvery !== null ? ` every ${dropEvery}s` : ''}` : ''}`,
     );
     const stop = async () => {
       console.log(`FAKE_PROVIDER_STATS=${JSON.stringify(server.stats)}`);
