@@ -98,11 +98,32 @@ describe('pushClockToGameView', () => {
   });
 
   it('a message without a period keeps the stored period (omission is not change); running=false is carried', () => {
-    const stored = { number: 2, sequence: 2, type: 'quarter' as const };
-    const gv = pushClockToGameView(clock(0), stored);
-    expect(gv.period).toEqual(stored);
+    const period = { number: 2, sequence: 2, type: 'quarter' as const };
+    const gv = pushClockToGameView(clock(0), { period, score: { home: 0, away: 0 } });
+    expect(gv.period).toEqual(period);
     expect(gv.clockRunning).toBe(false);
     expect(pushClockToGameView(clock(0), null).period).toBeNull();
+  });
+
+  it('a team without points keeps the stored score, never 0; 0 only when nothing is stored', () => {
+    const base = clock(2);
+    const { points: _h, ...homeNoPoints } = base.payload.game.home;
+    const noPoints: PushClockMessage = {
+      ...base,
+      payload: {
+        ...base.payload,
+        game: {
+          ...base.payload.game,
+          home: homeNoPoints,
+          away: { ...base.payload.game.away, points: 41 },
+        },
+      },
+    };
+    const stored = { period: null, score: { home: 55, away: 40 } };
+    expect(pushClockToGameView(noPoints, stored).score).toEqual({ home: 55, away: 41 });
+    expect(pushClockToGameView(noPoints, null).score).toEqual({ home: 0, away: 41 });
+    // points present win over stored
+    expect(pushClockToGameView(base, stored).score).toEqual({ home: 0, away: 0 });
   });
 
   it('an unknown provider status is reported on the view, not mapped', () => {

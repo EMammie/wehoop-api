@@ -228,6 +228,82 @@ describe('push ingestion', () => {
     expect(row).toEqual({ home: g.home + 2, clock: '3:30' });
   });
 
+  it('a clock line without points keeps the stored score: no change row, no 0-0 (review blocker)', async () => {
+    const [g] = await db<{ status: string; home: number; away: number; seq: number }[]>`
+      select status::text as status, home_points as home, away_points as away, current_period_sequence as seq
+      from public.games where id = ${gameId}`;
+    if (!g) throw new Error('game missing');
+    expect(g.home + g.away).toBeGreaterThan(0);
+    const before = await counts(db, gameId);
+    const r = await ingest.handle(
+      clockLine((m) => {
+        const { points: _h, ...home } = m.payload.game.home;
+        const { points: _a, ...away } = m.payload.game.away;
+        return {
+          ...m,
+          payload: {
+            ...m.payload,
+            game: { ...m.payload.game, status: g.status, home, away },
+            period: { number: g.seq, sequence: g.seq, type: 'REG' },
+            clocks: { game: '0310', game_decimal: '0310', running: true },
+          },
+        };
+      }),
+      new Date(T0.getTime() + 6000),
+    );
+    expect(r?.outcome).toBe('applied');
+    if (r?.outcome === 'applied') {
+      expect(r.changes).toEqual([]);
+      expect(r.gameLevel).toBe('write');
+    }
+    const after = await counts(db, gameId);
+    expect(after.changes).toBe(before.changes);
+    expect({ home: after.home, away: after.away, clock: after.clock }).toEqual({
+      home: g.home,
+      away: g.away,
+      clock: '3:10',
+    });
+  });
+
+  it('a clock line whose period lags the stored period is a lagging view: superseded, period unchanged (rule 3, rev 4.6)', async () => {
+    // Advance the stored period to 2 with a clock line (same generation, newest observedAt).
+    const [g] = await db<{ status: string; home: number; away: number }[]>`
+      select status::text as status, home_points as home, away_points as away from public.games where id = ${gameId}`;
+    if (!g) throw new Error('game missing');
+    const at = (ms: number) => new Date(T0.getTime() + 7000 + ms);
+    const withPeriod = (seq: number, clock: string): PushLine =>
+      clockLine((m) => ({
+        ...m,
+        payload: {
+          ...m.payload,
+          game: {
+            ...m.payload.game,
+            status: g.status,
+            home: { ...m.payload.game.home, points: g.home },
+            away: { ...m.payload.game.away, points: g.away },
+          },
+          period: { number: seq, sequence: seq, type: 'REG' },
+          clocks: { game: clock, game_decimal: clock, running: false },
+        },
+      }));
+    const p2 = await ingest.handle(withPeriod(2, '1000'), at(0));
+    expect(p2?.outcome).toBe('applied');
+    if (p2?.outcome === 'applied') expect(p2.changes.map((c) => c.type)).toEqual(['status']);
+    const before = await staleReasons(db, gameId);
+    const lagging = await ingest.handle(withPeriod(1, '0005'), at(1000));
+    expect(lagging?.outcome).toBe('applied');
+    if (lagging?.outcome === 'applied') {
+      expect(lagging.gameLevel).toBe('superseded');
+      expect(lagging.changes).toEqual([]);
+      expect(lagging.detail).toContain('3-lagging-view');
+    }
+    const after = await staleReasons(db, gameId);
+    expect((after.superseded_observation ?? 0) - (before.superseded_observation ?? 0)).toBe(1);
+    const [row] = await db<{ seq: number; clock: string }[]>`
+      select current_period_sequence as seq, clock from public.games where id = ${gameId}`;
+    expect(row).toEqual({ seq: 2, clock: '10:00' });
+  });
+
   it('a message for another game is skipped and counted', async () => {
     const other = eventLine(1, (ev) => ev);
     if (other.kind !== 'event') throw new Error('unreachable');
