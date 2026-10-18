@@ -53,10 +53,10 @@ export class DbScoreboardSource implements ScoreboardSource {
       where ${
         since === null
           ? this.db`true`
-          : // The watermark is a JS Date (ms); compare at ms precision so the newest row of the previous
-            // tick is not re-sent forever because of its microseconds. A second write inside the same
-            // millisecond as the watermark is lost, which this best-effort channel tolerates.
-            this.db`date_trunc('milliseconds', updated_at) > ${since}`
+          : // The watermark is a JS Date (ms): rows updated later in the same millisecond would be
+            // re-sent forever, so the bound is the next millisecond (sargable on updated_at). A second
+            // write inside the watermark's millisecond is lost, which this best-effort channel tolerates.
+            this.db`updated_at >= ${since}::timestamptz + interval '1 millisecond'`
       }
       order by updated_at, id`;
     return rows.map((r) => ({

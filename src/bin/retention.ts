@@ -36,6 +36,8 @@ async function main() {
   if (!args['closed-before']) usage('--closed-before <ISO|30d> is required');
   const rawDays = z.coerce.number().int().min(1).safeParse(args['raw-days']);
   if (!rawDays.success) usage('--raw-days must be a positive integer');
+  if (args.game !== undefined && !z.uuid().safeParse(args.game).success)
+    usage('--game must be a games.id uuid');
   let closedBefore: Date;
   try {
     closedBefore = parseClosedBefore(args['closed-before'] ?? '');

@@ -42,14 +42,14 @@ export interface HealthFacts {
   /** Running root watches whose source makes provider calls (fixture replays make none). */
   runningWatches: number;
   pushRuns: unknown;
-  /** Games whose newest 3 stale_observations rows are all run_regresses_state (plan §4 rule 2). */
+  /** Games whose newest 3 stale_observations rows of the last 24 h are all run_regresses_state (plan §4 rule 2). */
   regressingGames: string[];
 }
 
 /**
  * Alert conditions from the facts (pure, unit-tested): outbox lag > 30 s; dead
  * outbox rows; a running watch with no provider call for > 5 min; three
- * consecutive run_regresses_state rows for one game (plan §4); a push stream
+ * consecutive run_regresses_state rows for one game within 24 h (plan §4); a push stream
  * disconnected for > 60 s. Degraded keeps HTTP 200: Fly restarts only on 503,
  * which is reserved for an unreachable database.
  */
@@ -119,7 +119,8 @@ export function healthRoutes() {
           (select coalesce(array_agg(game_id::text), '{}'::text[]) from (
              select game_id from (
                select game_id, reason, row_number() over (partition by game_id order by id desc) as rn
-               from ingest.stale_observations) s
+               from ingest.stale_observations
+               where created_at > now() - interval '24 hours') s
              where rn <= ${HEALTH_THRESHOLDS.consecutiveRegressions}
              group by game_id
              having count(*) = ${HEALTH_THRESHOLDS.consecutiveRegressions} and bool_and(reason = 'run_regresses_state')) g) as "regressingGames"`;
