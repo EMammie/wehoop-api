@@ -45,6 +45,7 @@ import { SimulationUrlResolver } from '../providers/sportradar/urls.js';
  *                                            per league with a key, start coverage-aware watches near tip-off)
  *   pnpm worker:rehearsal --schedule --speed N  (the same scheduler against the fake provider; MODE=trial needs
  *                                            the explicit flag and a loopback host, never the real one)
+ *   [--scores]        publish league:{code}:scores every 5 s (always on with the scheduler; off for a single watch)
  *   [--lock-wait 60]  seconds to wait for the single-ingester lock (a killed worker's lock lingers briefly)
  *   [--drain-timeout 60]  seconds the final drain may wait for backing-off outbox rows before exiting
  *
@@ -87,6 +88,7 @@ async function main() {
       note: { type: 'string' },
       push: { type: 'boolean', default: false },
       schedule: { type: 'boolean', default: false },
+      scores: { type: 'boolean', default: false },
     },
     strict: true,
   });
@@ -139,7 +141,8 @@ async function main() {
     !trialWatch &&
     !args['replay-file'] &&
     !args.recording &&
-    (config.mode === 'production' || (args.schedule && config.rehearsal));
+    (config.mode === 'production' ||
+      (args.schedule && config.mode === 'trial' && config.rehearsal));
   if (args.schedule && !scheduler) {
     log.error(
       { mode: config.mode, rehearsal: config.rehearsal },
@@ -215,9 +218,11 @@ async function main() {
   await publisher.start(session);
   log.info('outbox drained on startup');
   const pulse = new PulseSender({ db, transport, log });
-  // league:{code}:scores: 5 s-coalesced scoreboard deltas, straight to the transport (plan §5).
+  // league:{code}:scores (plan §5): 5 s-coalesced scoreboard deltas, straight to the transport.
+  // Only with the scheduler (production) or `--scores`: a single-game trial watch keeps its
+  // behaviour and does not query public.games every 5 s.
   const scoreboard = new ScoreboardSender({ transport, log, source: new DbScoreboardSource(db) });
-  scoreboard.start();
+  if (scheduler || args.scores) scoreboard.start();
 
   // This process holds the single-ingester lock, so any root run still marked running belongs
   // to a worker that died (kill -9 never reaches endRun). Close them before opening ours.

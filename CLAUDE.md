@@ -32,6 +32,7 @@ pnpm trial:db start|status|stop|migration up --local   # persistent trial stack 
 pnpm sim serve --replay-file <jsonl.gz> [--speed 30] [--port 8787] [--push-drop-after <s> [--push-drop-for 30] [--push-drop-every <s>]]   # fake api.sportradar.com incl. push streams + drop fault (M4)
 pnpm worker:rehearsal --league wnba --game <id> --profile full --push [--speed N]   # push mode (opt-in, M4): events + clock streams, REST reconciliation every 5 min, backfill on reconnect; also `pnpm trial:rehearsal watch ... --push`
 pnpm worker:rehearsal --schedule [--speed N]   # the production scheduler against the fake provider (MODE=production runs it by default without --game)
+pnpm dev:worker ... --scores   # also publish league:{code}:scores every 5 s (on by default only with the scheduler; a single trial watch never does)
 pnpm subscribe --league wnba  # receive league:wnba:scores scoreboard deltas
 pnpm outbox status | requeue --channel game:<uuid> | --all | lag [--since 24h]   # dead-letter recovery, outbox lag p50/p95
 pnpm retention run --closed-before <ISO|30d> [--dry-run] [--game <uuid>]   # the only code that deletes game_changes (moves retained_from_seq)
