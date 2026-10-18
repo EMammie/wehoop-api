@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { Db } from '../../../src/db/client.js';
 import {
   RateLimiter,
   rateLimiterFor,
@@ -203,5 +204,18 @@ describe('RateLimiter with a shared SlotStore (cross-process spacing, plan rev 4
     limiter.useStore(fakeStore(() => 0).store);
     expect(limiter.shared).toBe(true);
     expect(rateLimiterFor('unit-test-upgrade')).toBe(limiter);
+  });
+
+  it('the registry binds the store to the db instance: the same db keeps it, a different one replaces it', () => {
+    const dbA = { tag: 'a' } as unknown as Db;
+    const dbB = { tag: 'b' } as unknown as Db;
+    const limiter = rateLimiterFor('unit-test-rebind', { db: dbA });
+    expect(limiter.shared).toBe(true);
+    const storeA = limiter.slotStore;
+    expect(rateLimiterFor('unit-test-rebind', { db: dbA }).slotStore).toBe(storeA);
+    expect(rateLimiterFor('unit-test-rebind').slotStore).toBe(storeA); // no db: keep what we have
+    const storeB = rateLimiterFor('unit-test-rebind', { db: dbB }).slotStore;
+    expect(storeB).not.toBe(storeA);
+    expect(rateLimiterFor('unit-test-rebind', { db: dbB }).slotStore).toBe(storeB);
   });
 });

@@ -379,10 +379,15 @@ where pc.source in ('trial', 'production', 'rehearsal')
   and pc.called_at > s.next_slot_at - interval '1 second';
 
 -- check: every_quota_product_has_a_rate_slot | expect: 0
+-- 0011 seeds a slot row per quota row; a product added later gets one on its first rate-limited
+-- call (PgSlotStore) or has made none. Any quota row that has rate-limited calls but no slot row
+-- was served by a process that bypassed the shared ledger.
 select count(*)
 from ingest.product_quotas q
 left join ingest.provider_rate_slots s on s.product = q.product
-where s.product is null and q.product in ('wnba', 'ncaawb', 'unrivaled');
+where s.product is null
+  and exists (select 1 from ingest.provider_calls pc
+              where pc.product = q.product and pc.source in ('trial', 'production', 'rehearsal'));
 
 -- check: no_open_reservation_for_a_finished_watch_run | expect: 0
 select count(*)

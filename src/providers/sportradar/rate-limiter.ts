@@ -75,8 +75,7 @@ export class PgSlotStore implements SlotStore {
   private async update(product: string, secs: number) {
     const [row] = await this.db<{ slotAt: Date; delayMs: string | number }[]>`
       update ingest.provider_rate_slots
-         set next_slot_at = greatest(next_slot_at, clock_timestamp()) + make_interval(secs => ${secs}),
-             updated_at = clock_timestamp()
+         set next_slot_at = greatest(next_slot_at, clock_timestamp()) + make_interval(secs => ${secs})
        where product = ${product}
        returning next_slot_at - make_interval(secs => ${secs}) as "slotAt",
                  extract(epoch from (next_slot_at - make_interval(secs => ${secs}) - clock_timestamp())) * 1000 as "delayMs"`;
@@ -123,6 +122,11 @@ export class RateLimiter {
     return this.store !== null;
   }
 
+  /** The shared ledger in use, if any (observability, registry bookkeeping). */
+  get slotStore(): SlotStore | null {
+    return this.store;
+  }
+
   /** Attach the shared ledger after construction (a registry limiter created before the db was known). */
   useStore(store: SlotStore): void {
     if (this.product === null) {
@@ -164,12 +168,15 @@ export class RateLimiter {
 }
 
 const registry = new Map<string, RateLimiter>();
+/** Which Db instance each registry limiter's PgSlotStore is bound to. */
+const registryDb = new WeakMap<RateLimiter, Db>();
 
 /**
  * The process-wide limiter for one product (quota bucket). With `db`, its
  * slots are claimed from `ingest.provider_rate_slots`, shared by every process
  * on this database; a limiter created earlier without a db is upgraded in
- * place, so the first caller to know the db makes the whole process shared.
+ * place, and a different `db` instance (a pool that was closed and reopened)
+ * replaces the store, so a claim never goes through a dead connection.
  */
 export function rateLimiterFor(
   product: string,
@@ -181,6 +188,9 @@ export function rateLimiterFor(
     limiter = new RateLimiter({ minIntervalMs, product });
     registry.set(product, limiter);
   }
-  if (opts.db && !limiter.shared) limiter.useStore(new PgSlotStore(opts.db));
+  if (opts.db && (!limiter.shared || registryDb.get(limiter) !== opts.db)) {
+    limiter.useStore(new PgSlotStore(opts.db));
+    registryDb.set(limiter, opts.db);
+  }
   return limiter;
 }

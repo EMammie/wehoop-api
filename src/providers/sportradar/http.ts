@@ -18,7 +18,12 @@ export class ProviderHttpError extends Error {
 
 export interface FetchedDocument<T> {
   data: T;
-  /** Request start time: the document is at least this old (plan §4 `observedAt`). */
+  /**
+   * Request start time: the document is at least this old (plan §4 `observedAt`). For rate-limited
+   * sources (trial, production, rehearsal) it is the slot claimed on the database clock, a lower
+   * bound on the actual send (slot + timer lateness + one DB round trip); `provider_calls.called_at`
+   * is the same instant.
+   */
   requestedAt: Date;
   receivedAt: Date;
   bytes: number;
@@ -71,6 +76,12 @@ export class SportradarHttp {
     if (needsRateLimit(deps.resolver.source) && (!deps.limiter || !deps.guard)) {
       throw new Error(
         `SportradarHttp for a ${deps.resolver.source} source needs a RateLimiter and a QuotaGuard`,
+      );
+    }
+    // A per-process limiter alone reproduces the M3 1c bug (two processes, one key, a 429).
+    if (needsRateLimit(deps.resolver.source) && deps.db !== null && !deps.limiter?.shared) {
+      throw new Error(
+        'rate-limited sources must claim slots from ingest.provider_rate_slots (rateLimiterFor(product, { db }))',
       );
     }
     this.product = deps.product ?? deps.league;

@@ -23,8 +23,7 @@
 
 create table ingest.provider_rate_slots (
   product      text primary key references ingest.product_quotas(product) on delete cascade,
-  next_slot_at timestamptz not null default now(),
-  updated_at   timestamptz not null default now()
+  next_slot_at timestamptz not null default now()
 );
 comment on table ingest.provider_rate_slots is
   'Next free request slot per Sportradar product, on the database clock; claimed atomically by every process (RateLimiter + PgSlotStore).';
@@ -34,6 +33,8 @@ comment on column ingest.provider_rate_slots.next_slot_at is
 alter table ingest.provider_rate_slots enable row level security;
 revoke all on ingest.provider_rate_slots from anon, authenticated;
 
+-- One-time seed at migration time (products with no rate-limited call yet start at now()); the
+-- store creates rows for later products on the fly and they cascade with product_quotas.
 insert into ingest.provider_rate_slots (product, next_slot_at)
 select q.product,
        coalesce((select max(pc.called_at) + interval '1200 milliseconds'
