@@ -25,6 +25,7 @@ pnpm release:tag --milestone <n> [--push]   # on main, clean tree, evidence all 
 pnpm invariants              # run test/integration/invariants.sql against local DB
 pnpm trial:rehearsal <cmd>   # trial CLI with .env + .env.rehearsal (fake keys, loopback `pnpm sim serve`)
 pnpm trial:live <cmd>        # trial CLI with .env + .env.trial (REAL keys): run `pnpm preflight:live` first
+pnpm trial:live plan --league ncaawb --date YYYY-MM-DD [--season]   # 1 call: the daily schedule (coverage as of that day) or, with --season, the whole season schedule
 pnpm preflight:live | preflight:rehearsal   # what a live run would do, no secrets; exit 0 = ready, 65 = problems
 pnpm worker:live | worker:rehearsal, pnpm api:live | api:rehearsal   # the same env loading for worker / API
 pnpm trial:db start|status|stop|migration up --local   # persistent trial stack (supabase-trial/, ports +1000); NEVER `db reset`
