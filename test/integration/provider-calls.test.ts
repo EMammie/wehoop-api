@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { QuotaGuard } from '../../src/ingest/quota-guard.js';
 import { SportradarHttp } from '../../src/providers/sportradar/http.js';
-import { RateLimiter } from '../../src/providers/sportradar/rate-limiter.js';
+import { PgSlotStore, RateLimiter } from '../../src/providers/sportradar/rate-limiter.js';
 import {
   ProdUrlResolver,
   redactUrl,
@@ -62,7 +62,8 @@ describe('provider_calls accounting (CLAUDE.md non-negotiable 8)', () => {
       runId: null,
       fetchImpl: fakeFetch(),
       resolver,
-      limiter: new RateLimiter({ minIntervalMs: 0 }),
+      // A rate-limited source claims its slot from the shared ledger (rev 4.6), even at interval 0.
+      limiter: new RateLimiter({ minIntervalMs: 0, store: new PgSlotStore(db), product: 'wnba' }),
       // The seeded wnba row is unverified; the config override stands in for the console limit.
       guard: new QuotaGuard({
         db,

@@ -20,7 +20,7 @@ import {
 } from './cadence.js';
 import type { FaultInjector } from './fault.js';
 import { cadenceLoop, GameWatcher, HttpDocumentSource } from './game-watcher.js';
-import type { QuotaGuard, Reservation } from './quota-guard.js';
+import { needsRateLimit, type QuotaGuard, type Reservation } from './quota-guard.js';
 import { ReferenceIngester } from './reference.js';
 import { endRun, type RunSource, startRun } from './runs.js';
 import type { ObservationSource } from './types.js';
@@ -161,7 +161,9 @@ export async function planDay(
     product: deps.adapter.product,
     runId: run.id,
     resolver,
-    limiter: rateLimiterFor(deps.adapter.product),
+    // Slots are claimed from ingest.provider_rate_slots (rev 4.6): the watch this plan precedes
+    // runs in another process and must not start inside this call's second.
+    limiter: rateLimiterFor(deps.adapter.product, needsRateLimit(source) ? { db: deps.db } : {}),
     guard: deps.guard,
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
   });
@@ -344,7 +346,7 @@ export async function runTrialWatch(
     product: adapter.product,
     runId: run.id,
     resolver,
-    limiter: rateLimiterFor(adapter.product),
+    limiter: rateLimiterFor(adapter.product, needsRateLimit(source) ? { db } : {}),
     guard: deps.guard,
     reservationId: reservation.id,
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),

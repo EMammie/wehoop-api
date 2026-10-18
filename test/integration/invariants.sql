@@ -368,6 +368,22 @@ from (
 ) g
 where g.gap < interval '1 second';
 
+-- check: rate_limited_calls_claimed_a_shared_slot | expect: 0
+-- Every rate-limited call claims its slot from ingest.provider_rate_slots (rev 4.6), which
+-- then holds at least one interval beyond that call; a call logged past that point was made
+-- by a process that bypassed the shared ledger (the per-process limiter of evidence M3 1c).
+select count(*)
+from ingest.provider_calls pc
+join ingest.provider_rate_slots s on s.product = pc.product
+where pc.source in ('trial', 'production', 'rehearsal')
+  and pc.called_at > s.next_slot_at - interval '1 second';
+
+-- check: every_quota_product_has_a_rate_slot | expect: 0
+select count(*)
+from ingest.product_quotas q
+left join ingest.provider_rate_slots s on s.product = q.product
+where s.product is null and q.product in ('wnba', 'ncaawb', 'unrivaled');
+
 -- check: no_open_reservation_for_a_finished_watch_run | expect: 0
 select count(*)
 from ingest.budget_reservations b
