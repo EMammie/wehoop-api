@@ -44,8 +44,10 @@ import { createLogger } from '../logger.js';
  *   reservation do this for runs that are no longer running; this is the manual escape).
  * pnpm trial holds [--json]         open player_merge_holds and whether they touch a watched game
  * pnpm trial lag --record <jsonl> [--game <uuid>]
- *   median / p95 subscriber lag from a `pnpm subscribe --record` file: from the event's
- *   wall_clock, from its provider revision (`updated`, needs --game), and from the change's ts
+ *   median / p95 subscriber lag from a `pnpm subscribe --record` file (plan §7 M3, rev 4.6):
+ *   pipeline lag (change.ts -> receivedAt) is the acceptance measure; provider-revision lag
+ *   (receivedAt - `updated`, needs --game) where the feed carries `updated`; wall_clock lag only
+ *   where the feed carries wall_clock (WNBA push; NCAAWB carries none, stated, not failed)
  * pnpm trial quota --product ncaawb --limit-30d 1000 [--reserve 100] [--note "console 2026-11-01"]
  *   Operator confirmation of the console limit: writes ingest.product_quotas
  *   and stamps verified_at. QuotaGuard refuses every call until this is done
@@ -115,13 +117,15 @@ async function main() {
     else {
       console.log(`changes received via broadcast: ${stats.changes}`);
       console.log(
-        `wall_clock lag (event changes with wallClock, n=${stats.wallClock.n}): median ${fmt(stats.wallClock.medianMs)} p95 ${fmt(stats.wallClock.p95Ms)}`,
+        `pipeline lag [acceptance measure] (change.ts -> subscriber receivedAt, n=${stats.pipeline.n}): median ${fmt(stats.pipeline.medianMs)} p95 ${fmt(stats.pipeline.p95Ms)}`,
       );
       console.log(
-        `provider revision lag (receivedAt - play_events.provider_updated_at, n=${stats.providerUpdated.n}${args.game ? '' : '; pass --game <uuid>'}): median ${fmt(stats.providerUpdated.medianMs)} p95 ${fmt(stats.providerUpdated.p95Ms)}`,
+        `provider-revision lag [reported where the feed carries updated] (receivedAt - play_events.provider_updated_at, n=${stats.providerUpdated.n}${args.game ? '' : '; pass --game <uuid>'}): median ${fmt(stats.providerUpdated.medianMs)} p95 ${fmt(stats.providerUpdated.p95Ms)}`,
       );
       console.log(
-        `pipeline lag (change.ts -> received, n=${stats.pipeline.n}): median ${fmt(stats.pipeline.medianMs)} p95 ${fmt(stats.pipeline.p95Ms)}`,
+        stats.wallClock.n === 0
+          ? 'wall_clock lag [reported only where the feed carries wall_clock]: not carried by this feed (n=0; stated, not failed)'
+          : `wall_clock lag [reported only where the feed carries wall_clock] (receivedAt - event wallClock, n=${stats.wallClock.n}): median ${fmt(stats.wallClock.medianMs)} p95 ${fmt(stats.wallClock.p95Ms)}`,
       );
     }
     await db.end({ timeout: 2 });
