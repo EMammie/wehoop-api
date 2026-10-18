@@ -107,6 +107,43 @@ export const SIM_CADENCE: { full: Cadence; scoreOnly: Cadence } = {
   },
 };
 
+/**
+ * Push mode (plan §4 "prod push = events + statistics (+ clock WNBA) + REST
+ * pbp/5 min reconciliation"): the stream carries every event (and the WNBA
+ * clock); REST reconciles the full pbp every 5 minutes and fetches the
+ * statistics (summary) every 5 minutes, plus the closing pair. Push statistics
+ * are not consumed yet (no recorded sample pins their shape), so statistics
+ * stay on the summary feed. The budget is REST only; each stream connection is
+ * a counted call on top of it, allowed for by PUSH_CONNECTION_ALLOWANCE.
+ */
+export const PUSH_RECONCILE_CADENCE: Cadence = {
+  pbpMs: 5 * MIN,
+  summaryMs: 5 * MIN,
+  boxscoreMs: null,
+  boxscoreAtMs: [],
+  horizonMs: GAME_HORIZON_MS,
+  closing: CLOSING,
+  // Rev 4.9: the reconciliation pbp and summary share a 5-min grid, so the summary sits half
+  // an interval off it; the after-complete pace (5 min) equals the reconciliation pace, so
+  // only the budgeted complete -> closed wait and the 429 allowance change the total.
+  summaryOffsetMs: 150_000,
+  ...AFTER_COMPLETE,
+};
+
+/** Stream connection attempts (events + clock, incl. reconnects) reserved on top of the REST budget. */
+export const PUSH_CONNECTION_ALLOWANCE = 20;
+
+/** The push cadence for a game, or why it cannot be pushed (no push capability, no play-by-play coverage). */
+export function pushCadenceFor(capabilities: LeagueCapabilities, coverage: string | null): Cadence {
+  if (!capabilities.pushEvents) throw new Error('this league has no push events feed');
+  if (!coverageIsFull(coverage)) {
+    throw new Error(
+      `push mode needs full coverage (play-by-play); coverage ${coverage ?? 'unknown'} carries none`,
+    );
+  }
+  return PUSH_RECONCILE_CADENCE;
+}
+
 export interface Budget {
   pbp: number;
   summary: number;
@@ -178,7 +215,10 @@ export function cadenceFor(args: {
   capabilities: LeagueCapabilities;
   coverage: string | null;
   profile?: TrialProfile;
+  /** Opt-in push mode (M4): REST becomes the 5-minute reconciliation. Default off. */
+  push?: boolean;
 }): Cadence {
+  if (args.push) return pushCadenceFor(args.capabilities, args.coverage);
   const full = coverageIsFull(args.coverage);
   if (args.source === 'simulation' || args.source === 'fixture') {
     return full ? SIM_CADENCE.full : SIM_CADENCE.scoreOnly;
