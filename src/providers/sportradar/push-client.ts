@@ -1,0 +1,412 @@
+import type { Db } from '../../db/client.js';
+import { countsTowardQuota, needsRateLimit, type QuotaGuard } from '../../ingest/quota-guard.js';
+import type { LeagueCode } from '../../leagues/codes.js';
+import type { Logger } from '../../logger.js';
+import type { RateLimiter } from './rate-limiter.js';
+import {
+  type PushClockMessage,
+  PushClockMessageSchema,
+  type PushEventMessage,
+  PushEventMessageSchema,
+  PushHeartbeatSchema,
+} from './schemas/push.js';
+import { type PushFeed, type PushParams, type PushUrlResolver, redactUrl } from './urls.js';
+
+/**
+ * Sportradar push client (plan §4 "Push client"). One `PushStream` per feed
+ * (`push_events`, `push_clock`, `push_statistics`): a chunked `fetch`, the body
+ * consumed as an async iterator, split on newlines (a line may span chunks),
+ * every line Zod-parsed against the `PushLineSchema` members. Unknown line shapes are logged
+ * and skipped, never thrown. Any 15 s without a byte (heartbeats count) trips
+ * the watchdog, which aborts the request; a disconnect or watchdog trip goes
+ * through a jittered exponential backoff between 1 s and 30 s and reconnects;
+ * on every reconnect `onReconnect` is called (the worker's `backfill(gameId)`).
+ *
+ * Accounting mirrors `SportradarHttp`: one `ingest.provider_calls` row per
+ * connection attempt (`feed` = the push feed, `quota_counted` only for trial /
+ * production, never for a loopback rehearsal), a rate-limiter slot claimed per
+ * connection, and the quota guard consulted first for rate-limited sources.
+ */
+
+export type PushLine =
+  | { kind: 'heartbeat'; interval: number }
+  | { kind: 'event'; message: PushEventMessage }
+  | { kind: 'clock'; message: PushClockMessage };
+
+/** Zod-parse one decoded line; null when the shape is not one we know (caller logs and skips). */
+export function classifyPushLine(json: unknown): PushLine | null {
+  const hb = PushHeartbeatSchema.safeParse(json);
+  if (hb.success) return { kind: 'heartbeat', interval: hb.data.heartbeat.interval };
+  const clock = PushClockMessageSchema.safeParse(json);
+  if (clock.success) return { kind: 'clock', message: clock.data };
+  const event = PushEventMessageSchema.safeParse(json);
+  if (event.success) return { kind: 'event', message: event.data };
+  return null;
+}
+
+export type PushStreamStatus = 'idle' | 'connecting' | 'connected' | 'backoff' | 'stopped';
+
+export interface PushStreamState {
+  feed: PushFeed;
+  status: PushStreamStatus;
+  /** Connection attempts that reached the connected state. */
+  connections: number;
+  /** Connections after the first one (each triggers `onReconnect`). */
+  reconnects: number;
+  /** Connection attempts (incl. failed ones). */
+  attempts: number;
+  lines: number;
+  heartbeats: number;
+  /** Lines that were not JSON or not a known push shape (logged, skipped). */
+  skipped: number;
+  /** Lines whose handler threw (logged, stream kept). */
+  handlerErrors: number;
+  bytes: number;
+  connectedAt: Date | null;
+  lastByteAt: Date | null;
+  lastHeartbeatAt: Date | null;
+  /** When the current outage began; null while connected. */
+  disconnectedSince: Date | null;
+  lastError: string | null;
+  /** Watchdog trips (no bytes for `watchdogMs`). */
+  watchdogTrips: number;
+}
+
+export interface PushStreamDeps {
+  /** Null only for DB-free unit tests; a quota-counted source always needs the ledger. */
+  db: Db | null;
+  log: Logger;
+  resolver: PushUrlResolver;
+  league: LeagueCode;
+  /** Sportradar product (quota bucket); defaults to the league code. */
+  product?: string;
+  runId: number | null;
+  reservationId?: number | null;
+  /** Required for trial / production / rehearsal sources, like every other call. */
+  limiter?: RateLimiter;
+  guard?: QuotaGuard;
+  feed: PushFeed;
+  params?: PushParams;
+  fetchImpl?: typeof fetch;
+  /** Called for every parsed line with its receipt time (push `observedAt`). Errors are logged, never fatal. */
+  onLine: (line: PushLine, receivedAt: Date) => Promise<void> | void;
+  /** Called after every reconnection (connection 2, 3, ...); `downMs` is the outage length. */
+  onReconnect?: (info: { connections: number; downMs: number }) => Promise<void> | void;
+  onStateChange?: (state: PushStreamState) => void;
+  watchdogMs?: number;
+  backoffMinMs?: number;
+  backoffMaxMs?: number;
+  random?: () => number;
+  now?: () => number;
+}
+
+export const PUSH_WATCHDOG_MS = 15_000;
+export const PUSH_BACKOFF_MIN_MS = 1_000;
+export const PUSH_BACKOFF_MAX_MS = 30_000;
+
+/** Jittered exponential backoff: `min * 2^(failures-1)`, scaled by [0.5, 1.5), clamped to [min, max]. */
+export function backoffDelayMs(
+  consecutiveFailures: number,
+  random: () => number,
+  minMs = PUSH_BACKOFF_MIN_MS,
+  maxMs = PUSH_BACKOFF_MAX_MS,
+): number {
+  const base = minMs * 2 ** Math.max(0, consecutiveFailures - 1);
+  const jittered = base * (0.5 + random());
+  return Math.round(Math.min(maxMs, Math.max(minMs, jittered)));
+}
+
+export class PushStream {
+  readonly state: PushStreamState;
+  private stopped = false;
+  private controller: AbortController | null = null;
+  private watchdog: NodeJS.Timeout | null = null;
+  private wakeBackoff: (() => void) | null = null;
+  private consecutiveFailures = 0;
+  private hooks: Promise<void>[] = [];
+  private running: Promise<void> | null = null;
+  readonly product: string;
+
+  constructor(private readonly deps: PushStreamDeps) {
+    const source = deps.resolver.source;
+    if (deps.db === null && countsTowardQuota(source)) {
+      throw new Error('PushStream for a quota-counted source needs the database (provider_calls)');
+    }
+    if (needsRateLimit(source) && (!deps.limiter || !deps.guard)) {
+      throw new Error(`PushStream for a ${source} source needs a RateLimiter and a QuotaGuard`);
+    }
+    if (needsRateLimit(source) && deps.db !== null && !deps.limiter?.shared) {
+      throw new Error(
+        'rate-limited sources must claim slots from ingest.provider_rate_slots (rateLimiterFor(product, { db }))',
+      );
+    }
+    this.product = deps.product ?? deps.league;
+    this.state = {
+      feed: deps.feed,
+      status: 'idle',
+      connections: 0,
+      reconnects: 0,
+      attempts: 0,
+      lines: 0,
+      heartbeats: 0,
+      skipped: 0,
+      handlerErrors: 0,
+      bytes: 0,
+      connectedAt: null,
+      lastByteAt: null,
+      lastHeartbeatAt: null,
+      disconnectedSince: null,
+      lastError: null,
+      watchdogTrips: 0,
+    };
+  }
+
+  get source() {
+    return this.deps.resolver.source;
+  }
+
+  private now(): number {
+    return (this.deps.now ?? Date.now)();
+  }
+
+  private setStatus(status: PushStreamStatus) {
+    this.state.status = status;
+    this.deps.onStateChange?.(this.state);
+  }
+
+  /** Connect and keep reconnecting until `stop()`. Resolves once stopped. */
+  start(): Promise<void> {
+    if (this.running) return this.running;
+    this.running = this.loop();
+    return this.running;
+  }
+
+  /** Abort the current connection, cancel any backoff, wait for the loop and the reconnect hooks. */
+  async stop(): Promise<void> {
+    this.stopped = true;
+    this.clearWatchdog();
+    this.controller?.abort(new Error('push stream stopped'));
+    this.wakeBackoff?.();
+    await this.running;
+    await Promise.allSettled(this.hooks);
+    this.setStatus('stopped');
+  }
+
+  private clearWatchdog() {
+    if (this.watchdog) clearTimeout(this.watchdog);
+    this.watchdog = null;
+  }
+
+  private resetWatchdog(controller: AbortController) {
+    this.clearWatchdog();
+    const ms = this.deps.watchdogMs ?? PUSH_WATCHDOG_MS;
+    this.watchdog = setTimeout(() => {
+      this.state.watchdogTrips++;
+      this.deps.log.warn({ feed: this.deps.feed, watchdogMs: ms }, 'push watchdog: no bytes');
+      controller.abort(new Error(`push watchdog: no bytes for ${ms} ms`));
+    }, ms);
+  }
+
+  private async loop(): Promise<void> {
+    const { log, feed } = this.deps;
+    const { url, headers } = this.deps.resolver.resolvePush(feed, this.deps.params ?? {});
+    const source = this.deps.resolver.source;
+    const limited = needsRateLimit(source);
+    const fetchImpl = this.deps.fetchImpl ?? fetch;
+    while (!this.stopped) {
+      this.state.attempts++;
+      this.setStatus('connecting');
+      const controller = new AbortController();
+      this.controller = controller;
+      let callId: number | null = null;
+      let status = 0;
+      let bytesThisConnection = 0;
+      const started = performance.now();
+      try {
+        if (limited && this.deps.guard) {
+          await this.deps.guard.assertCall(this.product, source, this.deps.reservationId ?? null);
+        }
+        let requestedAt = new Date(this.now());
+        if (limited && this.deps.limiter)
+          requestedAt = new Date(await this.deps.limiter.waitForSlot());
+        if (this.stopped) break;
+        // Connection phase is covered by the same watchdog: a host that accepts and never answers trips it.
+        this.resetWatchdog(controller);
+        const res = await fetchImpl(url, {
+          headers: { accept: 'application/json', ...headers },
+          signal: controller.signal,
+        });
+        status = res.status;
+        callId = await this.logCall(
+          url,
+          status,
+          Math.round(performance.now() - started),
+          requestedAt,
+        );
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          throw new Error(`sportradar ${feed} -> HTTP ${res.status}: ${text.slice(0, 200)}`);
+        }
+        if (!res.body) throw new Error(`sportradar ${feed}: response has no body`);
+        const downMs =
+          this.state.disconnectedSince === null
+            ? 0
+            : this.now() - this.state.disconnectedSince.getTime();
+        this.state.connections++;
+        this.state.connectedAt = new Date(this.now());
+        this.state.disconnectedSince = null;
+        this.state.lastError = null;
+        this.consecutiveFailures = 0;
+        this.setStatus('connected');
+        log.info(
+          { feed, connections: this.state.connections, downMs, status },
+          this.state.connections === 1 ? 'push stream connected' : 'push stream reconnected',
+        );
+        if (this.state.connections > 1) {
+          this.state.reconnects++;
+          const hook = this.deps.onReconnect;
+          if (hook) {
+            const p = Promise.resolve()
+              .then(() => hook({ connections: this.state.connections, downMs }))
+              .catch((err) => log.error({ err, feed }, 'push reconnect hook (backfill) failed'));
+            this.hooks.push(p);
+            void p.finally(() => {
+              this.hooks = this.hooks.filter((h) => h !== p);
+            });
+          }
+        }
+        this.resetWatchdog(controller);
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for await (const chunk of res.body) {
+          const receivedAt = new Date(this.now());
+          bytesThisConnection += chunk.byteLength;
+          this.state.bytes += chunk.byteLength;
+          this.state.lastByteAt = receivedAt;
+          this.resetWatchdog(controller);
+          buffer += decoder.decode(chunk, { stream: true });
+          let nl = buffer.indexOf('\n');
+          while (nl >= 0) {
+            const raw = buffer.slice(0, nl);
+            buffer = buffer.slice(nl + 1);
+            await this.handleLine(raw, receivedAt);
+            nl = buffer.indexOf('\n');
+          }
+        }
+        const tail = buffer + decoder.decode();
+        if (tail.trim()) await this.handleLine(tail, new Date(this.now()));
+        throw new Error(`sportradar ${feed}: stream ended`);
+      } catch (err) {
+        this.clearWatchdog();
+        if (this.stopped) break;
+        const message = (err as Error).message.slice(0, 500);
+        this.consecutiveFailures++;
+        this.state.lastError = message;
+        if (this.state.disconnectedSince === null)
+          this.state.disconnectedSince = new Date(this.now());
+        const delay = backoffDelayMs(
+          this.consecutiveFailures,
+          this.deps.random ?? Math.random,
+          this.deps.backoffMinMs ?? PUSH_BACKOFF_MIN_MS,
+          this.deps.backoffMaxMs ?? PUSH_BACKOFF_MAX_MS,
+        );
+        this.setStatus('backoff');
+        log.warn(
+          { feed, err: message, failures: this.consecutiveFailures, retryInMs: delay, status },
+          'push stream disconnected; backing off',
+        );
+        await this.sleepInterruptible(delay);
+      } finally {
+        if (callId !== null) await this.updateCallBytes(callId, bytesThisConnection);
+        if (this.controller === controller) this.controller = null;
+      }
+    }
+    this.setStatus('stopped');
+  }
+
+  private async handleLine(raw: string, receivedAt: Date): Promise<void> {
+    const text = raw.trim();
+    if (!text) return;
+    this.state.lines++;
+    let json: unknown;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      this.state.skipped++;
+      this.deps.log.warn(
+        { feed: this.deps.feed, snippet: text.slice(0, 120) },
+        'push line not JSON',
+      );
+      return;
+    }
+    const line = classifyPushLine(json);
+    if (line === null) {
+      this.state.skipped++;
+      const keys = typeof json === 'object' && json !== null ? Object.keys(json) : typeof json;
+      this.deps.log.warn({ feed: this.deps.feed, keys }, 'push line of unknown shape skipped');
+      return;
+    }
+    if (line.kind === 'heartbeat') {
+      this.state.heartbeats++;
+      this.state.lastHeartbeatAt = receivedAt;
+    }
+    try {
+      await this.deps.onLine(line, receivedAt);
+    } catch (err) {
+      this.state.handlerErrors++;
+      this.deps.log.error(
+        { err, feed: this.deps.feed, kind: line.kind },
+        'push line handler failed',
+      );
+    }
+  }
+
+  private sleepInterruptible(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const t = setTimeout(() => {
+        this.wakeBackoff = null;
+        resolve();
+      }, ms);
+      this.wakeBackoff = () => {
+        clearTimeout(t);
+        this.wakeBackoff = null;
+        resolve();
+      };
+    });
+  }
+
+  private async logCall(
+    url: string,
+    status: number,
+    durationMs: number,
+    calledAt: Date,
+  ): Promise<number | null> {
+    if (this.deps.db === null) return null;
+    const source = this.deps.resolver.source;
+    const reservationId = this.deps.reservationId ?? null;
+    try {
+      const [row] = await this.deps.db<{ id: string }[]>`
+        insert into ingest.provider_calls
+          (run_id, source, product, league, feed, url, status, duration_ms, bytes, quota_counted,
+           called_at, reservation_id)
+        values (${this.deps.runId}, ${source}, ${this.product}, ${this.deps.league}, ${this.deps.feed},
+                ${redactUrl(url)}, ${status || null}, ${durationMs}, 0, ${countsTowardQuota(source)},
+                ${calledAt}, ${reservationId})
+        returning id::text`;
+      if (reservationId !== null && this.deps.guard) await this.deps.guard.recordUse(reservationId);
+      return row ? Number(row.id) : null;
+    } catch (err) {
+      this.deps.log.error({ err, feed: this.deps.feed }, 'provider_calls insert failed');
+      return null;
+    }
+  }
+
+  private async updateCallBytes(id: number, bytes: number): Promise<void> {
+    if (this.deps.db === null) return;
+    try {
+      await this.deps.db`update ingest.provider_calls set bytes = ${bytes} where id = ${id}`;
+    } catch (err) {
+      this.deps.log.error({ err, feed: this.deps.feed }, 'provider_calls bytes update failed');
+    }
+  }
+}
