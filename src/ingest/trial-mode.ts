@@ -6,26 +6,40 @@ import type { PulseSender } from '../live/pulse.js';
 import type { Logger } from '../logger.js';
 import { GameChangeSchema } from '../model/game-change.js';
 import { SportradarHttp } from '../providers/sportradar/http.js';
+import {
+  type PushStream,
+  PushStream as PushStreamClass,
+  type PushStreamDeps,
+  type PushStreamState,
+} from '../providers/sportradar/push-client.js';
 import { rateLimiterFor } from '../providers/sportradar/rate-limiter.js';
 import { createResolver } from '../providers/sportradar/resolver.js';
 import {
   DailyScheduleDocumentSchema,
   SeasonScheduleDocumentSchema,
 } from '../providers/sportradar/schemas/schedule.js';
-import type { ResolverSource } from '../providers/sportradar/urls.js';
+import type {
+  PushFeed,
+  PushUrlResolver,
+  ResolverSource,
+  UrlResolver,
+} from '../providers/sportradar/urls.js';
+import { runBackfill } from './backfill.js';
 import {
   type Budget,
   budgetFor,
   type Cadence,
   cadenceFor,
+  PUSH_CONNECTION_ALLOWANCE,
   scaleCadence,
   type TrialProfile,
 } from './cadence.js';
 import type { FaultInjector } from './fault.js';
 import { cadenceLoop, GameWatcher, HttpDocumentSource } from './game-watcher.js';
+import { PushIngest, type PushIngestStats } from './push-ingest.js';
 import { needsRateLimit, type QuotaGuard, type Reservation } from './quota-guard.js';
 import { ReferenceIngester } from './reference.js';
-import { endRun, type RunSource, startRun } from './runs.js';
+import { endRun, type RunHandle, type RunSource, setRunMeta, startRun } from './runs.js';
 import { seasonFor } from './season.js';
 import type { ObservationSource } from './types.js';
 
@@ -275,12 +289,17 @@ export interface WatchPlan {
   budget: Budget;
 }
 
-/** The cadence and budget a game takes under a profile (defaulting the profile from coverage). */
+/**
+ * The cadence and budget a game takes under a profile (defaulting the profile from coverage).
+ * With `push` (M4, opt-in) the cadence is the 5-minute REST reconciliation and the budget
+ * carries the stream connection allowance on top.
+ */
 export function planWatch(
   adapter: LeagueAdapter,
   source: RunSource,
   coverage: string | null,
   profile?: TrialProfile,
+  push = false,
 ): WatchPlan {
   const chosen = profile ?? (coverage === 'full' ? 'full' : 'extended');
   // Trial profiles apply to every polled source; the simulation cadence is for `--recording`
@@ -291,8 +310,31 @@ export function planWatch(
     capabilities: adapter.capabilities,
     coverage,
     profile: chosen,
+    push,
   });
-  return { profile: chosen, cadence, budget: budgetFor(cadence) };
+  const budget = budgetFor(cadence);
+  return {
+    profile: chosen,
+    cadence,
+    budget: push ? { ...budget, total: budget.total + PUSH_CONNECTION_ALLOWANCE } : budget,
+  };
+}
+
+/** Push-mode knobs (tests compress the watchdog and the backoff; production uses the defaults). */
+export interface PushWatchOptions {
+  watchdogMs?: number;
+  backoffMinMs?: number;
+  backoffMaxMs?: number;
+}
+
+export interface PushWatchOutcome {
+  streams: PushStreamState[];
+  ingest: PushIngestStats;
+  backfills: number;
+}
+
+function hasPush(resolver: UrlResolver): resolver is UrlResolver & PushUrlResolver {
+  return typeof (resolver as Partial<PushUrlResolver>).resolvePush === 'function';
 }
 
 export interface TrialWatchDeps {
@@ -317,6 +359,12 @@ export interface TrialWatchOptions {
   speed?: number;
   note?: string | null;
   untilClosed?: boolean;
+  /**
+   * Opt-in push mode (M4): open the push events (and WNBA clock) streams as a push_stream
+   * sub-run, reconcile with REST pbp every 5 minutes, backfill on every stream reconnect.
+   * Default off: a trial watch polls exactly as before.
+   */
+  push?: boolean | PushWatchOptions;
 }
 
 export interface TrialWatchOutcome {
@@ -329,6 +377,8 @@ export interface TrialWatchOutcome {
   refused: number;
   changes: number;
   stale: number;
+  /** Present only in push mode. */
+  push?: PushWatchOutcome;
 }
 
 /**
@@ -350,7 +400,14 @@ export async function runTrialWatch(
   if (opts.game.status === 'closed') {
     throw new Error(`game ${opts.game.id} is already closed; nothing to watch`);
   }
-  const plan = planWatch(adapter, source, opts.game.coverage, opts.profile);
+  const pushOpts: PushWatchOptions | null =
+    opts.push === undefined || opts.push === false ? null : opts.push === true ? {} : opts.push;
+  if (pushOpts && !hasPush(resolver)) {
+    throw new Error(
+      'push mode needs a production-shaped host (trial, production or rehearsal); the simulation service has no push streams',
+    );
+  }
+  const plan = planWatch(adapter, source, opts.game.coverage, opts.profile, pushOpts !== null);
   const speed = opts.speed ?? 1;
   assertSpeedAllowed(config, speed);
   const cadence = speed === 1 ? plan.cadence : scaleCadence(plan.cadence, speed);
@@ -374,6 +431,7 @@ export async function runTrialWatch(
       reservationId: reservation.id,
       speed,
       providerGameId: opts.game.providerGameId,
+      push: pushOpts !== null,
       ...(deps.sim ? { recordingId: deps.sim.recordingId, sessionId: deps.sim.sessionId } : {}),
     },
   });
@@ -418,14 +476,35 @@ export async function runTrialWatch(
   });
   await watcher.attach(opts.game.id);
   let status: string | null = null;
+  let pushOutcome: PushWatchOutcome | undefined;
+  const push =
+    pushOpts !== null && hasPush(resolver)
+      ? await openPushStreams({
+          db,
+          log,
+          adapter,
+          run,
+          game: opts.game,
+          source,
+          observationSource,
+          resolver,
+          guard: deps.guard,
+          reservationId: reservation.id,
+          apply: { db, log, ...(deps.fault ? { fault: deps.fault } : {}) },
+          options: pushOpts,
+          ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+        })
+      : null;
   try {
     const out = await cadenceLoop(watcher, docs, log, cadence, {
       untilClosed: opts.untilClosed ?? true,
       isStopped: deps.isStopped,
     });
     status = out.status;
+    if (push) pushOutcome = await push.close('ok');
     await endRun(db, run.id, deps.isStopped() ? 'aborted' : 'ok');
   } catch (err) {
+    if (push) pushOutcome = await push.close('error', (err as Error).message);
     await endRun(db, run.id, 'error', (err as Error).message);
     throw err;
   } finally {
@@ -442,6 +521,7 @@ export async function runTrialWatch(
       status,
       changes: watcher.applied,
       stale: watcher.stale,
+      push: pushOutcome ?? null,
     },
     'trial watch finished',
   );
@@ -455,6 +535,147 @@ export async function runTrialWatch(
     refused: http.refused,
     changes: watcher.applied,
     stale: watcher.stale,
+    ...(pushOutcome ? { push: pushOutcome } : {}),
+  };
+}
+
+interface OpenPushArgs {
+  db: Db;
+  log: Logger;
+  adapter: LeagueAdapter;
+  run: RunHandle;
+  game: GameRow;
+  source: RunSource;
+  observationSource: ObservationSource;
+  resolver: UrlResolver & PushUrlResolver;
+  guard: QuotaGuard;
+  reservationId: number;
+  apply: Parameters<typeof runBackfill>[0]['apply'];
+  options: PushWatchOptions;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Push mode wiring (plan §4): one push_stream sub-run of the watch generation,
+ * a PushStream per feed the league offers (events; clock for WNBA), every line
+ * routed through PushIngest -> applyChanges, and on every reconnect of the
+ * EVENTS stream a backfill sub-run that fetches the full REST pbp (the clock
+ * stream carries nothing a backfill could recover). Stream state is mirrored
+ * into the sub-run's meta so `/health` (another process) can alert on a stream
+ * disconnected for more than 60 s.
+ */
+async function openPushStreams(a: OpenPushArgs): Promise<{
+  close(status: 'ok' | 'error' | 'aborted', error?: string): Promise<PushWatchOutcome>;
+}> {
+  const { db, log, adapter } = a;
+  const ingest = new PushIngest({
+    db,
+    log,
+    adapter,
+    apply: a.apply,
+    gameId: a.game.id,
+    providerGameId: a.game.providerGameId,
+    parentRun: a.run,
+    source: a.source,
+  });
+  const subRun = await ingest.start();
+  let backfills = 0;
+  const backfill = async (info: { connections: number; downMs: number }) => {
+    backfills++;
+    await runBackfill(
+      {
+        db,
+        log,
+        adapter,
+        apply: a.apply,
+        gameId: a.game.id,
+        parentRun: a.run,
+        source: a.source,
+        observationSource: a.observationSource,
+        makeSource: (r) =>
+          new HttpDocumentSource(
+            new SportradarHttp({
+              db,
+              log,
+              league: adapter.league,
+              product: adapter.product,
+              runId: r.id,
+              resolver: a.resolver,
+              limiter: rateLimiterFor(adapter.product, needsRateLimit(a.source) ? { db } : {}),
+              guard: a.guard,
+              reservationId: a.reservationId,
+              ...(a.fetchImpl ? { fetchImpl: a.fetchImpl } : {}),
+            }),
+            a.observationSource,
+            null,
+            { gameId: a.game.providerGameId },
+          ),
+      },
+      'stream reconnect',
+      info,
+    );
+  };
+  const feeds: PushFeed[] = [
+    'push_events',
+    ...(adapter.capabilities.pushClock ? ['push_clock' as const] : []),
+  ];
+  const states = new Map<PushFeed, PushStreamState>();
+  let metaWrite: Promise<void> = Promise.resolve();
+  const mirror = (state: PushStreamState) => {
+    states.set(state.feed, state);
+    const snapshot = Object.fromEntries(
+      [...states.values()].map((s) => [
+        s.feed,
+        {
+          status: s.status,
+          connections: s.connections,
+          reconnects: s.reconnects,
+          disconnectedSince: s.disconnectedSince?.toISOString() ?? null,
+          lastError: s.lastError,
+          lastByteAt: s.lastByteAt?.toISOString() ?? null,
+        },
+      ]),
+    );
+    metaWrite = metaWrite
+      .then(() => setRunMeta(db, subRun.id, { push: snapshot }))
+      .catch((err) => log.warn({ err }, 'push state mirror failed'));
+  };
+  const streams: PushStream[] = feeds.map((feed) => {
+    const deps: PushStreamDeps = {
+      db,
+      log,
+      resolver: a.resolver,
+      league: adapter.league,
+      product: adapter.product,
+      runId: subRun.id,
+      reservationId: a.reservationId,
+      limiter: rateLimiterFor(adapter.product, needsRateLimit(a.source) ? { db } : {}),
+      guard: a.guard,
+      feed,
+      params: { providerGameId: a.game.providerGameId },
+      onLine: (line, at) => ingest.handle(line, at).then(() => undefined),
+      onStateChange: mirror,
+      ...(feed === 'push_events' ? { onReconnect: backfill } : {}),
+      ...(a.options.watchdogMs !== undefined ? { watchdogMs: a.options.watchdogMs } : {}),
+      ...(a.options.backoffMinMs !== undefined ? { backoffMinMs: a.options.backoffMinMs } : {}),
+      ...(a.options.backoffMaxMs !== undefined ? { backoffMaxMs: a.options.backoffMaxMs } : {}),
+      ...(a.fetchImpl ? { fetchImpl: a.fetchImpl } : {}),
+    };
+    return new PushStreamClass(deps);
+  });
+  for (const s of streams) void s.start();
+  log.info({ feeds, runId: subRun.id, watchId: subRun.watchId }, 'push streams opened');
+  return {
+    async close(status, error) {
+      await Promise.all(streams.map((s) => s.stop()));
+      await metaWrite;
+      await ingest.end(status, error);
+      return {
+        streams: streams.map((s) => s.state),
+        ingest: ingest.stats,
+        backfills,
+      };
+    },
   };
 }
 
