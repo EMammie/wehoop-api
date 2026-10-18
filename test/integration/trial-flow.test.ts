@@ -5,9 +5,11 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type Config, loadConfig } from '../../src/config.js';
 import type { Db } from '../../src/db/client.js';
+import { ensureGame } from '../../src/ingest/apply-changes.js';
+import { ensureTeams } from '../../src/ingest/identity.js';
 import { QuotaGuard, QuotaRefusedError } from '../../src/ingest/quota-guard.js';
 import { readRecording, relabelRecording } from '../../src/ingest/recording.js';
-import { planDay, resolveGame, runTrialWatch } from '../../src/ingest/trial-mode.js';
+import { gamesOn, planDay, resolveGame, runTrialWatch } from '../../src/ingest/trial-mode.js';
 import { ncaawbAdapter } from '../../src/leagues/ncaawb/adapter.js';
 import {
   type FakeProvider,
@@ -152,12 +154,13 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       >`
         select feed, quota_counted as "quotaCounted", url, source::text as source
         from ingest.provider_calls where product = ${product} order by id`;
+      expect(plan.feed).toBe('daily_schedule');
       expect(schedCall).toMatchObject({
-        feed: 'schedule',
+        feed: 'daily_schedule',
         quotaCounted: false,
         source: 'rehearsal',
       });
-      expect(schedCall?.url).toContain('/games/2025/REG/schedule.json');
+      expect(schedCall?.url).toContain('/games/2026/02/18/schedule.json');
       expect(schedCall?.url).not.toContain(FAKE_KEY);
 
       const game = await resolveGame(db, 'ncaawb', fullId);
@@ -309,7 +312,14 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
     try {
       const config = configFor(server);
       const guard = new QuotaGuard({ db, log });
-      const plan = await planDay({ db, log, config, adapter, guard }, { date: DATE });
+      // --season: the whole season schedule instead of the day (a pre-season snapshot).
+      const plan = await planDay({ db, log, config, adapter, guard }, { date: DATE, season: true });
+      expect(plan.feed).toBe('schedule');
+      expect(plan.season).toEqual({ year: 2025, type: 'REG' });
+      const [seasonCall] = await db<{ url: string; feed: string }[]>`
+        select url, feed from ingest.provider_calls where product = ${product} order by id desc limit 1`;
+      expect(seasonCall).toMatchObject({ feed: 'schedule' });
+      expect(seasonCall?.url).toContain('/games/2025/REG/schedule.json');
       const planned = plan.games.find((g) => g.providerGameId === extId);
       expect(planned).toMatchObject({ coverage: 'extended_boxscore', profile: 'extended' });
       expect(planned?.budget.total).toBe(153);
@@ -351,4 +361,34 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       await server.close();
     }
   }, 120_000);
+
+  it('plan listing: teams without a market (the NCAAWB schedule feed carries name + alias only) show their names and the client coverage label', async () => {
+    const day = '2031-03-01';
+    const sfx = randomUUID().slice(0, 8);
+    const teamIds = await ensureTeams(db, 'ncaawb', [
+      { providerTeamId: `nd-${sfx}`, name: 'Notre Dame Fighting Irish', market: null, alias: 'ND' },
+      { providerTeamId: `tol-${sfx}`, name: 'Toledo Rockets', market: null, alias: 'TOL' },
+    ]);
+    await ensureGame(db, {
+      league: 'ncaawb',
+      providerGameId: `plan-names-${sfx}`,
+      scheduledAt: `${day}T19:00:00Z`,
+      status: 'scheduled',
+      coverage: 'extended_boxscore',
+      homeTeamId: teamIds.get(`nd-${sfx}`) ?? null,
+      awayTeamId: teamIds.get(`tol-${sfx}`) ?? null,
+      venue: null,
+      broadcasts: null,
+    });
+    const listed = (await gamesOn(db, 'ncaawb', day)).find(
+      (g) => g.providerGameId === `plan-names-${sfx}`,
+    );
+    expect(listed).toMatchObject({
+      home: 'Notre Dame Fighting Irish',
+      away: 'Toledo Rockets',
+      coverage: 'extended_boxscore',
+      coverageLabel: 'score only',
+      profile: 'extended',
+    });
+  });
 });

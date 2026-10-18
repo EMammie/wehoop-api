@@ -6,6 +6,7 @@ import type { HierarchyTeam } from '../providers/sportradar/schemas/hierarchy.js
 import { LeagueHierarchyDocumentSchema } from '../providers/sportradar/schemas/hierarchy.js';
 import { PlayerProfileDocumentSchema } from '../providers/sportradar/schemas/profile.js';
 import {
+  DailyScheduleDocumentSchema,
   type ScheduleGame,
   SeasonScheduleDocumentSchema,
 } from '../providers/sportradar/schemas/schedule.js';
@@ -126,6 +127,9 @@ export class ReferenceIngester {
       case 'schedule':
         await this.schedule(body, observedAt, out);
         break;
+      case 'daily_schedule':
+        await this.dailySchedule(body, observedAt, out);
+        break;
       case 'tournament_list':
         await this.tournamentList(body, out);
         break;
@@ -162,6 +166,22 @@ export class ReferenceIngester {
       { providerSeasonId: doc.season.id, year: doc.season.year, type: doc.season.type },
       this.deps.log,
     );
+    for (const g of doc.games) {
+      await this.scheduledGame(g, seasonId, null, observedAt, out);
+    }
+  }
+
+  /** One day's games; the season link is set only when the document carries a season header. */
+  private async dailySchedule(body: unknown, observedAt: Date, out: ReferenceOutcome) {
+    const doc = DailyScheduleDocumentSchema.parse(body);
+    const seasonId = doc.season
+      ? await ensureSeason(
+          this.deps.db,
+          this.deps.league,
+          { providerSeasonId: doc.season.id, year: doc.season.year, type: doc.season.type },
+          this.deps.log,
+        )
+      : null;
     for (const g of doc.games) {
       await this.scheduledGame(g, seasonId, null, observedAt, out);
     }

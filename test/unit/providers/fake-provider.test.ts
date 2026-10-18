@@ -3,7 +3,10 @@ import {
   type FakeProvider,
   startFakeProvider,
 } from '../../../src/providers/sportradar/fake-provider.js';
-import { SeasonScheduleDocumentSchema } from '../../../src/providers/sportradar/schemas/schedule.js';
+import {
+  DailyScheduleDocumentSchema,
+  SeasonScheduleDocumentSchema,
+} from '../../../src/providers/sportradar/schemas/schedule.js';
 import { SummaryDocumentSchema } from '../../../src/providers/sportradar/schemas/summary.js';
 
 const FIXTURE = new URL(
@@ -51,6 +54,20 @@ describe('fake provider (rehearsal stand-in for api.sportradar.com)', () => {
     expect(doc.season.year).toBe(2025);
     expect(server.stats.rejected401).toBe(1);
     expect(server.stats.rejected429).toBe(1);
+  });
+
+  it('daily schedule route: the recording game on its own day, nothing on another day', async () => {
+    const h = { headers: { 'x-api-key': 'rehearsal-not-a-key' } };
+    t += 1000;
+    const day = await fetch(`${server.url}/ncaawb/trial/v8/en/games/2026/02/18/schedule.json`, h);
+    expect(day.status).toBe(200);
+    const doc = DailyScheduleDocumentSchema.parse(await day.json());
+    expect(doc.date).toBe('2026-02-18');
+    expect(doc.games.map((g) => g.id)).toEqual([server.providerGameId]);
+    t += 1000;
+    const other = await fetch(`${server.url}/ncaawb/trial/v8/en/games/2026/02/19/schedule.json`, h);
+    expect(DailyScheduleDocumentSchema.parse(await other.json()).games).toEqual([]);
+    expect(server.stats.byFeed.daily_schedule).toBe(2);
   });
 
   it('time-scaled: later elapsed time returns later documents, never earlier ones', async () => {

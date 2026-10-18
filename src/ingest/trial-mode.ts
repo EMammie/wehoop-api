@@ -8,7 +8,10 @@ import { GameChangeSchema } from '../model/game-change.js';
 import { SportradarHttp } from '../providers/sportradar/http.js';
 import { rateLimiterFor } from '../providers/sportradar/rate-limiter.js';
 import { createResolver } from '../providers/sportradar/resolver.js';
-import { SeasonScheduleDocumentSchema } from '../providers/sportradar/schemas/schedule.js';
+import {
+  DailyScheduleDocumentSchema,
+  SeasonScheduleDocumentSchema,
+} from '../providers/sportradar/schemas/schedule.js';
 import type { ResolverSource } from '../providers/sportradar/urls.js';
 import {
   type Budget,
@@ -70,10 +73,19 @@ export interface PlannedGame {
   scheduledAt: Date;
   status: string;
   coverage: string;
+  /** What the client shows for this coverage (same mapping as `v_schedule.coverage_label`). */
+  coverageLabel: string;
   home: string | null;
   away: string | null;
   profile: TrialProfile;
   budget: Budget;
+}
+
+/** `v_schedule.coverage_label` (plan §9): NCAAWB partial coverage is "score only". */
+export function coverageLabel(coverage: string | null): string {
+  if (coverage === 'full') return 'live plays';
+  if (coverage === null || coverage === 'unknown') return 'unknown';
+  return 'score only';
 }
 
 /** Games stored for a league on a UTC date, with the profile and budget each would take. */
@@ -91,7 +103,8 @@ export async function gamesOn(db: Db, league: LeagueCode, date: string): Promise
   >`
     select g.id, g.provider_game_id as "providerGameId", g.scheduled_at as "scheduledAt",
            g.status::text as status, g.coverage::text as coverage,
-           h.market || ' ' || h.name as home, a.market || ' ' || a.name as away
+           coalesce(nullif(concat_ws(' ', h.market, h.name), ''), h.alias) as home,
+           coalesce(nullif(concat_ws(' ', a.market, a.name), ''), a.alias) as away
     from public.games g
     left join public.teams h on h.id = g.home_team_id
     left join public.teams a on a.id = g.away_team_id
@@ -101,6 +114,7 @@ export async function gamesOn(db: Db, league: LeagueCode, date: string): Promise
     const profile: TrialProfile = r.coverage === 'full' ? 'full' : 'extended';
     return {
       ...r,
+      coverageLabel: coverageLabel(r.coverage),
       profile,
       budget: budgetFor(cadenceFor({ ...PLAN_ARGS, coverage: r.coverage, profile })),
     };
@@ -126,15 +140,26 @@ export interface PlanDeps {
   fetchImpl?: typeof fetch;
 }
 
+export type PlanFeed = 'daily_schedule' | 'schedule';
+
 /**
- * `pnpm trial plan --league ncaawb --date 2026-11-08`: exactly one schedule
- * call for the season containing the date, ingested as a generation-less
- * batch (ReferenceIngester), then the day's games from the database.
+ * `pnpm trial plan --league ncaawb --date 2026-11-08`: exactly one call, by
+ * default the **daily schedule** for that date (the day's games with coverage
+ * as it stands; Sportradar may change coverage until tip-off and NCAAWB `full`
+ * follows AP Top 25 teams, so game day is when the feed answers which games
+ * are `full`), or with `season: true` the whole season schedule (a pre-season
+ * snapshot, ~4.8 MB for NCAAWB). Ingested as a generation-less batch
+ * (ReferenceIngester), then the day's games from the database.
  */
 export async function planDay(
   deps: PlanDeps,
-  opts: { date: string; seasonYear?: number; seasonType?: string },
-): Promise<{ games: PlannedGame[]; season: { year: number; type: string }; calls: number }> {
+  opts: { date: string; seasonYear?: number; seasonType?: string; season?: boolean },
+): Promise<{
+  games: PlannedGame[];
+  season: { year: number; type: string };
+  calls: number;
+  feed: PlanFeed;
+}> {
   const league = deps.adapter.league;
   const season = seasonFor(league, new Date(`${opts.date}T00:00:00Z`), {
     ...(opts.seasonYear !== undefined ? { year: opts.seasonYear } : {}),
@@ -147,12 +172,13 @@ export async function planDay(
   }
   const resolver = createResolver(deps.config, league);
   const source = runSourceOf(resolver.source);
+  const feed: PlanFeed = opts.season ? 'schedule' : 'daily_schedule';
   const run = await startRun(deps.db, {
     kind: 'poll_schedule',
     league,
     gameId: null,
     source,
-    meta: { trialPlan: true, date: opts.date, season },
+    meta: { trialPlan: true, date: opts.date, season, feed },
   });
   const http = new SportradarHttp({
     db: deps.db,
@@ -168,10 +194,13 @@ export async function planDay(
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
   });
   try {
-    const doc = await http.getJson('schedule', SeasonScheduleDocumentSchema, {
-      seasonYear: season.year,
-      seasonType: season.type,
-    });
+    const doc =
+      feed === 'schedule'
+        ? await http.getJson('schedule', SeasonScheduleDocumentSchema, {
+            seasonYear: season.year,
+            seasonType: season.type,
+          })
+        : await http.getJson('daily_schedule', DailyScheduleDocumentSchema, { date: opts.date });
     const ingester = new ReferenceIngester({
       db: deps.db,
       log: deps.log,
@@ -180,14 +209,14 @@ export async function planDay(
       runSource: source,
       run,
     });
-    const out = await ingester.process('schedule', JSON.parse(doc.rawText), doc.requestedAt);
-    deps.log.info({ games: out.games, stale: out.stale, season }, 'schedule ingested');
+    const out = await ingester.process(feed, JSON.parse(doc.rawText), doc.requestedAt);
+    deps.log.info({ games: out.games, stale: out.stale, season, feed }, 'schedule ingested');
     await endRun(deps.db, run.id, 'ok');
   } catch (err) {
     await endRun(deps.db, run.id, 'error', (err as Error).message);
     throw err;
   }
-  return { games: await gamesOn(deps.db, league, opts.date), season, calls: http.calls };
+  return { games: await gamesOn(deps.db, league, opts.date), season, calls: http.calls, feed };
 }
 
 export interface GameRow {

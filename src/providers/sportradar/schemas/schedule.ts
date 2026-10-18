@@ -50,3 +50,20 @@ export const SeasonScheduleDocumentSchema = z
   })
   .loose();
 export type SeasonScheduleDocument = z.infer<typeof SeasonScheduleDocumentSchema>;
+
+/**
+ * Daily schedule (`/games/{yyyy}/{mm}/{dd}/schedule.json`): the same game entries as the season
+ * schedule, for one calendar day, with coverage as it stands that day (Sportradar: coverage is
+ * subject to change up to the scheduled start; NCAAWB `full` follows AP Top 25 teams). The
+ * document carries `date` and `league`; a `season` header is optional (the docs sample has none).
+ * Fixture: fixtures/ncaawb/docs-daily-schedule-2022-11-07.json (assembled from the season sample).
+ */
+export const DailyScheduleDocumentSchema = z
+  .object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    league: LeagueRefSchema.optional(),
+    season: SeasonRefSchema.optional(),
+    games: z.array(ScheduleGameSchema).default([]),
+  })
+  .loose();
+export type DailyScheduleDocument = z.infer<typeof DailyScheduleDocumentSchema>;

@@ -151,11 +151,22 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
     }
     const game = /\/games\/[^/]+\/(pbp|summary|boxscore)\.json$/.exec(url.pathname);
     const sched = /\/games\/\d+\/[A-Z]+\/schedule\.json$/.exec(url.pathname);
+    const daily = /\/games\/(\d{4})\/(\d{2})\/(\d{2})\/schedule\.json$/.exec(url.pathname);
     let body: unknown;
     let feed: string;
     if (game) {
       feed = game[1] ?? 'pbp';
       body = pick(feed as 'pbp' | 'summary' | 'boxscore');
+    } else if (daily) {
+      // The recording's one game, listed only on its calendar day (UTC), as the real daily feed would.
+      feed = 'daily_schedule';
+      const date = `${daily[1]}-${daily[2]}-${daily[3]}`;
+      body = {
+        league: schedule.league,
+        date,
+        season: schedule.season,
+        games: schedule.games.filter((g) => String(g.scheduled).slice(0, 10) === date),
+      };
     } else if (sched) {
       feed = 'schedule';
       body = schedule;

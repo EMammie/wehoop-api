@@ -26,10 +26,13 @@ import { createLogger } from '../logger.js';
 /**
  * Trial mode operator CLI (plan §4 "Trial mode"; CLAUDE.md non-negotiable 8).
  *
- * pnpm trial plan --league ncaawb --date 2026-11-08 [--season-year 2026 --season-type REG]
- *   Exactly one schedule call (quota-counted in trial/production), ingested
- *   generation-less; prints the date's games with coverage, the profile each
- *   defaults to, and its computed budget. MODE=trial|production only.
+ * pnpm trial plan --league ncaawb --date 2026-11-08 [--season [--season-year 2026 --season-type REG]]
+ *   Exactly one call (quota-counted in trial/production): the DAILY schedule for
+ *   the date by default (coverage as it stands that day; `full` follows AP Top 25
+ *   teams and can change until tip-off, so run it on game day), or the whole
+ *   season schedule with --season. Ingested generation-less; prints the date's
+ *   games with coverage and its client label, the profile each defaults to, and
+ *   its computed budget. MODE=trial|production only.
  * pnpm trial watch --league ncaawb --game <uuid|providerId> [--profile full|extended|lean-full]
  *     [--note "..."] [--speed N] [--dry-run] [--mode sim --recording <id>]
  *   Computes the profile budget from the cadence constants, reserves it
@@ -69,6 +72,7 @@ async function main() {
       date: { type: 'string' },
       'season-year': { type: 'string' },
       'season-type': { type: 'string' },
+      season: { type: 'boolean', default: false },
       game: { type: 'string' },
       profile: { type: 'string' },
       note: { type: 'string' },
@@ -151,18 +155,28 @@ async function main() {
           { db, log, config, adapter, guard },
           {
             date,
+            season: args.season,
             ...(seasonYear !== undefined ? { seasonYear } : {}),
             ...(args['season-type'] ? { seasonType: args['season-type'] } : {}),
           },
         );
         if (args.json) console.log(JSON.stringify(out));
         else {
+          const feedLabel =
+            out.feed === 'schedule'
+              ? `season schedule ${out.season.year} ${out.season.type}`
+              : `daily schedule ${date}`;
           console.log(
-            `${league} ${out.season.year} ${out.season.type}: ${out.calls} schedule call(s), ${out.games.length} game(s) on ${date}`,
+            `${league}: ${out.calls} ${feedLabel} call(s), ${out.games.length} game(s) on ${date}`,
           );
           for (const g of out.games) {
             console.log(
-              `  ${g.id}  ${g.providerGameId}  ${g.scheduledAt.toISOString()}  ${g.status.padEnd(10)} coverage=${g.coverage.padEnd(17)} ${g.away ?? '?'} at ${g.home ?? '?'}  -> profile ${g.profile} (${g.budget.total} calls)`,
+              `  ${g.id}  ${g.providerGameId}  ${g.scheduledAt.toISOString()}  ${g.status.padEnd(10)} coverage=${g.coverage.padEnd(17)} [${g.coverageLabel}]  ${g.away ?? '?'} at ${g.home ?? '?'}  -> profile ${g.profile} (${g.budget.total} calls)`,
+            );
+          }
+          if (!out.games.some((g) => g.coverage === 'full')) {
+            console.log(
+              'no full-coverage game on this date; full coverage follows AP Top 25 teams and can change until tip-off; re-run plan on game day',
             );
           }
         }

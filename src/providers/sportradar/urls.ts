@@ -5,6 +5,7 @@ import type { LeagueCode } from '../../leagues/codes.js';
 export const GAME_FEEDS = ['pbp', 'summary', 'boxscore'] as const;
 export const REFERENCE_FEEDS = [
   'schedule',
+  'daily_schedule',
   'tournament_list',
   'tournament_schedule',
   'standings',
@@ -24,6 +25,8 @@ export function isGameFeed(feed: Feed): feed is GameFeed {
 
 export interface FeedParams {
   gameId?: string;
+  /** `daily_schedule`: the calendar day, `YYYY-MM-DD`. */
+  date?: string;
   seasonYear?: number;
   seasonType?: string;
   tournamentId?: string;
@@ -159,6 +162,14 @@ export class ProdUrlResolver implements UrlResolver {
       case 'schedule':
         path = `/games/${enc(need('seasonYear'))}/${enc(need('seasonType'))}/schedule.json`;
         break;
+      case 'daily_schedule': {
+        // /games/{yyyy}/{mm}/{dd}/schedule.json: the day's games with coverage as it stands.
+        const date = need('date');
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+        if (!m) throw new Error(`daily_schedule needs date as YYYY-MM-DD, got ${date}`);
+        path = `/games/${m[1]}/${m[2]}/${m[3]}/schedule.json`;
+        break;
+      }
       case 'tournament_list':
         path = `/tournaments/${enc(need('seasonYear'))}/${enc(need('seasonType'))}/schedule.json`;
         break;

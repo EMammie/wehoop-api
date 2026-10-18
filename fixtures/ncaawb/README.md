@@ -26,6 +26,14 @@ the raw recording pretty-printed.
 | `sim-d9b71fe0-summary-closed.json` | game summary | final | final team + player stats |
 | `sim-d9b71fe0-boxscore-closed.json` | boxscore | final | "final score matches recording boxscore" |
 
+## Daily schedule (assembled)
+
+`docs-daily-schedule-2022-11-07.json` is the `/games/{yyyy}/{mm}/{dd}/schedule.json` shape
+(`date`, `league`, `games[]`, no `season` header), **assembled** from `docs-schedule-2022-REG.json`:
+its one game is that sample's 2022-11-07 entry, unedited. No daily-schedule document was captured
+from the provider; the first live `pnpm trial:live plan` (daily feed) is where the real shape is
+seen, and the schema is `.loose()` at the top level for that reason.
+
 ## Replay fixture
 
 Produced exactly like the WNBA one (`fixtures/wnba/README.md`, "Replay fixture"):
