@@ -36,7 +36,7 @@ revoke all on ingest.provider_rate_slots from anon, authenticated;
 
 insert into ingest.provider_rate_slots (product, next_slot_at)
 select q.product,
-       coalesce((select max(pc.called_at) + interval '1050 milliseconds'
+       coalesce((select max(pc.called_at) + interval '1200 milliseconds'
                    from ingest.provider_calls pc
                   where pc.product = q.product
                     and pc.source in ('trial', 'production', 'rehearsal')),

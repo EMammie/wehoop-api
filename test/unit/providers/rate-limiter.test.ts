@@ -68,7 +68,7 @@ describe('RateLimiter (1 s slots per product)', () => {
     await Promise.all([limiter.waitForSlot(), limiter.waitForSlot()]);
     expect(limiter.granted).toBe(2);
     expect(rateLimiterFor('unit-test-product')).toBe(rateLimiterFor('unit-test-product'));
-    expect(rateLimiterFor('unit-test-product').minIntervalMs).toBe(1050);
+    expect(rateLimiterFor('unit-test-product').minIntervalMs).toBe(1200);
     expect(rateLimiterFor('unit-test-product').product).toBe('unit-test-product');
     expect(rateLimiterFor('unit-test-product').shared).toBe(false);
     expect(rateLimiterFor('unit-test-other')).not.toBe(rateLimiterFor('unit-test-product'));

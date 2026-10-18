@@ -18,12 +18,17 @@ import type { Db } from '../../db/client.js';
  * given (simulation / fixture sources, `db: null`).
  */
 /**
- * 1 s slots with a 50 ms margin: the provider measures spacing on arrival, and
- * two requests dispatched exactly 1 s apart can arrive a few ms closer once
- * the keep-alive connection is warm (seen against the local fake provider).
- * `provider_calls.called_at` spacing therefore stays >= 1 s with room to spare.
+ * 1 s slots with a 200 ms margin. The provider measures spacing on ARRIVAL,
+ * while slots are dispatch times: a request leaves late by the timer, the
+ * database round trip and, for a process's first request, the cold connection
+ * setup, and the next one (warm keep-alive) leaves on time, so two slots 1 s
+ * apart can arrive closer than 1 s. A 50 ms margin was not enough: in the M3
+ * corrective rehearsal a worker's first two calls had slots 1050 ms apart and
+ * arrived 999 ms apart (one 429). The margin costs nothing live (cadences are
+ * 30-60 s) and only lowers the call count of a 60x rehearsal, which is
+ * limiter-bound anyway. `provider_calls.called_at` spacing is >= 1.2 s.
  */
-export const DEFAULT_MIN_INTERVAL_MS = 1050;
+export const DEFAULT_MIN_INTERVAL_MS = 1200;
 
 /** A claimed slot: when the request may start, and how long the claimant must wait for it. */
 export interface SlotClaim {

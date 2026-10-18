@@ -8,7 +8,11 @@ import {
   startFakeProvider,
 } from '../../src/providers/sportradar/fake-provider.js';
 import { SportradarHttp } from '../../src/providers/sportradar/http.js';
-import { PgSlotStore, RateLimiter } from '../../src/providers/sportradar/rate-limiter.js';
+import {
+  DEFAULT_MIN_INTERVAL_MS,
+  PgSlotStore,
+  RateLimiter,
+} from '../../src/providers/sportradar/rate-limiter.js';
 import { ProdUrlResolver } from '../../src/providers/sportradar/urls.js';
 import { silentLog, testDb } from '../helpers/db.js';
 
@@ -118,7 +122,7 @@ describe('ingest.provider_rate_slots (shared slot ledger)', () => {
       const [slot] = await db<{ nextSlotAt: Date }[]>`
         select next_slot_at as "nextSlotAt" from ingest.provider_rate_slots where product = ${product}`;
       const newest = rows.at(-1)?.calledAt.getTime() ?? 0;
-      expect(slot?.nextSlotAt.getTime()).toBe(newest + 1050);
+      expect(slot?.nextSlotAt.getTime()).toBe(newest + DEFAULT_MIN_INTERVAL_MS);
       // The invariant the validator runs (`pnpm invariants`) over this product's rows.
       const [inv] = await db<{ n: number }[]>`
         select count(*)::int as n from ingest.provider_calls pc
