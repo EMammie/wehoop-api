@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer, type Server, type ServerResponse } from 'node:http';
 import { readRecording } from '../../ingest/recording.js';
 import type { Logger } from '../../logger.js';
 import { buildPushTimelines, type PushTimelines, type TimedLine } from './fake-push.js';
@@ -177,7 +177,6 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
   };
 
   const streamPush = (
-    req: IncomingMessage,
     res: ServerResponse,
     feed: 'push_events' | 'push_clock',
     lines: TimedLine[],
@@ -275,8 +274,8 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
       }
       stats.served++;
       return stream[1] === 'events'
-        ? streamPush(req, res, 'push_events', push.events)
-        : streamPush(req, res, 'push_clock', push.clocks);
+        ? streamPush(res, 'push_events', push.events)
+        : streamPush(res, 'push_clock', push.clocks);
     }
     const game = /\/games\/[^/]+\/(pbp|summary|boxscore)\.json$/.exec(url.pathname);
     const sched = /\/games\/\d+\/[A-Z]+\/schedule\.json$/.exec(url.pathname);
