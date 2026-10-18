@@ -131,8 +131,52 @@ describe('Scheduler.tick with injected provider and watch', () => {
     await sched.tick();
     expect(sched.stats.schedulePollFailures).toBe(1);
     expect(watches.map((w) => w.id)).toEqual(['g1', 'g3', 'g2']); // g2 now within its lead
+    // a failed poll is retried after pollRetryMs (5 min), not at tomorrow's 06:00
+    expect(sched.nextPollAt.get('wnba')?.toISOString()).toBe('2026-10-20T00:06:00.000Z');
+    now = new Date('2026-10-20T00:04:00Z');
+    await sched.tick();
+    expect(sched.stats.schedulePollFailures).toBe(1); // not yet due
+    now = new Date('2026-10-20T00:06:30Z');
+    failPoll = false;
+    await sched.tick();
+    expect(sched.stats.schedulePolls).toBe(2);
+    expect(sched.nextPollAt.has('wnba')).toBe(false);
     for (const f of finishers) f();
     await new Promise((r) => setTimeout(r, 0));
-    expect(sched.stats).toMatchObject({ ticks: 3, schedulePolls: 1, watchesStarted: 3 });
+    expect(sched.stats).toMatchObject({ ticks: 5, schedulePolls: 2, watchesStarted: 3 });
+  });
+
+  it('a failed watch is not restarted every tick: exponential retry window from 10 min', async () => {
+    let now = new Date('2026-10-19T23:00:00Z');
+    const starts: Date[] = [];
+    const sched = new Scheduler({
+      db: {} as never,
+      log,
+      config,
+      guard: {} as QuotaGuard,
+      pulse: null,
+      leagues: ['wnba'],
+      isStopped: () => false,
+      now: () => now,
+      loadGames: async () => [game('g1', new Date('2026-10-19T23:05:00Z'))],
+      pollSchedule: async () => undefined,
+      watch: async () => {
+        starts.push(now);
+        throw new Error('HTTP 503');
+      },
+    });
+    await sched.tick();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sched.stats.watchesFailed).toBe(1);
+    expect(sched.failedWatches.get('g1')?.nextAt.toISOString()).toBe('2026-10-19T23:10:00.000Z');
+    now = new Date('2026-10-19T23:05:00Z');
+    await sched.tick();
+    expect(starts).toHaveLength(1); // inside the window: not restarted
+    now = new Date('2026-10-19T23:11:00Z');
+    await sched.tick();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(starts).toHaveLength(2);
+    expect(sched.failedWatches.get('g1')?.attempts).toBe(2);
+    expect(sched.failedWatches.get('g1')?.nextAt.toISOString()).toBe('2026-10-19T23:31:00.000Z'); // 20 min
   });
 });
