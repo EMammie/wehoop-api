@@ -387,11 +387,13 @@ export async function applyChanges(
       isComplete: observation.isComplete,
     });
 
-    // `observation` carries watchId and score, so rule 2d can read a previous ambiguous row without a join.
+    // `observation` carries watchId and score, so rule 2d can read a previous ambiguous row without a
+    // join, and the decision `detail` (e.g. `2d: ...`, `3-lagging-view: ...`) so the row explains itself.
     const logStale = async (reason: StaleReason) => {
+      const logged = { ...incomingView, detail: decision.detail };
       await tx`insert into ingest.stale_observations (game_id, run_id, source, observed_at, observation, stored, reason)
                values (${gameId}, ${observation.runId}, ${observation.source}, ${observation.observedAt},
-                       ${tx.json(incomingView as never)}, ${tx.json(storedView as never)}, ${reason})`;
+                       ${tx.json(logged as never)}, ${tx.json(storedView as never)}, ${reason})`;
     };
 
     if (decision.kind === 'stale') {

@@ -290,23 +290,27 @@ export function decideBatch(
     }
   }
 
-  // Rule 3, game-level part: newest observedAt wins; generation-less writers are restricted.
+  // Rule 3, game-level part: newest observedAt wins; generation-less writers are restricted; a
+  // lagging view (rev 4.6) is superseded even when newest.
   let gameLevel: 'write' | 'superseded' | 'none' = 'none';
   let restrictedGameLevel = false;
   let detail = `${generation} generation`;
   if (gameView) {
     const newest =
       stored.observedAt === null || input.observedAt.getTime() > stored.observedAt.getTime();
+    const lagging = laggingView(stored, gameView, input, storedEvents);
+    const current = newest && lagging === null;
     if (generation === 'none') {
       const allowed = phaseOf(stored.status) === 'pre' || stored.lastSeq === 0;
       restrictedGameLevel = true;
-      gameLevel = allowed && newest ? 'write' : 'superseded';
+      gameLevel = allowed && current ? 'write' : 'superseded';
       if (!allowed) detail += '; generation-less batch during live/finished game';
     } else {
-      gameLevel = newest ? 'write' : 'superseded';
+      gameLevel = current ? 'write' : 'superseded';
     }
     if (!newest)
       detail += `; observedAt ${input.observedAt.toISOString()} <= stored ${stored.observedAt?.toISOString()}`;
+    if (lagging !== null) detail += `; 3-lagging-view: ${lagging}`;
   }
 
   return {
@@ -317,6 +321,57 @@ export function decideBatch(
     restrictedGameLevel,
     detail,
   };
+}
+
+/**
+ * Rule 3 lagging view (rev 4.6, ratified 2026-10-17). Sportradar caches summary
+ * and boxscore documents longer than pbp, so inside one generation a document
+ * REQUESTED later (newer `observedAt`) can carry OLDER game-level content:
+ * `halftime` / period 2 after an accepted pbp in period 3. Following
+ * `observedAt` alone would emit a durable `status` change back to halftime and
+ * another when the next pbp restores period 3 (status flicker). A view whose
+ * phase is lower than the stored phase (post -> pre still allowed only while
+ * `last_seq = 0`), or, at the same phase, whose period sequence is lower than
+ * the stored one, is therefore a lagging view, not a correction, unless the
+ * batch carries an event whose position is newer than the stored newest live
+ * event (the 2(c) comparison; a batch with no events never qualifies). Score
+ * is deliberately not read here: a lower score at the same phase and period
+ * keeps following `observedAt` within a generation (a waved-off basket).
+ * Returns the reason, or null when the view is current.
+ */
+export function laggingView(
+  stored: Pick<StoredGameForFreshness, 'status' | 'currentPeriodSequence' | 'lastSeq'>,
+  gameView: GameView,
+  input: Pick<BatchInput, 'eventPositions'>,
+  storedEvents: StoredEventForFreshness[],
+): string | null {
+  const storedPhase = phaseOf(stored.status);
+  const incomingPhase = gameView.status === null ? storedPhase : phaseOf(gameView.status);
+  let why: string | null = null;
+  if (PHASE_RANK[incomingPhase] < PHASE_RANK[storedPhase]) {
+    const rescheduled = storedPhase === 'post' && incomingPhase === 'pre' && stored.lastSeq === 0;
+    if (!rescheduled) {
+      why = `phase ${incomingPhase} (${gameView.status}) < stored ${storedPhase} (${stored.status})`;
+    }
+  } else if (
+    incomingPhase === storedPhase &&
+    gameView.period !== null &&
+    stored.currentPeriodSequence !== null &&
+    gameView.period.sequence < stored.currentPeriodSequence
+  ) {
+    why = `period sequence ${gameView.period.sequence} < stored ${stored.currentPeriodSequence}`;
+  }
+  if (why === null) return null;
+  // Newer event evidence proves the provider has moved on: the view is a correction, not a cache.
+  const storedNewest = newestPosition(storedEvents.filter((e) => !e.deleted));
+  const incomingNewest = newestPosition(input.eventPositions);
+  if (
+    incomingNewest !== null &&
+    (storedNewest === null || comparePositions(incomingNewest, storedNewest) > 0)
+  ) {
+    return null;
+  }
+  return `${why}, no event newer than the stored newest`;
 }
 
 /* ------------------------------------------------------------------------- */
