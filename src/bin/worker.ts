@@ -337,11 +337,19 @@ async function main() {
       fault,
       leagues,
       isStopped: () => stopRequested,
+      // A signal interrupts the between-tick sleep so shutdown does not wait for the next tick.
+      sleep: (ms) =>
+        new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, ms);
+          wakeIdle = () => {
+            clearTimeout(t);
+            resolve();
+          };
+        }),
       // A rehearsal ticks faster so the fake provider's compressed game is noticed in time.
       ...(config.rehearsal ? { tickMs: Math.max(1000, Math.round(60_000 / speed)) } : {}),
     });
     log.info({ leagues, mode: config.mode, rehearsal: config.rehearsal }, 'scheduler mode');
-    wakeIdle = () => undefined;
     try {
       await sched.run();
     } catch (err) {

@@ -7,8 +7,7 @@ import type { Logger } from '../logger.js';
 import { GameChangeSchema } from '../model/game-change.js';
 import { SportradarHttp } from '../providers/sportradar/http.js';
 import {
-  type PushStream,
-  PushStream as PushStreamClass,
+  PushStream,
   type PushStreamDeps,
   type PushStreamState,
 } from '../providers/sportradar/push-client.js';
@@ -661,7 +660,7 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
       ...(a.options.backoffMaxMs !== undefined ? { backoffMaxMs: a.options.backoffMaxMs } : {}),
       ...(a.fetchImpl ? { fetchImpl: a.fetchImpl } : {}),
     };
-    return new PushStreamClass(deps);
+    return new PushStream(deps);
   });
   for (const s of streams) void s.start();
   log.info({ feeds, runId: subRun.id, watchId: subRun.watchId }, 'push streams opened');
