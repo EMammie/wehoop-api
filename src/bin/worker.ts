@@ -19,6 +19,7 @@ import { LeagueCodeSchema } from '../leagues/codes.js';
 import { adapterFor } from '../leagues/registry.js';
 import { OutboxPublisher } from '../live/outbox-publisher.js';
 import { PulseSender } from '../live/pulse.js';
+import { DbScoreboardSource, ScoreboardSender } from '../live/scoreboard.js';
 import { SupabaseBroadcastTransport } from '../live/supabase-broadcast.js';
 import { type LiveTransport, MemoryTransport } from '../live/transport.js';
 import { createLogger } from '../logger.js';
@@ -192,6 +193,9 @@ async function main() {
   await publisher.start(session);
   log.info('outbox drained on startup');
   const pulse = new PulseSender({ db, transport, log });
+  // league:{code}:scores: 5 s-coalesced scoreboard deltas, straight to the transport (plan §5).
+  const scoreboard = new ScoreboardSender({ transport, log, source: new DbScoreboardSource(db) });
+  scoreboard.start();
 
   // This process holds the single-ingester lock, so any root run still marked running belongs
   // to a worker that died (kill -9 never reaches endRun). Close them before opening ours.
@@ -340,6 +344,8 @@ async function main() {
       const left = await finalDrain();
       if (gameIdKnown) await pulse.sendOnce(gameIdKnown);
       publisher.stop();
+      scoreboard.stop();
+      await scoreboard.tick().catch(() => undefined);
       log.info(
         {
           runId: outcome.runId,
@@ -447,6 +453,8 @@ async function main() {
     const left = await finalDrain();
     if (watcher.gameId) await pulse.sendOnce(watcher.gameId);
     publisher.stop();
+    scoreboard.stop();
+    await scoreboard.tick().catch(() => undefined);
     await endRun(db, run.id, stoppedBy ? 'aborted' : 'ok', stoppedBy ?? undefined);
     log.info(
       {
@@ -470,6 +478,7 @@ async function main() {
     });
     const rest = await finalDrain();
     publisher.stop();
+    scoreboard.stop();
     shuttingDown = true;
     await session.end({ timeout: 2 });
     await db.end({ timeout: 2 });
