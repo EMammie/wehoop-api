@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../../src/config.js';
-import { composePreflight, PREFLIGHT_EXIT_PROBLEMS } from '../../../src/ingest/preflight.js';
+import {
+  composePreflight,
+  PREFLIGHT_EXIT_PROBLEMS,
+  runPreflight,
+  stackPairing,
+} from '../../../src/ingest/preflight.js';
 import type { QuotaStatus } from '../../../src/ingest/quota-guard.js';
 
 const SECRET = 'sr-live-key-THIS-MUST-NEVER-PRINT-0123456789';
@@ -57,8 +62,46 @@ describe('composePreflight (pnpm trial preflight, rev 4.6)', () => {
     );
     expect(text).toContain('quota wnba      UNVERIFIED'); // reported, not a problem: no wnba key
     expect(text).toContain('database        127.0.0.1:55322  dev/integration stack: no');
+    expect(text).toContain('supabase        127.0.0.1:55321');
+    expect(text).not.toContain('database(sess)'); // same URL: not repeated
     for (const s of [SECRET, PASSWORD, SERVICE, String(SECRET.length)])
       expect(text).not.toContain(s);
+  });
+
+  it('stack pairing: API port P with database port P+1 on loopback; anything else is a problem; hosted projects are not checked', () => {
+    expect(stackPairing('http://127.0.0.1:55321', trialStack)).toBeNull();
+    expect(stackPairing('http://127.0.0.1:54321', devStack)).toBeNull();
+    expect(
+      stackPairing('https://abc.supabase.co', 'postgresql://u:p@db.abc.supabase.co:5432/postgres'),
+    ).toBeNull();
+    expect(stackPairing('http://127.0.0.1:54321', trialStack)).toMatch(
+      /^SUPABASE_URL and DATABASE_URL point at different stacks \(127\.0\.0\.1:54321 vs 127\.0\.0\.1:55322/,
+    );
+    expect(stackPairing('http://127.0.0.1:55321', devStack)).toContain('different stacks');
+    expect(stackPairing('https://abc.supabase.co', trialStack)).toContain('different stacks');
+    expect(
+      stackPairing('http://127.0.0.1:55321', 'postgresql://u:p@db.abc.supabase.co:5432/postgres'),
+    ).toContain('different stacks');
+    expect(stackPairing('http://127.0.0.1:54321', trialStack)).not.toContain(PASSWORD);
+    const mixed = composePreflight({
+      config: loadConfig({ ...liveEnv, SUPABASE_URL: 'http://127.0.0.1:54321' }),
+      quota: [quota(), ...others],
+      dbError: null,
+      rateSlotsTable: true,
+    });
+    expect(mixed.problems).toEqual([expect.stringMatching(/point at different stacks/)]);
+    // A distinct session URL is shown (host:port only).
+    const sess = composePreflight({
+      config: loadConfig({
+        ...liveEnv,
+        DATABASE_SESSION_URL: `postgresql://postgres:${PASSWORD}@db.example.com:5432/postgres`,
+      }),
+      quota: [quota(), ...others],
+      dbError: null,
+      rateSlotsTable: true,
+    });
+    expect(sess.lines.join('\n')).toContain('database(sess)  db.example.com:5432');
+    expect(sess.lines.join('\n')).not.toContain(PASSWORD);
   });
 
   it('one problem line each: unverified quota, env override, no spendable budget, missing row, schema behind, db down', () => {
@@ -120,6 +163,7 @@ describe('composePreflight (pnpm trial preflight, rev 4.6)', () => {
         ...liveEnv,
         DATABASE_URL: devStack,
         DATABASE_SESSION_URL: devStack,
+        SUPABASE_URL: 'http://127.0.0.1:54321', // same (dev) stack: the only problem is the ledger
         TRIAL_ALLOW_DEV_DB: '1',
       }),
       quota: [quota(), ...others],
@@ -135,6 +179,7 @@ describe('composePreflight (pnpm trial preflight, rev 4.6)', () => {
         ...liveEnv,
         DATABASE_URL: devStack,
         DATABASE_SESSION_URL: devStack,
+        SUPABASE_URL: 'http://127.0.0.1:54321',
         SPORTRADAR_NCAAWB_KEY: 'fake-ncaawb-key',
         SPORTRADAR_BASE_URL: 'http://127.0.0.1:8787',
       }),
@@ -155,5 +200,43 @@ describe('composePreflight (pnpm trial preflight, rev 4.6)', () => {
       'no SPORTRADAR_*_KEY present',
     ]);
     expect(PREFLIGHT_EXIT_PROBLEMS).toBe(65);
+  });
+});
+
+describe('runPreflight (end to end, loopback only, no database available)', () => {
+  const collect = () => {
+    const lines: string[] = [];
+    return { lines, out: (l: string) => lines.push(l) };
+  };
+
+  it('an unreachable database is one problem line with host:port and the error code, never the password', async () => {
+    const { lines, out } = collect();
+    const code = await runPreflight(
+      {
+        ...liveEnv,
+        DATABASE_URL: `postgresql://postgres:${PASSWORD}@127.0.0.1:1/postgres`,
+        DATABASE_SESSION_URL: `postgresql://postgres:${PASSWORD}@127.0.0.1:1/postgres`,
+        SUPABASE_URL: 'http://127.0.0.1:0', // pairs with port 1, so only the connection fails
+      },
+      out,
+    );
+    const text = lines.join('\n');
+    expect(code).toBe(PREFLIGHT_EXIT_PROBLEMS);
+    expect(text).toMatch(/database unreachable \(127\.0\.0\.1:1\): [A-Z0-9_]+/);
+    expect(text).toContain('ready: NO');
+    for (const s of [PASSWORD, SECRET, SERVICE]) expect(text).not.toContain(s);
+  }, 5_000);
+
+  it('a refused configuration (dev stack in MODE=trial without consent) prints the refusal without credentials', async () => {
+    const { lines, out } = collect();
+    const code = await runPreflight(
+      { ...liveEnv, DATABASE_URL: devStack, DATABASE_SESSION_URL: devStack },
+      out,
+    );
+    const text = lines.join('\n');
+    expect(code).toBe(PREFLIGHT_EXIT_PROBLEMS);
+    expect(text).toContain('preflight: configuration refused');
+    expect(text).toMatch(/dev\/integration stack \(127\.0\.0\.1:54322\)/);
+    for (const s of [PASSWORD, SECRET, SERVICE]) expect(text).not.toContain(s);
   });
 });

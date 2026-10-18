@@ -89,8 +89,15 @@ async function main() {
   const cmd = positionals[0];
   const env = args.mode ? { ...process.env, MODE: args.mode } : process.env;
   if (cmd === 'preflight') {
-    // Before loadConfig: a refused configuration is itself a preflight finding, not a stack trace.
-    process.exit(await runPreflight(env, (line) => console.log(line)));
+    // Before loadConfig: a refused configuration is itself a preflight finding, not a stack trace,
+    // and nothing unexpected may print more than a code (a driver message could echo a URL).
+    try {
+      process.exit(await runPreflight(env, (line) => console.log(line)));
+    } catch (err) {
+      const e = err as { code?: string; name?: string };
+      console.error(`preflight: unexpected error (${e.code ?? e.name ?? 'Error'})`);
+      process.exit(65);
+    }
   }
   const config = loadConfig(env);
   const log = createLogger({ level: config.logLevel });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeDbUrl, isDevStackUrl, loadConfig } from '../../src/config.js';
+import { describeDbUrl, isDevStackUrl, isLoopbackUrl, loadConfig } from '../../src/config.js';
 
 const base = {
   DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:54322/postgres',
@@ -84,6 +84,23 @@ describe('loadConfig', () => {
       expect(isDevStackUrl(trialStackDb)).toBe(false);
       expect(isDevStackUrl('postgresql://u:p@db.example.com:54322/postgres')).toBe(false);
       expect(isDevStackUrl('nope')).toBe(false);
+      // Both helpers share one loopback definition: any 127.x.x.x, 0.0.0.0, localhost, ::1.
+      for (const host of ['127.0.0.2', '0.0.0.0', 'localhost', '[::1]']) {
+        expect(isDevStackUrl(`postgresql://u:p@${host}:54322/postgres`)).toBe(true);
+        expect(isLoopbackUrl(`http://${host}:8787`)).toBe(true);
+      }
+      expect(isLoopbackUrl('http://10.0.0.5:8787')).toBe(false);
+      expect(isLoopbackUrl('http://127.0.0.1.evil.example:8787')).toBe(false);
+      expect(isLoopbackUrl('not a url')).toBe(false);
+      expect(() =>
+        loadConfig({ ...trialOk, SPORTRADAR_BASE_URL: 'http://127.0.0.2:8787' }),
+      ).not.toThrow();
+      expect(() =>
+        loadConfig({ ...trialOk, SPORTRADAR_BASE_URL: 'http://0.0.0.0:8787' }),
+      ).not.toThrow();
+      expect(() => loadConfig({ ...trialOk, SPORTRADAR_BASE_URL: 'http://10.0.0.5:8787' })).toThrow(
+        /loopback host/,
+      );
       expect(describeDbUrl('postgresql://postgres:secret-pw@127.0.0.1:54322/postgres')).toBe(
         '127.0.0.1:54322',
       );

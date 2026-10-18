@@ -10,11 +10,21 @@ export { SPORTRADAR_DEFAULT_BASE_URL } from './providers/sportradar/urls.js';
 
 import { SPORTRADAR_DEFAULT_BASE_URL } from './providers/sportradar/urls.js';
 
-/** The host override may only point at this machine: the key travels in `x-api-key`. */
+/** Loopback hosts: `localhost`, `::1` (bracketed or not), any `127.x.x.x`, and `0.0.0.0` (binds every local interface). */
+export function isLoopbackHost(host: string): boolean {
+  return (
+    host === 'localhost' ||
+    host === '[::1]' ||
+    host === '::1' ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
+    host === '0.0.0.0'
+  );
+}
+
+/** The host override may only point at this machine: the key travels in `x-api-key`. Unparseable: not loopback (refused). */
 export function isLoopbackUrl(url: string): boolean {
   try {
-    const host = new URL(url).hostname;
-    return host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
+    return isLoopbackHost(new URL(url).hostname);
   } catch {
     return false;
   }
@@ -30,10 +40,7 @@ export const DEV_STACK_DB_PORT = 54322;
 export function isDevStackUrl(url: string): boolean {
   try {
     const u = new URL(url);
-    const host = u.hostname;
-    const loopback =
-      host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
-    return loopback && u.port === String(DEV_STACK_DB_PORT);
+    return isLoopbackHost(u.hostname) && u.port === String(DEV_STACK_DB_PORT);
   } catch {
     return false;
   }
@@ -171,7 +178,7 @@ export function loadConfig(source: Record<string, string | undefined> = process.
       );
     } else if (!isLoopbackUrl(e.SPORTRADAR_BASE_URL)) {
       problems.push(
-        'SPORTRADAR_BASE_URL may only point at a loopback host (127.0.0.1, localhost, ::1): the API key is sent to it',
+        'SPORTRADAR_BASE_URL may only point at a loopback host (127.x.x.x, localhost, ::1, 0.0.0.0): the API key is sent to it',
       );
     }
   }

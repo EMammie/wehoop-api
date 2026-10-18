@@ -1,4 +1,4 @@
-import { type Config, describeDbUrl, loadConfig } from '../config.js';
+import { type Config, describeDbUrl, isLoopbackHost, loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { type LeagueCode, LeagueCodeSchema } from '../leagues/codes.js';
 import { createLogger } from '../logger.js';
@@ -53,6 +53,12 @@ export function composePreflight(input: PreflightInput): PreflightReport {
   lines.push(
     `database        ${describeDbUrl(config.db.url)}  dev/integration stack: ${config.devStackDb ? 'YES (supabase db reset / pnpm test:int erase it)' : 'no'}`,
   );
+  if (config.db.sessionUrl !== config.db.url) {
+    lines.push(`database(sess)  ${describeDbUrl(config.db.sessionUrl)}`);
+  }
+  lines.push(`supabase        ${describeHttpUrl(config.supabase.url)}`);
+  const pairing = stackPairing(config.supabase.url, config.db.url);
+  if (pairing !== null) problems.push(pairing);
   if (config.mode === 'sim') problems.push('MODE=sim: a live run needs MODE=trial (or production)');
   const present: LeagueCode[] = [];
   for (const league of LEAGUE_CODES) {
@@ -113,6 +119,39 @@ export function composePreflight(input: PreflightInput): PreflightReport {
     );
   }
   return { lines, problems, ready: problems.length === 0 };
+}
+
+/** `host:port` of an http(s) URL (default port filled in), never its path, query or credentials. */
+function describeHttpUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.hostname}:${u.port || (u.protocol === 'https:' ? '443' : '80')}`;
+  } catch {
+    return '<unparseable>';
+  }
+}
+
+/**
+ * A local Supabase stack exposes its API on port P and its database on P+1 (dev 54321/54322,
+ * trial 55321/55322). When either URL is a loopback host, both must be, on one stack; a hosted
+ * project (no loopback on either side) is not checked here. Returns the problem text or null.
+ */
+export function stackPairing(supabaseUrl: string, databaseUrl: string): string | null {
+  let api: URL;
+  let db: URL;
+  try {
+    api = new URL(supabaseUrl);
+    db = new URL(databaseUrl);
+  } catch {
+    return null; // loadConfig already validated both as URLs
+  }
+  const apiLocal = isLoopbackHost(api.hostname);
+  const dbLocal = isLoopbackHost(db.hostname);
+  if (!apiLocal && !dbLocal) return null;
+  const apiPort = Number(api.port || (api.protocol === 'https:' ? 443 : 80));
+  const dbPort = Number(db.port || 5432);
+  if (apiLocal && dbLocal && dbPort === apiPort + 1) return null;
+  return `SUPABASE_URL and DATABASE_URL point at different stacks (${describeHttpUrl(supabaseUrl)} vs ${describeDbUrl(databaseUrl)}; a local stack is API port P, database port P+1)`;
 }
 
 /** Load config (its refusals are problems too), ask the database, print, return the exit code. */
