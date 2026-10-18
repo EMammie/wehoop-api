@@ -391,4 +391,57 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       profile: 'extended',
     });
   });
+
+  it('daily feed: plan lists exactly what the document returned, even a game at 00:30 UTC the next day (the provider owns the day boundary)', async () => {
+    const sfx = randomUUID().slice(0, 8);
+    const lateId = `late-tip-${sfx}`;
+    const daily = {
+      date: DATE,
+      league: { id: 'l', name: 'NCAA WOMEN', alias: 'NCAAW' },
+      games: [
+        {
+          id: lateId,
+          status: 'scheduled',
+          coverage: 'full',
+          scheduled: '2026-02-19T00:30:00Z', // 7:30 pm ET on 2026-02-18
+          home: { id: `h-${sfx}`, name: 'South Carolina Gamecocks', alias: 'SC' },
+          away: { id: `a-${sfx}`, name: 'UConn Huskies', alias: 'CONN' },
+        },
+      ],
+    };
+    const fetchImpl: typeof fetch = async (input) => {
+      expect(String(input)).toContain('/games/2026/02/18/schedule.json');
+      return new Response(JSON.stringify(daily), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const config = loadConfig({
+      DATABASE_URL: process.env.DATABASE_URL,
+      DATABASE_SESSION_URL: process.env.DATABASE_URL,
+      SUPABASE_URL: process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321',
+      SUPABASE_SERVICE_ROLE_KEY: 'not-used-here',
+      MODE: 'trial',
+      SPORTRADAR_NCAAWB_KEY: FAKE_KEY,
+      SPORTRADAR_BASE_URL: 'http://127.0.0.1:9', // loopback shape; fetchImpl answers, nothing listens
+    });
+    const plan = await planDay(
+      { db, log, config, adapter, guard: new QuotaGuard({ db, log }), fetchImpl },
+      { date: DATE },
+    );
+    expect(plan).toMatchObject({ feed: 'daily_schedule', calls: 1, ingested: 1 });
+    expect(plan.games.map((g) => g.providerGameId)).toContain(lateId);
+    expect(plan.games.find((g) => g.providerGameId === lateId)).toMatchObject({
+      home: 'South Carolina Gamecocks',
+      away: 'UConn Huskies',
+      coverage: 'full',
+      coverageLabel: 'live plays',
+      profile: 'full',
+    });
+    // A UTC-date slice would have missed it: the game sits on 2026-02-19 in UTC.
+    expect((await gamesOn(db, 'ncaawb', DATE)).map((g) => g.providerGameId)).not.toContain(lateId);
+    expect((await gamesOn(db, 'ncaawb', '2026-02-19')).map((g) => g.providerGameId)).toContain(
+      lateId,
+    );
+  });
 });

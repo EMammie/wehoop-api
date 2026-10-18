@@ -158,7 +158,9 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
       feed = game[1] ?? 'pbp';
       body = pick(feed as 'pbp' | 'summary' | 'boxscore');
     } else if (daily) {
-      // The recording's one game, listed only on its calendar day (UTC), as the real daily feed would.
+      // The recording's one game, listed only on its calendar day: assumed UTC day until the first
+      // live daily call is captured (the real feed's boundary is likely the Eastern calendar day).
+      // `planDay` lists what the document returned, so this choice never changes the operator's list.
       feed = 'daily_schedule';
       const date = `${daily[1]}-${daily[2]}-${daily[3]}`;
       body = {

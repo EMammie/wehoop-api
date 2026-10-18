@@ -42,6 +42,7 @@ import {
   type TeamFacts,
 } from './identity.js';
 import { type RunHandle, type RunSource, startRun } from './runs.js';
+import { seasonFor } from './season.js';
 import type { GameView, ObservationSource } from './types.js';
 
 /**
@@ -171,7 +172,11 @@ export class ReferenceIngester {
     }
   }
 
-  /** One day's games; the season link is set only when the document carries a season header. */
+  /**
+   * One day's games. The season link comes from the document's season header when it has one;
+   * otherwise the EXISTING `seasons` row for the season the date falls in (never created here:
+   * only a season schedule knows the provider season id), or null when no such row exists.
+   */
   private async dailySchedule(body: unknown, observedAt: Date, out: ReferenceOutcome) {
     const doc = DailyScheduleDocumentSchema.parse(body);
     const seasonId = doc.season
@@ -181,10 +186,18 @@ export class ReferenceIngester {
           { providerSeasonId: doc.season.id, year: doc.season.year, type: doc.season.type },
           this.deps.log,
         )
-      : null;
+      : await this.existingSeasonId(seasonFor(this.deps.league, new Date(`${doc.date}T00:00:00Z`)));
     for (const g of doc.games) {
       await this.scheduledGame(g, seasonId, null, observedAt, out);
     }
+  }
+
+  private async existingSeasonId(season: { year: number; type: string }): Promise<string | null> {
+    const [row] = await this.deps.db<{ id: string }[]>`
+      select id from public.seasons
+      where league = ${this.deps.league} and year = ${season.year} and type::text = ${season.type}
+      order by created_at limit 1`;
+    return row?.id ?? null;
   }
 
   private async tournamentList(body: unknown, out: ReferenceOutcome) {

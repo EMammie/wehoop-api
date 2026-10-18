@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../../src/config.js';
-import { assertSpeedAllowed, lagFromRecord, seasonFor } from '../../../src/ingest/trial-mode.js';
+import { seasonFor } from '../../../src/ingest/season.js';
+import { assertSpeedAllowed, lagFromRecord } from '../../../src/ingest/trial-mode.js';
 
 const base = {
   DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:54322/postgres',

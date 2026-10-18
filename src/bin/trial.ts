@@ -167,7 +167,7 @@ async function main() {
               ? `season schedule ${out.season.year} ${out.season.type}`
               : `daily schedule ${date}`;
           console.log(
-            `${league}: ${out.calls} ${feedLabel} call(s), ${out.games.length} game(s) on ${date}`,
+            `${league}: ${out.calls} ${feedLabel} call(s), ingested ${out.ingested} game(s), ${out.games.length} game(s) listed for ${date}`,
           );
           for (const g of out.games) {
             console.log(

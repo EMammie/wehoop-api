@@ -32,7 +32,10 @@ the raw recording pretty-printed.
 (`date`, `league`, `games[]`, no `season` header), **assembled** from `docs-schedule-2022-REG.json`:
 its one game is that sample's 2022-11-07 entry, unedited. No daily-schedule document was captured
 from the provider; the first live `pnpm trial:live plan` (daily feed) is where the real shape is
-seen, and the schema is `.loose()` at the top level for that reason.
+seen, and the schema is `.loose()` at the top level for that reason. The fake provider serves the
+daily route by UTC calendar day: assumed UTC day until the first live daily call is captured (the
+real feed's boundary is likely the Eastern calendar day); `plan` lists exactly what the document
+returned, so the assumption affects only the rehearsal server.
 
 ## Replay fixture
 

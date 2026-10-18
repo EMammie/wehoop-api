@@ -26,6 +26,7 @@ import { cadenceLoop, GameWatcher, HttpDocumentSource } from './game-watcher.js'
 import { needsRateLimit, type QuotaGuard, type Reservation } from './quota-guard.js';
 import { ReferenceIngester } from './reference.js';
 import { endRun, type RunSource, startRun } from './runs.js';
+import { seasonFor } from './season.js';
 import type { ObservationSource } from './types.js';
 
 /**
@@ -55,17 +56,7 @@ export function runSourceOf(resolverSource: ResolverSource): RunSource {
   return resolverSource;
 }
 
-/** The provider season a calendar date falls in. NCAAWB seasons are named by their first year. */
-export function seasonFor(
-  league: LeagueCode,
-  date: Date,
-  override?: { year?: number; type?: string },
-): { year: number; type: string } {
-  const y = date.getUTCFullYear();
-  const m = date.getUTCMonth() + 1;
-  const year = override?.year ?? (league === 'ncaawb' ? (m >= 8 ? y : y - 1) : y);
-  return { year, type: override?.type ?? 'REG' };
-}
+export { seasonFor } from './season.js';
 
 export interface PlannedGame {
   id: string;
@@ -88,8 +79,20 @@ export function coverageLabel(coverage: string | null): string {
   return 'score only';
 }
 
-/** Games stored for a league on a UTC date, with the profile and budget each would take. */
-export async function gamesOn(db: Db, league: LeagueCode, date: string): Promise<PlannedGame[]> {
+/** `gamesOn` filter: a UTC calendar date (season snapshot) or exactly the games a document listed. */
+export type GamesFilter = string | { providerGameIds: string[] };
+
+/**
+ * Games stored for a league, with the profile and budget each would take: those scheduled on a
+ * UTC date, or exactly the provider ids a daily document returned (its day boundary is the
+ * provider's, likely the Eastern calendar day; a 7 pm ET tip is 00:00 UTC the next day).
+ */
+export async function gamesOn(
+  db: Db,
+  league: LeagueCode,
+  filter: GamesFilter,
+): Promise<PlannedGame[]> {
+  const byDate = typeof filter === 'string';
   const rows = await db<
     {
       id: string;
@@ -108,7 +111,12 @@ export async function gamesOn(db: Db, league: LeagueCode, date: string): Promise
     from public.games g
     left join public.teams h on h.id = g.home_team_id
     left join public.teams a on a.id = g.away_team_id
-    where g.league = ${league} and (g.scheduled_at at time zone 'utc')::date = ${date}::date
+    where g.league = ${league}
+      and ${
+        byDate
+          ? db`(g.scheduled_at at time zone 'utc')::date = ${filter}::date`
+          : db`g.provider_game_id = any(${filter.providerGameIds})`
+      }
     order by g.scheduled_at, g.id`;
   return rows.map((r) => {
     const profile: TrialProfile = r.coverage === 'full' ? 'full' : 'extended';
@@ -159,6 +167,8 @@ export async function planDay(
   season: { year: number; type: string };
   calls: number;
   feed: PlanFeed;
+  /** Games the document carried (ingested); the listing is exactly these for the daily feed. */
+  ingested: number;
 }> {
   const league = deps.adapter.league;
   const season = seasonFor(league, new Date(`${opts.date}T00:00:00Z`), {
@@ -193,6 +203,8 @@ export async function planDay(
     guard: deps.guard,
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
   });
+  let listed: GamesFilter = opts.date;
+  let ingested = 0;
   try {
     const doc =
       feed === 'schedule'
@@ -210,13 +222,25 @@ export async function planDay(
       run,
     });
     const out = await ingester.process(feed, JSON.parse(doc.rawText), doc.requestedAt);
+    ingested = out.games;
+    // The daily feed decides what "that day" means (its boundary is unverified until the first live
+    // call); list what it returned, not a UTC-date slice of the database.
+    if (feed === 'daily_schedule') {
+      listed = { providerGameIds: doc.data.games.map((g) => g.id) };
+    }
     deps.log.info({ games: out.games, stale: out.stale, season, feed }, 'schedule ingested');
     await endRun(deps.db, run.id, 'ok');
   } catch (err) {
     await endRun(deps.db, run.id, 'error', (err as Error).message);
     throw err;
   }
-  return { games: await gamesOn(deps.db, league, opts.date), season, calls: http.calls, feed };
+  return {
+    games: await gamesOn(deps.db, league, listed),
+    season,
+    calls: http.calls,
+    feed,
+    ingested,
+  };
 }
 
 export interface GameRow {
