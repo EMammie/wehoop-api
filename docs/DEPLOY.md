@@ -164,11 +164,13 @@ sees fewer intermediate states but adds clock-carried score steps), `play_events
 newer push observations, by design), `provider_calls` (push mode makes far fewer REST calls plus
 one row per stream connection).
 
-Observed on 2026-10-18 (dev stack, `--speed 300`, drop after 12 s for 3 s): both streams
-disconnected at 22:09:56, reconnected at 22:09:59/22:10:03, `backfill finished` at 22:10:02, watch
-`closed` 93-85 with 408 live + 2 deleted play_events, 679 changes all published, invariants 59/59,
-`pnpm outbox lag --since 1h`: n=679 p50 27 ms p95 162 ms max 1228 ms, fake provider: 0 x 429,
-0 x 401, 4 push connections, 3 drops.
+Observed on 2026-10-18 (dev stack after `pnpm supabase db reset`, HEAD after the review fixes,
+`--speed 300`, drop after 12 s for 3 s): both streams disconnected at 22:44:51, reconnected at
+22:44:56 / 22:44:58, one `backfill finished` at 22:44:59 (`backfills: 1`), watch `closed` 93-85 with
+408 live + 2 deleted play_events, 647 changes all published, invariants 59/59, `pnpm outbox lag
+--since 1h`: n=647 p50 23 ms p95 189 ms max 192 ms; fake provider: 0 x 429, 0 x 401, 4 push
+connections, 3 drops; `provider_calls`: pbp 8, summary 8, boxscore 1, push_events 2, push_clock 3
+(one with a null status: the connection refused during the drop window is still a logged attempt).
 
 ## Alerts (`GET /health`)
 
