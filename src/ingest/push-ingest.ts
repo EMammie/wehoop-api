@@ -7,7 +7,7 @@ import {
   PlayerCollector,
 } from '../leagues/sportradar-basketball/normalize.js';
 import type { Logger } from '../logger.js';
-import type { PeriodRef, PeriodType } from '../model/live-event.js';
+import type { PeriodRef, PeriodType, Score } from '../model/live-event.js';
 import type { PushLine } from '../providers/sportradar/push-client.js';
 import type { PushClockMessage, PushEventMessage } from '../providers/sportradar/schemas/push.js';
 import { type ApplyDeps, type ApplyResult, applyChanges } from './apply-changes.js';
@@ -99,23 +99,34 @@ export function pushEventToBatch(msg: PushEventMessage): PushEventNormalization 
   };
 }
 
+/** The stored game-level fields a clock message may omit (read once per line, outside the applyChanges transaction). */
+export interface StoredGameLevel {
+  period: PeriodRef | null;
+  score: Score;
+}
+
 /**
- * One push clock message -> an observation-only `gameView`. `storedPeriod` is
- * used when the message carries no `period` (the recorded sample omits it on
- * some lines): omission is not change, so the stored period is kept rather
- * than written as null.
+ * One push clock message -> an observation-only `gameView`. Omission is not
+ * change (plan §4 rule 3): a message without `period` (the recorded sample
+ * omits it on 3 of 4 lines) keeps the stored period, and a team without
+ * `points` keeps the stored score rather than claiming 0, which would be the
+ * newest observation of the generation and would zero the score with a
+ * durable `status` change. `0` is used only when nothing is stored yet.
  */
 export function pushClockToGameView(
   msg: PushClockMessage,
-  storedPeriod: PeriodRef | null,
+  stored: StoredGameLevel | null,
 ): GameView {
   const g = msg.payload.game;
   const status = mapStatus(g.status);
   return {
     status,
     unknownStatus: status === null ? g.status : null,
-    score: { home: g.home.points ?? 0, away: g.away.points ?? 0 },
-    period: msg.payload.period ? periodRefOf(msg.payload.period) : storedPeriod,
+    score: {
+      home: g.home.points ?? stored?.score.home ?? 0,
+      away: g.away.points ?? stored?.score.away ?? 0,
+    },
+    period: msg.payload.period ? periodRefOf(msg.payload.period) : (stored?.period ?? null),
     clock: normalizePushClock(msg.payload.clocks.game),
     clockDecimal: normalizePushClock(msg.payload.clocks.game_decimal),
     clockRunning: msg.payload.clocks.running,
@@ -199,13 +210,32 @@ export class PushIngest {
     this.deps.log.info({ runId: this.run.id, stats: this.stats }, 'push_stream sub-run ended');
   }
 
-  private async storedPeriod(): Promise<PeriodRef | null> {
+  /**
+   * One read of the game-level fields a clock line may omit. It runs outside the applyChanges
+   * transaction, so a concurrent writer may move them in between; the consequence is a view that
+   * repeats a value one line old, which the freshness rules treat as any other observation (never a
+   * regression: omitted fields only ever echo stored state).
+   */
+  private async storedGameLevel(): Promise<StoredGameLevel | null> {
     const [row] = await this.deps.db<
-      { number: number | null; type: PeriodType | null; sequence: number | null }[]
-    >`select current_period as number, period_type as type, current_period_sequence as sequence
+      {
+        number: number | null;
+        type: PeriodType | null;
+        sequence: number | null;
+        home: number;
+        away: number;
+      }[]
+    >`select current_period as number, period_type as type, current_period_sequence as sequence,
+             home_points as home, away_points as away
       from public.games where id = ${this.deps.gameId}`;
-    if (!row || row.sequence === null) return null;
-    return { number: row.number ?? 0, type: row.type ?? 'quarter', sequence: row.sequence };
+    if (!row) return null;
+    return {
+      period:
+        row.sequence === null
+          ? null
+          : { number: row.number ?? 0, type: row.type ?? 'quarter', sequence: row.sequence },
+      score: { home: row.home, away: row.away },
+    };
   }
 
   /** Route one parsed push line through `applyChanges`. Returns the apply result, or null when nothing was applied. */
@@ -251,7 +281,7 @@ export class PushIngest {
         return null;
       }
       this.stats.clocks++;
-      const gameView = pushClockToGameView(line.message, await this.storedPeriod());
+      const gameView = pushClockToGameView(line.message, await this.storedGameLevel());
       result = await applyChanges(
         this.deps.apply,
         this.deps.gameId,

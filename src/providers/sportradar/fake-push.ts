@@ -130,9 +130,19 @@ export function buildPushTimelines(
     ]);
     if (headerKey !== prevHeader) {
       const clockMoved = doc.clock !== undefined && doc.clock !== prevClock;
+      // Every third clock line omits `points` (the real feed omits fields; the ingester must keep
+      // the stored score rather than claim 0-0).
+      const omitPoints = clocks.length % 3 === 2;
+      const strip = (t: Record<string, unknown>) => {
+        const { points: _p, ...rest } = t;
+        return rest;
+      };
+      const clockHeader = omitPoints
+        ? { ...header, home: strip(header.home), away: strip(header.away) }
+        : header;
       const line = PushClockMessageSchema.parse({
         payload: {
-          game: header,
+          game: clockHeader,
           ...(current
             ? { period: { number: current.number, sequence: current.sequence, type: current.type } }
             : {}),
