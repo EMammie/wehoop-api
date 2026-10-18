@@ -33,7 +33,9 @@ import { SimulationUrlResolver } from '../providers/sportradar/urls.js';
  *     [--max-polls N] [--record-to <file.jsonl>]
  *   pnpm dev:worker --mode sim --league wnba --replay-file <file.jsonl> [--pace 0]
  *   pnpm dev:worker --mode trial --league ncaawb --game <uuid|providerId> --profile full|extended|lean-full
- *     [--speed N] [--note "..."]            (what `pnpm trial watch` runs: budget reservation + cadence loop)
+ *     [--speed N] [--note "..."] [--push]   (what `pnpm trial watch` runs: budget reservation + cadence loop;
+ *                                            --push (M4, opt-in) opens the push streams and reconciles by REST
+ *                                            every 5 min; needs a production-shaped host, never the simulation service)
  *   pnpm dev:worker --mode sim --league ncaawb --game <id> --profile full --recording <id>
  *                                           (the same trial flow against the simulation host; never counted)
  *   [--lock-wait 60]  seconds to wait for the single-ingester lock (a killed worker's lock lingers briefly)
@@ -76,6 +78,7 @@ async function main() {
       profile: { type: 'string' },
       speed: { type: 'string' },
       note: { type: 'string' },
+      push: { type: 'boolean', default: false },
     },
     strict: true,
   });
@@ -114,6 +117,13 @@ async function main() {
     process.exit(64);
   }
   const trialWatch = args.game !== undefined;
+  if (args.push && (!trialWatch || config.mode === 'sim')) {
+    log.error(
+      { mode: config.mode },
+      '--push needs a planned game (--game) against a production-shaped host (MODE=trial|production, or a rehearsal host); the simulation service has no push streams',
+    );
+    process.exit(64);
+  }
   if (config.mode !== 'sim' && !args['replay-file'] && !trialWatch) {
     log.error(
       { mode: config.mode },
@@ -190,6 +200,15 @@ async function main() {
       error = coalesce(error, 'worker died; marked aborted by the next lock holder')
     where status = 'running' and kind in ('replay', 'watch_game') returning id::text`;
   const orphanedIds = orphaned.map((r) => Number(r.id));
+  // Their push_stream / backfill sub-runs died with them (and any sub-run whose parent is no longer running).
+  const orphanedSubRuns = await db<{ id: string }[]>`
+    update ingest.ingestion_runs s set status = 'aborted', ended_at = now(),
+      error = coalesce(s.error, 'parent watch run is not running; marked aborted by the next lock holder')
+    where s.status = 'running' and s.parent_run_id is not null
+      and not exists (select 1 from ingest.ingestion_runs p where p.id = s.parent_run_id and p.status = 'running')
+    returning s.id::text`;
+  if (orphanedSubRuns.length > 0)
+    log.warn({ runs: orphanedSubRuns.map((r) => Number(r.id)) }, 'aborted orphaned sub-runs');
   if (orphanedIds.length > 0) {
     log.warn({ runs: orphanedIds }, 'aborted orphaned runs');
     // Their budget reservations never reached runTrialWatch's release (kill -9, host restart).
@@ -314,6 +333,7 @@ async function main() {
           speed,
           note: args.note ?? null,
           untilClosed,
+          push: args.push,
         },
       );
       pulse.stop();
@@ -331,6 +351,7 @@ async function main() {
           finalStatus: outcome.status,
           changes: outcome.changes,
           stale: outcome.stale,
+          push: outcome.push ?? null,
           unpublished: left,
           stoppedBy,
         },
