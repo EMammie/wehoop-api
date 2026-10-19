@@ -164,13 +164,20 @@ sees fewer intermediate states but adds clock-carried score steps), `play_events
 newer push observations, by design), `provider_calls` (push mode makes far fewer REST calls plus
 one row per stream connection).
 
-Observed on 2026-10-18 (dev stack after `pnpm supabase db reset`, HEAD after the review fixes,
-`--speed 300`, drop after 12 s for 3 s): both streams disconnected at 22:44:51, reconnected at
-22:44:56 / 22:44:58, one `backfill finished` at 22:44:59 (`backfills: 1`), watch `closed` 93-85 with
-408 live + 2 deleted play_events, 647 changes all published, invariants 59/59, `pnpm outbox lag
---since 1h`: n=647 p50 23 ms p95 189 ms max 192 ms; fake provider: 0 x 429, 0 x 401, 4 push
-connections, 3 drops; `provider_calls`: pbp 8, summary 8, boxscore 1, push_events 2, push_clock 3
-(one with a null status: the connection refused during the drop window is still a logged attempt).
+Observed on 2026-10-19 01:05 (dev stack after `pnpm supabase db reset`, HEAD after the round-2
+fixes, `--speed 300`, drop after 12 s for 3 s): both streams disconnected at 01:05:23/01:05:27,
+reconnected at 01:05:31 / 01:05:32, `backfills: 0, backfillsSkipped: 1` with the log line "backfill
+skipped: a pbp document of this generation was fetched after the outage began" (at 300x the 5-minute
+REST pbp cadence is ~1.2 s, so a REST document always lands inside an outage of a few seconds and the
+reconnect needs no second call; at 1x a 30 s drop inside a 5-minute cadence backfills unless a
+reconciliation happened to run during the outage), watch `closed` 93-85 with 408 live + 2 deleted
+play_events, 664 changes all published, invariants 59/59, `pnpm outbox lag --since 1h`: n=664 p50
+31 ms p95 206 ms max 1225 ms; fake provider: 1 x 429 (push reconnect vs REST arrival inside the
+limiter's 200 ms margin; retried through the backoff), 0 x 401, 4 push connections, 2 drops;
+`provider_calls`: pbp 8, summary 8, boxscore 1, push_events 2, push_clock 3. The previous rerun
+(before the criterion change, same speed and drop) showed `backfills: 1`; the backfill sub-run path
+is proven by `test/integration/push-ingest.test.ts` and the skip criterion by
+`test/unit/ingest/trial-mode.test.ts` (`backfillNeeded`).
 
 ## Alerts (`GET /health`)
 
