@@ -75,6 +75,8 @@ export interface PushStreamState {
   lastError: string | null;
   /** Watchdog trips (no bytes for `watchdogMs`). */
   watchdogTrips: number;
+  /** Slots abandoned because the send would have left more than PUSH_SEND_TOLERANCE_MS late. */
+  slotReclaims: number;
 }
 
 export interface PushStreamDeps {
@@ -97,9 +99,9 @@ export interface PushStreamDeps {
   onLine: (line: PushLine, receivedAt: Date) => Promise<void> | void;
   /**
    * Called after every reconnection (connection 2, 3, ...); `downMs` is the outage length and
-   * `reconnectedAt` the moment the new connection answered, on the rate limiter's clock (the
-   * database clock for rate-limited sources: the slot plus the local time from slot to headers), so
-   * it compares with `provider_calls.called_at`.
+   * `reconnectedAt` the moment the new connection answered: the database `now()` read once the
+   * response headers arrived when the stream has a database (so it compares with
+   * `provider_calls.called_at`, the slot on the database clock), the local clock otherwise.
    */
   onReconnect?: (info: {
     connections: number;
@@ -118,7 +120,22 @@ export interface PushStreamDeps {
   attemptBudget?: { remaining: number };
   random?: () => number;
   now?: () => number;
+  /** Local sleep (tests drive a fake clock through it); default setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
+  /** The database clock (tests stub it); default `select now()` when the stream has a database. */
+  dbNow?: () => Promise<Date>;
 }
+
+/**
+ * A push connection must leave on its slot. If it would leave later than this after the slot
+ * (timer lateness, an event-loop stall, a slow claim round trip), the slot is abandoned and a new
+ * one claimed: a late send can land on the NEXT holder's slot and draw a 429 even though the
+ * recorded slots are correctly spaced (validator M4 §2e: a push_clock send 1.206 s after its slot,
+ * 1 ms before a REST pbp).
+ */
+export const PUSH_SEND_TOLERANCE_MS = 200;
+/** Re-claims per connection attempt before sending anyway (logged). */
+export const PUSH_MAX_SLOT_RECLAIMS = 4;
 
 export const PUSH_WATCHDOG_MS = 15_000;
 /** A single NDJSON line longer than this is a broken stream, not a message: abort and reconnect. */
@@ -180,6 +197,7 @@ export class PushStream {
       disconnectedSince: null,
       lastError: null,
       watchdogTrips: 0,
+      slotReclaims: 0,
     };
   }
 
@@ -272,11 +290,11 @@ export class PushStream {
             throw err;
           }
         }
-        let slotAt = new Date(this.now());
-        if (limited && this.deps.limiter) slotAt = new Date(await this.deps.limiter.waitForSlot());
+        // Every awaited step (guard above, slot claim) is done; nothing awaited sits between the
+        // slot and the send.
+        const slotAt = limited ? await this.acquireSlot() : new Date(this.now());
         if (this.stopped) break;
         requestedAt = slotAt;
-        const slotGrantedAt = this.now();
         // Connection phase is covered by the same watchdog: a host that accepts and never answers trips it.
         this.resetWatchdog(controller);
         const res = await fetchImpl(url, {
@@ -284,8 +302,8 @@ export class PushStream {
           signal: controller.signal,
         });
         status = res.status;
-        // Reconnect moment on the slot's clock: slot + (local headers time - local slot time).
-        const reconnectedAt = new Date(slotAt.getTime() + (this.now() - slotGrantedAt));
+        // Only a reconnect needs the moment (one database round trip per reconnect).
+        const reconnectedAt = this.state.connections >= 1 ? await this.clockNow() : null;
         callId = await this.logCall(
           url,
           status,
@@ -317,7 +335,13 @@ export class PushStream {
           const hook = this.deps.onReconnect;
           if (hook) {
             const p = Promise.resolve()
-              .then(() => hook({ connections: this.state.connections, downMs, reconnectedAt }))
+              .then(() =>
+                hook({
+                  connections: this.state.connections,
+                  downMs,
+                  reconnectedAt: reconnectedAt ?? new Date(this.now()),
+                }),
+              )
               .catch((err) => log.error({ err, feed }, 'push reconnect hook (backfill) failed'));
             this.hooks.push(p);
             void p.finally(() => {
@@ -389,6 +413,54 @@ export class PushStream {
       }
     }
     this.setStatus('stopped');
+  }
+
+  /**
+   * Claim a slot straight from the shared ledger and leave on it. RateLimiter.waitForSlot() is not
+   * used: its in-process floor can order two concurrent callers differently from the ledger, so a
+   * caller sleeps until its later local floor while reporting its earlier ledger slot and lands on
+   * the other caller's slot (the 429 of validator M4 §2e). The ledger alone serializes claimants
+   * across every process; the wait is the ledger's delay (database clock). A send that would
+   * leave more than PUSH_SEND_TOLERANCE_MS after its slot re-claims instead.
+   */
+  private async acquireSlot(): Promise<Date> {
+    const limiter = this.deps.limiter;
+    if (!limiter) return new Date(this.now());
+    const store = limiter.slotStore;
+    if (!store || limiter.product === null) return new Date(await limiter.waitForSlot());
+    const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    for (let attempt = 0; ; attempt++) {
+      const claim = await store.claim(limiter.product, limiter.minIntervalMs);
+      const sendAt = this.now() + Math.max(0, claim.delayMs);
+      for (let t = this.now(); t < sendAt && !this.stopped; t = this.now()) await sleep(sendAt - t);
+      const lateMs = this.now() - sendAt;
+      if (lateMs <= PUSH_SEND_TOLERANCE_MS || attempt >= PUSH_MAX_SLOT_RECLAIMS || this.stopped) {
+        if (lateMs > PUSH_SEND_TOLERANCE_MS)
+          this.deps.log.warn(
+            { feed: this.deps.feed, lateMs, attempt },
+            'push send late after the maximum re-claims; sending',
+          );
+        return claim.slotAt;
+      }
+      this.state.slotReclaims++;
+      this.deps.log.warn(
+        { feed: this.deps.feed, lateMs, slotAt: claim.slotAt.toISOString(), attempt },
+        'push send would leave late after its slot; claiming a new slot',
+      );
+    }
+  }
+
+  /** The reconnect moment on the clock `provider_calls.called_at` uses. */
+  private async clockNow(): Promise<Date> {
+    if (this.deps.dbNow) return this.deps.dbNow();
+    const db = this.deps.db;
+    if (db === null) return new Date(this.now());
+    try {
+      const [row] = await db<{ now: Date }[]>`select now() as now`;
+      return row?.now ?? new Date(this.now());
+    } catch {
+      return new Date(this.now());
+    }
   }
 
   private async handleLine(raw: string, receivedAt: Date): Promise<void> {

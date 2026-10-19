@@ -1,5 +1,6 @@
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { QuotaGuard } from '../../../src/ingest/quota-guard.js';
 import { createLogger } from '../../../src/logger.js';
 import {
   backoffDelayMs,
@@ -7,6 +8,7 @@ import {
   type PushLine,
   PushStream,
 } from '../../../src/providers/sportradar/push-client.js';
+import { RateLimiter, type SlotStore } from '../../../src/providers/sportradar/rate-limiter.js';
 import type { PushUrlResolver } from '../../../src/providers/sportradar/urls.js';
 import { fixture } from '../../helpers/fixtures.js';
 
@@ -304,6 +306,103 @@ describe('PushStream', () => {
     await stream.stop();
     expect(stream.state.lines).toBe(1);
     expect(s.connections()).toBe(2);
+  });
+
+  it('a send that would leave more than 200 ms after its slot re-claims a slot instead of sending late; nothing awaited between the slot and the send', async () => {
+    // Fake clock: the first claimed slot is due now, but the process stalls 500 ms before it can
+    // send (timer lateness / event-loop stall); the second claim is sent on time.
+    let t = 1_000_000;
+    const claims: Date[] = [];
+    let stall = 500;
+    const store: SlotStore = {
+      claim: async () => {
+        // every slot is due 100 ms after the claim
+        const slotAt = new Date(t + 100);
+        claims.push(slotAt);
+        return { slotAt, delayMs: 100 };
+      },
+    };
+    const limiter = new RateLimiter({ store, product: 'wnba' });
+    const sends: number[] = [];
+    let release: (() => void) | null = null;
+    const fetchImpl = (async () => {
+      sends.push(t);
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(`${JSON.stringify(events[0])}\n`));
+          release = () => c.close();
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as unknown as typeof fetch;
+    const stream = new PushStream({
+      db: null,
+      log,
+      resolver: {
+        source: 'rehearsal',
+        resolvePush: () => ({ url: 'http://127.0.0.1:1/stream/en/clock/subscribe', headers: {} }),
+      },
+      league: 'wnba',
+      runId: null,
+      feed: 'push_clock',
+      limiter,
+      fetchImpl,
+      guard: { assertCall: async () => undefined } as unknown as QuotaGuard,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms + stall;
+        stall = 0;
+      },
+      onLine: () => undefined,
+      onStateChange: (st) => {
+        if (st.lastError) lastError = st.lastError;
+      },
+    });
+    let lastError: string | null = null;
+    void stream.start();
+    await until(() => stream.state.connections === 1 || lastError !== null);
+    expect(lastError).toBeNull();
+    expect(claims).toHaveLength(2);
+    expect(stream.state.slotReclaims).toBe(1);
+    expect(sends).toHaveLength(1);
+    // The request left on the second slot, not 500 ms after the first.
+    expect(sends[0]).toBe(claims[1]?.getTime());
+    (release as (() => void) | null)?.();
+    await stream.stop();
+  });
+
+  it('reconnectedAt is the database clock read once the reconnect answered (stubbed), passed to onReconnect', async () => {
+    const s = await pushServer((res, n) => {
+      res.write(`${JSON.stringify(events[0])}\n`);
+      if (n === 1) setTimeout(() => res.destroy(), 10);
+    });
+    server = s.server;
+    const dbClock = new Date('2026-10-19T12:36:08.501Z');
+    let dbReads = 0;
+    const seen: Date[] = [];
+    const stream = new PushStream({
+      db: null,
+      log,
+      resolver: resolverFor(s.url),
+      league: 'wnba',
+      runId: null,
+      feed: 'push_events',
+      backoffMinMs: 10,
+      backoffMaxMs: 20,
+      dbNow: async () => {
+        dbReads++;
+        return dbClock;
+      },
+      onLine: () => undefined,
+      onReconnect: (info) => {
+        seen.push(info.reconnectedAt);
+      },
+    });
+    void stream.start();
+    await until(() => seen.length === 1);
+    await stream.stop();
+    expect(seen[0]?.toISOString()).toBe(dbClock.toISOString());
+    expect(dbReads).toBe(1); // only the reconnect reads the clock, not the first connection
   });
 
   it('refuses a rate-limited source without limiter and guard, and a counted source without a database', () => {
