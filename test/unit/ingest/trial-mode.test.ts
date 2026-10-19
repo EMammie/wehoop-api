@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../../src/config.js';
 import { seasonFor } from '../../../src/ingest/season.js';
-import { assertSpeedAllowed, lagFromRecord } from '../../../src/ingest/trial-mode.js';
+import {
+  assertSpeedAllowed,
+  backfillNeeded,
+  lagFromRecord,
+} from '../../../src/ingest/trial-mode.js';
 
 const base = {
   DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:54322/postgres',
@@ -191,5 +195,36 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
       excluded: 1,
       notBroadcast: 0,
     });
+  });
+});
+
+describe('backfillNeeded (push reconnect -> REST pbp backfill?)', () => {
+  const now = new Date('2026-10-18T20:00:00Z');
+  const at = (secAgo: number) => new Date(now.getTime() - secAgo * 1000);
+  it('no pbp of this generation yet: backfill', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: null, now, downMs: 30_000, guardMs: 60_000 })).toBe(
+      true,
+    );
+  });
+  it('outage began AFTER the last pbp call: the document misses the outage -> backfill, even inside the 60 s guard', () => {
+    // pbp 45 s ago, stream down for 30 s (outage began 30 s ago): the document predates the outage
+    expect(backfillNeeded({ lastPbpCalledAt: at(45), now, downMs: 30_000, guardMs: 60_000 })).toBe(
+      true,
+    );
+  });
+  it('a pbp call made after the outage began covers it: skip', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: at(10), now, downMs: 30_000, guardMs: 60_000 })).toBe(
+      false,
+    );
+    expect(backfillNeeded({ lastPbpCalledAt: at(30), now, downMs: 30_000, guardMs: 60_000 })).toBe(
+      false,
+    ); // boundary: at the outage start
+  });
+  it('unknown or zero downMs falls back to the guard window', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: at(45), now, downMs: 0, guardMs: 60_000 })).toBe(
+      false,
+    );
+    expect(backfillNeeded({ lastPbpCalledAt: at(75), now, downMs: 0, guardMs: 60_000 })).toBe(true);
+    expect(backfillNeeded({ lastPbpCalledAt: at(45), now, downMs: 0, guardMs: 200 })).toBe(true); // 300x rehearsal guard
   });
 });
