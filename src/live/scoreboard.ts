@@ -94,6 +94,8 @@ export class ScoreboardSender {
   private timer: NodeJS.Timeout | null = null;
   private since: Date;
   private ticking: Promise<number> | null = null;
+  /** Set by start(); until then tick() is a no-op (a worker that never enabled the sender publishes nothing). */
+  private enabled = false;
   /** Messages published (one per league per tick with changes). */
   sent = 0;
   /** Game deltas published. */
@@ -112,8 +114,9 @@ export class ScoreboardSender {
     this.since = (deps.now ?? (() => new Date()))();
   }
 
-  /** Publish what changed since the last tick; returns the number of deltas sent. Concurrent calls coalesce. */
+  /** Publish what changed since the last tick; returns the number of deltas sent. Concurrent calls coalesce; a no-op before start(). */
   tick(): Promise<number> {
+    if (!this.enabled) return Promise.resolve(0);
     if (this.ticking) return this.ticking;
     this.ticking = this.tickOnce().finally(() => {
       this.ticking = null;
@@ -162,11 +165,13 @@ export class ScoreboardSender {
 
   start(): void {
     this.stop();
+    this.enabled = true;
     this.timer = setInterval(() => {
       void this.tick().catch((err) => this.deps.log.error({ err }, 'scoreboard tick failed'));
     }, this.deps.intervalMs ?? 5_000);
   }
 
+  /** Stops the interval; the sender stays enabled so a final tick() at shutdown still flushes. */
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
