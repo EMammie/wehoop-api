@@ -141,7 +141,19 @@ describe('push mode against the fake provider with a mid-game stream drop', () =
       const clock = push.streams.find((s) => s.feed === 'push_clock');
       expect(events?.reconnects).toBeGreaterThanOrEqual(1);
       expect(clock?.connections).toBeGreaterThanOrEqual(1);
-      expect(push.backfills).toBeGreaterThanOrEqual(1);
+      // Every events-stream reconnect is reconciled: by a backfill, or by skipping it because a
+      // REST pbp of this generation was fetched after the outage began (backfillNeeded). At 300x the
+      // 5-minute REST cadence is 1 s, so an outage of a few seconds is usually covered by REST and
+      // the skip is the correct outcome; the backfill sub-run path itself is proven in
+      // push-ingest.test.ts and the criterion in trial-mode.test.ts.
+      expect(push.backfills + push.backfillsSkipped).toBe(events?.reconnects);
+      if (push.backfillsSkipped > 0) {
+        const [cover] = await db<{ n: number }[]>`
+          select count(*)::int as n from ingest.provider_calls c
+          where c.feed = 'pbp' and c.status = 200
+            and (c.run_id = ${out.runId} or c.run_id in (select id from ingest.ingestion_runs where parent_run_id = ${out.runId}))`;
+        expect(cover?.n).toBeGreaterThanOrEqual(2);
+      }
       expect(push.ingest.events).toBeGreaterThan(50);
       expect(push.ingest.clocks).toBeGreaterThan(5);
       expect(push.ingest.otherGame).toBe(0);
@@ -164,7 +176,7 @@ describe('push mode against the fake provider with a mid-game stream drop', () =
       expect(runs.filter((r) => r.kind === 'push_stream')).toEqual([
         { kind: 'push_stream', status: 'ok', parentRunId: String(out.runId) },
       ]);
-      expect(runs.filter((r) => r.kind === 'backfill').length).toBeGreaterThanOrEqual(1);
+      expect(runs.filter((r) => r.kind === 'backfill').length).toBe(push.backfills);
       expect(runs.every((r) => r.status === 'ok')).toBe(true);
       const calls = await db<{ feed: string; counted: boolean; source: string; n: number }[]>`
         select feed, quota_counted as counted, source::text as source, count(*)::int as n
