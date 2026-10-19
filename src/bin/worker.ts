@@ -414,7 +414,7 @@ async function main() {
       if (gameIdKnown) await pulse.sendOnce(gameIdKnown);
       publisher.stop();
       scoreboard.stop();
-      await scoreboard.tick().catch(() => undefined);
+      if (scheduler || args.scores) await scoreboard.tick().catch(() => undefined);
       log.info(
         {
           runId: outcome.runId,
@@ -523,7 +523,7 @@ async function main() {
     if (watcher.gameId) await pulse.sendOnce(watcher.gameId);
     publisher.stop();
     scoreboard.stop();
-    await scoreboard.tick().catch(() => undefined);
+    if (scheduler || args.scores) await scoreboard.tick().catch(() => undefined);
     await endRun(db, run.id, stoppedBy ? 'aborted' : 'ok', stoppedBy ?? undefined);
     log.info(
       {

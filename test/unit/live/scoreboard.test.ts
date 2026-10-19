@@ -47,6 +47,11 @@ describe('ScoreboardSender (league:{code}:scores)', () => {
         },
       },
     });
+    // Before start() the sender is disabled: a worker that never enabled it publishes nothing.
+    expect(await sender.tick()).toBe(0);
+    expect(asked).toHaveLength(0);
+    sender.start();
+    sender.stop(); // stop() ends the interval but keeps the sender enabled for a final flush
     expect(await sender.tick()).toBe(3);
     expect(asked[0]?.toISOString()).toBe(T0.toISOString()); // never history before the sender existed
     expect(transport.published).toHaveLength(2);
@@ -89,6 +94,8 @@ describe('ScoreboardSender (league:{code}:scores)', () => {
       now: () => T0,
       source: { changedSince: async () => [game(G1, 'wnba', new Date(T0.getTime() + 1), 1)] },
     });
+    sender.start();
+    sender.stop();
     expect(await sender.tick()).toBe(0);
     expect(sender.failed).toBe(1);
     transport.failIf = null;

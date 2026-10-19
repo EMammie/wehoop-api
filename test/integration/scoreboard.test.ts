@@ -41,6 +41,8 @@ describe('DbScoreboardSource + ScoreboardSender', () => {
       log: silentLog,
       source: new DbScoreboardSource(db),
     });
+    sender.start();
+    sender.stop(); // enabled, interval off: ticks are driven by the test
     // Two writes inside one interval coalesce into one delta carrying the latest state.
     await apply(deps, gameId, nd, observation(run, nd, T0));
     const sum = summaryQ1();
