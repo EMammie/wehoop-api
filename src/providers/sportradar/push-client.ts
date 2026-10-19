@@ -95,8 +95,17 @@ export interface PushStreamDeps {
   fetchImpl?: typeof fetch;
   /** Called for every parsed line with its receipt time (push `observedAt`). Errors are logged, never fatal. */
   onLine: (line: PushLine, receivedAt: Date) => Promise<void> | void;
-  /** Called after every reconnection (connection 2, 3, ...); `downMs` is the outage length. */
-  onReconnect?: (info: { connections: number; downMs: number }) => Promise<void> | void;
+  /**
+   * Called after every reconnection (connection 2, 3, ...); `downMs` is the outage length and
+   * `reconnectedAt` the moment the new connection answered, on the rate limiter's clock (the
+   * database clock for rate-limited sources: the slot plus the local time from slot to headers), so
+   * it compares with `provider_calls.called_at`.
+   */
+  onReconnect?: (info: {
+    connections: number;
+    downMs: number;
+    reconnectedAt: Date;
+  }) => Promise<void> | void;
   onStateChange?: (state: PushStreamState) => void;
   watchdogMs?: number;
   backoffMinMs?: number;
@@ -267,6 +276,7 @@ export class PushStream {
         if (limited && this.deps.limiter) slotAt = new Date(await this.deps.limiter.waitForSlot());
         if (this.stopped) break;
         requestedAt = slotAt;
+        const slotGrantedAt = this.now();
         // Connection phase is covered by the same watchdog: a host that accepts and never answers trips it.
         this.resetWatchdog(controller);
         const res = await fetchImpl(url, {
@@ -274,6 +284,8 @@ export class PushStream {
           signal: controller.signal,
         });
         status = res.status;
+        // Reconnect moment on the slot's clock: slot + (local headers time - local slot time).
+        const reconnectedAt = new Date(slotAt.getTime() + (this.now() - slotGrantedAt));
         callId = await this.logCall(
           url,
           status,
@@ -305,7 +317,7 @@ export class PushStream {
           const hook = this.deps.onReconnect;
           if (hook) {
             const p = Promise.resolve()
-              .then(() => hook({ connections: this.state.connections, downMs }))
+              .then(() => hook({ connections: this.state.connections, downMs, reconnectedAt }))
               .catch((err) => log.error({ err, feed }, 'push reconnect hook (backfill) failed'));
             this.hooks.push(p);
             void p.finally(() => {

@@ -199,32 +199,18 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
 });
 
 describe('backfillNeeded (push reconnect -> REST pbp backfill?)', () => {
-  const now = new Date('2026-10-18T20:00:00Z');
-  const at = (secAgo: number) => new Date(now.getTime() - secAgo * 1000);
+  const reconnectedAt = new Date('2026-10-18T20:00:00Z');
+  const at = (secBefore: number) => new Date(reconnectedAt.getTime() - secBefore * 1000);
   it('no pbp of this generation yet: backfill', () => {
-    expect(backfillNeeded({ lastPbpCalledAt: null, now, downMs: 30_000, guardMs: 60_000 })).toBe(
-      true,
-    );
+    expect(backfillNeeded({ lastPbpCalledAt: null, reconnectedAt })).toBe(true);
   });
-  it('outage began AFTER the last pbp call: the document misses the outage -> backfill, even inside the 60 s guard', () => {
-    // pbp 45 s ago, stream down for 30 s (outage began 30 s ago): the document predates the outage
-    expect(backfillNeeded({ lastPbpCalledAt: at(45), now, downMs: 30_000, guardMs: 60_000 })).toBe(
-      true,
-    );
+  it('a pbp requested before the reconnect misses the tail of the outage: backfill, even one fetched during the outage', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: at(45), reconnectedAt })).toBe(true); // 45 s before a 30 s outage ended
+    expect(backfillNeeded({ lastPbpCalledAt: at(4.8), reconnectedAt })).toBe(true); // the validator's gap: 4.8 s before reconnect
+    expect(backfillNeeded({ lastPbpCalledAt: at(0.001), reconnectedAt })).toBe(true);
   });
-  it('a pbp call made after the outage began covers it: skip', () => {
-    expect(backfillNeeded({ lastPbpCalledAt: at(10), now, downMs: 30_000, guardMs: 60_000 })).toBe(
-      false,
-    );
-    expect(backfillNeeded({ lastPbpCalledAt: at(30), now, downMs: 30_000, guardMs: 60_000 })).toBe(
-      false,
-    ); // boundary: at the outage start
-  });
-  it('unknown or zero downMs falls back to the guard window', () => {
-    expect(backfillNeeded({ lastPbpCalledAt: at(45), now, downMs: 0, guardMs: 60_000 })).toBe(
-      false,
-    );
-    expect(backfillNeeded({ lastPbpCalledAt: at(75), now, downMs: 0, guardMs: 60_000 })).toBe(true);
-    expect(backfillNeeded({ lastPbpCalledAt: at(45), now, downMs: 0, guardMs: 200 })).toBe(true); // 300x rehearsal guard
+  it('a pbp requested at or after the reconnect covers everything the stream will not replay: skip', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: reconnectedAt, reconnectedAt })).toBe(false);
+    expect(backfillNeeded({ lastPbpCalledAt: at(-2), reconnectedAt })).toBe(false);
   });
 });
