@@ -51,6 +51,16 @@ are applied with `supabase db push` against the linked project, never by the app
 
 ## Runbook (NOT RUN; needs a Fly account)
 
+**Prerequisites before the first `fly deploy`** (all after the M3 polling validation passes):
+1. The `RateLimiter.waitForSlot()` concurrency defect is fixed (see "Rate limiting and push" below):
+   the production scheduler runs several watches of one product in one process, which is exactly the
+   case that can send two requests on one slot. Fix: claim the ledger slot first and sleep to it (drop
+   the local floor when a store is present), with a unit test of two concurrent callers whose ledger
+   order differs from their call order. Review round 4 confirmed the defect from the code (2026-10-19).
+2. `ingest.product_quotas` verified for every product the deployment has a key for (the guard refuses
+   every call otherwise).
+3. The `ANTHROPIC_API_KEY` repository secret for the hosted review row.
+
 ```
 fly auth login
 fly launch --no-deploy --copy-config --name wehoop-api --region ewr   # reads fly.toml; say no to Postgres/Redis

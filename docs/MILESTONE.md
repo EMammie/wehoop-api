@@ -8,6 +8,8 @@ Acceptance (from `docs/PLAN.md` §7): 30 s stream drop → reconnect + backfill,
 
 Constraints this milestone (owner decision 2026-10-18): the M3 commit `020ea17` (`m3-run-2026-10-19`) is the fixed, tested build for the WNBA Finals live run on 2026-10-19; M4 work must not change the behaviour of the polling trial path it uses (`pnpm trial:live plan|watch|lag|status|holds`, `preflight`, cadence, rate slots, quota guard). M4 tests run only against the dev stack (`.env`, db 54322): never `.env.trial`, never the trial stack (55321/55322, `pnpm trial:db`), never a `*:live` script. Deploying to Fly and switching ingestion to push wait until the polling-based M3 validation is complete; until then the deploy rows are built, documented and rehearsed locally (`docs/DEPLOY.md`) and recorded as NOT RUN with the exact commands.
 
+Follow-ups queued for after the M3 run (2026-10-19): fix the `RateLimiter.waitForSlot()` concurrency defect in the frozen `rate-limiter.ts` (deploy prerequisite, `docs/DEPLOY.md`); review round 4 nits: the push re-claim comment, force a backfill when the database clock read fails, a test for the send-late-after-max-re-claims branch.
+
 ## M3 (open) — NCAAWB live (trial key, Nov) · branch `m3-ncaawb-live` · draft PR #5
 
 Still needed: a clean live rerun on the rev 4.9 build (WNBA Finals G4, 2026-10-24, `lean-full`, owner decision 2026-10-22 below; G3 on 2026-10-21 drew 1 × 429 and a status regression), an NCAAWB `extended` game (the stored season schedule's first regular-season game is 2026-11-01; no exhibitions are listed), and the owner's decision whether the WNBA `full` run stands in for the NCAAWB `full` row. When the rows pass: fresh review, merge PR #5, `pnpm release:tag --milestone 3 --push`, devlog 03.
