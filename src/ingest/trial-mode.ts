@@ -319,8 +319,29 @@ export function planWatch(
   };
 }
 
-/** A stream reconnect needs no backfill when a REST pbp document was applied this recently (live time). */
+/**
+ * Guard window for the backfill decision when the stream cannot say how long it was down
+ * (`downMs` 0 or unknown): a REST pbp document fetched this recently (live time, scaled by
+ * --speed) is taken to cover the gap.
+ */
 export const BACKFILL_SKIP_MS = 60_000;
+
+/**
+ * Does a reconnect need a backfill? A pbp document covers everything up to its request time and
+ * the stream everything after the reconnect, so the backfill is skipped only when a 200 pbp call
+ * of this generation was made AFTER the outage began (`now - downMs`). With an unknown or zero
+ * `downMs` the guard window applies instead. Pure, unit-tested.
+ */
+export function backfillNeeded(args: {
+  lastPbpCalledAt: Date | null;
+  now: Date;
+  downMs: number;
+  guardMs: number;
+}): boolean {
+  if (args.lastPbpCalledAt === null) return true;
+  const windowMs = args.downMs > 0 ? args.downMs : args.guardMs;
+  return args.lastPbpCalledAt.getTime() < args.now.getTime() - windowMs;
+}
 
 /** Push-mode knobs (tests compress the watchdog and the backoff; production uses the defaults). */
 export interface PushWatchOptions {
@@ -500,7 +521,7 @@ export async function runTrialWatch(
         reservationId: reservation.id,
         apply: { db, log, ...(deps.fault ? { fault: deps.fault } : {}) },
         options: pushOpts,
-        // Like the cadence, the "recent pbp" window is game time: 60 s live, 60 s / speed in a rehearsal.
+        // Like the cadence, the guard window is game time: 60 s live, 60 s / speed in a rehearsal.
         backfillSkipMs: Math.max(1, Math.round(BACKFILL_SKIP_MS / speed)),
         ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
       });
@@ -570,7 +591,7 @@ interface OpenPushArgs {
   reservationId: number;
   apply: Parameters<typeof runBackfill>[0]['apply'];
   options: PushWatchOptions;
-  /** A reconnect skips its backfill when a pbp document was applied within this window (60 s; scaled by --speed). */
+  /** Guard window for `backfillNeeded` when the outage length is unknown (60 s; scaled by --speed). */
   backfillSkipMs: number;
   fetchImpl?: typeof fetch;
 }
@@ -602,19 +623,25 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
   let backfills = 0;
   let backfillsSkipped = 0;
   const backfill = async (info: { connections: number; downMs: number }) => {
-    // A pbp document applied in the last 60 s (the REST reconciliation or an earlier backfill of
-    // this generation) already covers the outage: do not spend another call.
-    const [recent] = await db<{ n: number }[]>`
-      select count(*)::int as n from ingest.provider_calls c
+    // A pbp document of this generation (REST reconciliation or an earlier backfill) fetched after
+    // the outage began already covers it: do not spend another call. Decided on the database clock.
+    const [last] = await db<{ lastPbpCalledAt: Date | null; now: Date }[]>`
+      select max(c.called_at) as "lastPbpCalledAt", now() as now
+      from ingest.provider_calls c
       where c.feed = 'pbp' and c.status = 200
-        and c.called_at > now() - make_interval(secs => ${a.backfillSkipMs / 1000}::float8)
         and (c.run_id = ${a.run.id}
              or c.run_id in (select id from ingest.ingestion_runs where parent_run_id = ${a.run.id}))`;
-    if ((recent?.n ?? 0) > 0) {
+    const needed = backfillNeeded({
+      lastPbpCalledAt: last?.lastPbpCalledAt ?? null,
+      now: last?.now ?? new Date(),
+      downMs: info.downMs,
+      guardMs: a.backfillSkipMs,
+    });
+    if (!needed) {
       backfillsSkipped++;
       log.info(
-        { ...info, gameId: a.game.id },
-        'backfill skipped: a pbp document was applied in the last 60 s',
+        { ...info, gameId: a.game.id, lastPbpCalledAt: last?.lastPbpCalledAt ?? null },
+        'backfill skipped: a pbp document of this generation was fetched after the outage began',
       );
       return;
     }
