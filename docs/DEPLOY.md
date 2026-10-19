@@ -164,20 +164,18 @@ sees fewer intermediate states but adds clock-carried score steps), `play_events
 newer push observations, by design), `provider_calls` (push mode makes far fewer REST calls plus
 one row per stream connection).
 
-Observed on 2026-10-19 01:05 (dev stack after `pnpm supabase db reset`, HEAD after the round-2
-fixes, `--speed 300`, drop after 12 s for 3 s): both streams disconnected at 01:05:23/01:05:27,
-reconnected at 01:05:31 / 01:05:32, `backfills: 0, backfillsSkipped: 1` with the log line "backfill
-skipped: a pbp document of this generation was fetched after the outage began" (at 300x the 5-minute
-REST pbp cadence is ~1.2 s, so a REST document always lands inside an outage of a few seconds and the
-reconnect needs no second call; at 1x a 30 s drop inside a 5-minute cadence backfills unless a
-reconciliation happened to run during the outage), watch `closed` 93-85 with 408 live + 2 deleted
-play_events, 664 changes all published, invariants 59/59, `pnpm outbox lag --since 1h`: n=664 p50
-31 ms p95 206 ms max 1225 ms; fake provider: 1 x 429 (push reconnect vs REST arrival inside the
-limiter's 200 ms margin; retried through the backoff), 0 x 401, 4 push connections, 2 drops;
-`provider_calls`: pbp 8, summary 8, boxscore 1, push_events 2, push_clock 3. The previous rerun
-(before the criterion change, same speed and drop) showed `backfills: 1`; the backfill sub-run path
-is proven by `test/integration/push-ingest.test.ts` and the skip criterion by
-`test/unit/ingest/trial-mode.test.ts` (`backfillNeeded`).
+Observed on 2026-10-19 01:32 (dev stack after `pnpm supabase db reset`, HEAD `cc28555`, `--speed 300`,
+drop after 12 s for 3 s): both streams disconnected at 01:32:30, events stream reconnected at 01:32:33.601
+and ran `backfill started` 01:32:33.605 / `backfill finished` 01:32:36.099 (`backfills: 1,
+backfillsSkipped: 0`: no pbp of the generation had been requested at or after the reconnect at decision
+time), clock stream reconnected at 01:32:37, watch `closed` 93-85 with 408 live + 2 deleted
+play_events, 648 changes all published, invariants 59/59, `pnpm outbox lag --since 1h`: n=648 p50
+23 ms p95 227 ms max 234 ms; fake provider: 0 x 429, 0 x 401, 4 push connections, 3 drops;
+`provider_calls`: pbp 8 (one of them the backfill's), summary 8, boxscore 1, push_events 2,
+push_clock 3 (one null status: the attempt refused inside the drop window). A reconnect is reconciled
+either by this backfill or, when a REST pbp document of this generation was requested at or after the
+reconnect, by that document (logged "backfill skipped: ..."); `test/integration/push-flow.test.ts`
+asserts `backfills + backfillsSkipped = reconnects`.
 
 ## Alerts (`GET /health`)
 
@@ -192,7 +190,7 @@ case Fly should restart the API on. `pnpm health check [--url]` exits 1 on 503, 
 | `outbox_dead` | rows with `dead_at` (10 failed attempts) | > 0 | fix the transport, then `pnpm outbox requeue --channel game:<id>` or `--all` |
 | `watch_without_provider_calls` | a running `watch_game`/`replay` run with a provider-backed source but no `provider_calls` row for | > 5 min | quota refused (`/v1/admin/quota`), key invalid (401 in logs), provider down |
 | `consecutive_regressions` | the newest 3 `stale_observations` rows of one game within the last 24 h are all `run_regresses_state` (plan §4 rule 2) | 3 | a replay/restart keeps presenting older state; escape is `pnpm game rebuild` (operator action) |
-| `push_stream_disconnected` | a `push_stream` sub-run's stream (meta mirrored by the worker) has `disconnectedSince` older than | > 60 s | provider stream outage; REST reconciliation keeps the game moving every 5 min; backfill runs on reconnect (skipped only when a pbp document of this generation was fetched after the outage began; a 60 s guard, scaled by `--speed`, applies when the outage length is unknown). A stream whose connection attempts exhaust the watch's allowance of 20 (`PUSH_CONNECTION_ALLOWANCE`, shared by both streams) stops for good with `lastError: connection allowance exhausted`; the watch continues on REST alone until it closes |
+| `push_stream_disconnected` | a `push_stream` sub-run's stream (meta mirrored by the worker) has `disconnectedSince` older than | > 60 s | provider stream outage; REST reconciliation keeps the game moving every 5 min; backfill runs on reconnect (skipped only when a REST pbp document of this generation was requested at or after the reconnect: the document covers everything up to its request, the stream everything after the reconnect). A stream whose connection attempts exhaust the watch's allowance of 20 (`PUSH_CONNECTION_ALLOWANCE`, shared by both streams) stops for good with `lastError: connection allowance exhausted`; the watch continues on REST alone until it closes |
 
 Other operator commands: `pnpm outbox lag [--since 24h]` (p50/p95/max of `published_at -
 created_at`), `pnpm retention run --closed-before 30d [--dry-run]` (the only code that deletes
