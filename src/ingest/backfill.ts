@@ -36,6 +36,8 @@ export interface BackfillOutcome {
   runId: number;
   watchId: number | null;
   outcome: ProcessOutcome | null;
+  /** The pbp document's request time (`provider_calls.called_at`: the slot on the database clock). */
+  pbpRequestedAt: Date;
 }
 
 export async function runBackfill(
@@ -84,7 +86,7 @@ export async function runBackfill(
       },
       'backfill finished',
     );
-    return { runId: run.id, watchId: run.watchId, outcome };
+    return { runId: run.id, watchId: run.watchId, outcome, pbpRequestedAt: pbp.requestedAt };
   } catch (err) {
     await endRun(deps.db, run.id, 'error', (err as Error).message);
     throw err;
