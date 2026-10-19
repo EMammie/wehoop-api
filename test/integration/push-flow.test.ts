@@ -141,28 +141,33 @@ describe('push mode against the fake provider with a mid-game stream drop', () =
       const clock = push.streams.find((s) => s.feed === 'push_clock');
       expect(events?.reconnects).toBeGreaterThanOrEqual(1);
       expect(clock?.connections).toBeGreaterThanOrEqual(1);
-      // Every events-stream reconnect is reconciled: by a backfill, or by skipping it because a
-      // REST pbp of this generation was fetched after the outage began (backfillNeeded). At 300x the
-      // 5-minute REST cadence is 1 s, so an outage of a few seconds is usually covered by REST and
-      // the skip is the correct outcome; the backfill sub-run path itself is proven in
-      // push-ingest.test.ts and the criterion in trial-mode.test.ts.
+      // Every events-stream reconnect is reconciled: by a backfill sub-run, or by skipping it because
+      // an APPLIED REST pbp of this generation was requested at or after the reconnect
+      // (backfillNeeded). The skip branch is checked against the ledger: a 200 pbp call of the
+      // generation whose called_at is at or after the push_events reconnect call.
       expect(push.backfills + push.backfillsSkipped).toBe(events?.reconnects);
       if (push.backfillsSkipped > 0) {
         const [cover] = await db<{ n: number }[]>`
-          select count(*)::int as n from ingest.provider_calls c
-          where c.feed = 'pbp' and c.status = 200
+          with reconnect as (
+            select min(called_at) as at from ingest.provider_calls
+            where feed = 'push_events' and status = 200
+              and run_id in (select id from ingest.ingestion_runs where parent_run_id = ${out.runId})
+              and called_at > (select min(called_at) from ingest.provider_calls
+                               where feed = 'push_events' and status = 200
+                                 and run_id in (select id from ingest.ingestion_runs where parent_run_id = ${out.runId})))
+          select count(*)::int as n from ingest.provider_calls c, reconnect r
+          where c.feed = 'pbp' and c.status = 200 and c.called_at >= r.at
             and (c.run_id = ${out.runId} or c.run_id in (select id from ingest.ingestion_runs where parent_run_id = ${out.runId}))`;
-        expect(cover?.n).toBeGreaterThanOrEqual(2);
+        expect(cover?.n).toBeGreaterThanOrEqual(1);
       }
       expect(push.ingest.events).toBeGreaterThan(50);
       expect(push.ingest.clocks).toBeGreaterThan(5);
       expect(push.ingest.otherGame).toBe(0);
       expect(events?.skipped).toBe(0);
-      // The fake server shares this process's event loop with the push bursts (~100 applyChanges
-      // after a backfill), so timer lateness can eat the limiter's 200 ms arrival margin once; a
-      // 429 is retried (REST at its next due time, push through the backoff) and never breaks the
-      // flow. The ledger spacing (called_at >= 1 s per product) is asserted below by construction.
-      expect(server.stats.rejected429).toBeLessThanOrEqual(1);
+      // Push sends leave on their ledger slot or re-claim (validator M4 §2e); the cadence loop and
+      // each backfill have their own single-caller limiter on the shared ledger, so no caller can
+      // send on another's slot: zero 429.
+      expect(server.stats.rejected429).toBe(0);
       expect(server.stats.rejected401).toBe(0);
       expect(server.stats.pushDrops).toBeGreaterThanOrEqual(1);
       // Budget: REST profile plus the stream connection allowance, released at the end.

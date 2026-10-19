@@ -11,13 +11,14 @@ import {
   type PushStreamDeps,
   type PushStreamState,
 } from '../providers/sportradar/push-client.js';
-import { rateLimiterFor } from '../providers/sportradar/rate-limiter.js';
+import { PgSlotStore, RateLimiter, rateLimiterFor } from '../providers/sportradar/rate-limiter.js';
 import { createResolver } from '../providers/sportradar/resolver.js';
 import {
   DailyScheduleDocumentSchema,
   SeasonScheduleDocumentSchema,
 } from '../providers/sportradar/schemas/schedule.js';
 import type {
+  Feed,
   PushFeed,
   PushUrlResolver,
   ResolverSource,
@@ -34,13 +35,55 @@ import {
   type TrialProfile,
 } from './cadence.js';
 import type { FaultInjector } from './fault.js';
-import { cadenceLoop, GameWatcher, HttpDocumentSource } from './game-watcher.js';
+import {
+  cadenceLoop,
+  GameWatcher,
+  HttpDocumentSource,
+  type ProcessOutcome,
+  type WatcherDeps,
+} from './game-watcher.js';
 import { PushIngest, type PushIngestStats } from './push-ingest.js';
 import { needsRateLimit, type QuotaGuard, type Reservation } from './quota-guard.js';
 import { ReferenceIngester } from './reference.js';
 import { endRun, type RunHandle, type RunSource, setRunMeta, startRun } from './runs.js';
 import { seasonFor } from './season.js';
 import type { ObservationSource } from './types.js';
+
+/**
+ * Push mode: the newest pbp document of this generation that was APPLIED (outcome `applied`),
+ * by its request time (database clock). A reconnect's backfill is skipped only when this is at or
+ * after the reconnect; a fetched pbp whose document failed or was stale covers nothing.
+ */
+interface AppliedPbp {
+  lastRequestedAt: Date | null;
+}
+
+function noteAppliedPbp(tracker: AppliedPbp, requestedAt: Date): void {
+  if (tracker.lastRequestedAt === null || requestedAt > tracker.lastRequestedAt)
+    tracker.lastRequestedAt = requestedAt;
+}
+
+/** The cadence watcher in push mode: records every applied pbp document for the backfill decision. */
+class PbpTrackingWatcher extends GameWatcher {
+  constructor(
+    deps: WatcherDeps,
+    private readonly tracker: AppliedPbp,
+  ) {
+    super(deps);
+  }
+
+  override async process(
+    feed: Feed,
+    body: unknown,
+    observedAt: Date,
+    source: ObservationSource,
+  ): Promise<ProcessOutcome | null> {
+    const out = await super.process(feed, body, observedAt, source);
+    if (feed === 'pbp' && out?.result.outcome === 'applied')
+      noteAppliedPbp(this.tracker, observedAt);
+    return out;
+  }
+}
 
 /**
  * Trial mode (plan §4): no automatic discovery. The operator plans a date (one
@@ -482,7 +525,7 @@ export async function runTrialWatch(
   const docs = new HttpDocumentSource(http, observationSource, null, {
     gameId: opts.game.providerGameId,
   });
-  const watcher = new GameWatcher({
+  const watcherDeps: WatcherDeps = {
     db,
     log,
     adapter,
@@ -490,7 +533,13 @@ export async function runTrialWatch(
     apply: { db, log, ...(deps.fault ? { fault: deps.fault } : {}) },
     pulse: deps.pulse,
     ...(deps.onGameKnown ? { onGameKnown: deps.onGameKnown } : {}),
-  });
+  };
+  const appliedPbp: AppliedPbp = { lastRequestedAt: null };
+  // Push mode only: the tracking subclass; a polling watch keeps the plain GameWatcher.
+  const watcher =
+    pushOpts !== null
+      ? new PbpTrackingWatcher(watcherDeps, appliedPbp)
+      : new GameWatcher(watcherDeps);
   await watcher.attach(opts.game.id);
   let status: string | null = null;
   let pushOutcome: PushWatchOutcome | undefined;
@@ -499,6 +548,7 @@ export async function runTrialWatch(
     // Inside the try: a failure to open the streams must still end the run and release the budget.
     if (pushOpts !== null && hasPush(resolver)) {
       push = await openPushStreams({
+        appliedPbp,
         db,
         log,
         adapter,
@@ -567,6 +617,8 @@ export async function runTrialWatch(
 }
 
 interface OpenPushArgs {
+  /** Newest applied pbp of this generation (cadence watcher + backfills), for the backfill decision. */
+  appliedPbp: AppliedPbp;
   db: Db;
   log: Logger;
   adapter: LeagueAdapter;
@@ -609,31 +661,27 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
   let backfills = 0;
   let backfillsSkipped = 0;
   const backfill = async (info: { connections: number; downMs: number; reconnectedAt: Date }) => {
-    // Only a pbp document of this generation (REST reconciliation or an earlier backfill) requested
-    // at or after the reconnect covers the gap; one fetched during the outage still leaves the
-    // events between its request and the reconnect missing. Compared on the database clock
-    // (`called_at` is the limiter slot; `reconnectedAt` is slot-based too). Only the events stream
+    // Only an APPLIED pbp document of this generation (REST reconciliation or an earlier backfill)
+    // requested at or after the reconnect covers the gap; one requested during the outage still
+    // leaves the events between its request and the reconnect missing, and a fetched document that
+    // failed or was stale covers nothing. Both times are on the database clock (`requestedAt` is the
+    // limiter slot, `reconnectedAt` the database now() at the reconnect). Only the events stream
     // carries this hook, so two streams reconnecting together cannot trigger two backfills.
-    const [last] = await db<{ lastPbpCalledAt: Date | null }[]>`
-      select max(c.called_at) as "lastPbpCalledAt"
-      from ingest.provider_calls c
-      where c.feed = 'pbp' and c.status = 200
-        and (c.run_id = ${a.run.id}
-             or c.run_id in (select id from ingest.ingestion_runs where parent_run_id = ${a.run.id}))`;
+    const lastApplied = a.appliedPbp.lastRequestedAt;
     const needed = backfillNeeded({
-      lastPbpCalledAt: last?.lastPbpCalledAt ?? null,
+      lastPbpCalledAt: lastApplied,
       reconnectedAt: info.reconnectedAt,
     });
     if (!needed) {
       backfillsSkipped++;
       log.info(
-        { ...info, gameId: a.game.id, lastPbpCalledAt: last?.lastPbpCalledAt ?? null },
-        'backfill skipped: a pbp document of this generation was fetched at or after the reconnect',
+        { ...info, gameId: a.game.id, lastAppliedPbpRequestedAt: lastApplied },
+        'backfill skipped: an applied pbp document of this generation was requested at or after the reconnect',
       );
       return;
     }
     backfills++;
-    await runBackfill(
+    const done = await runBackfill(
       {
         db,
         log,
@@ -652,7 +700,13 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
               product: adapter.product,
               runId: r.id,
               resolver: a.resolver,
-              limiter: rateLimiterFor(adapter.product, needsRateLimit(a.source) ? { db } : {}),
+              // A dedicated single-caller limiter on the same ledger: sharing the registry limiter
+              // with the concurrently running cadence loop lets its in-process floor order the two
+              // callers differently from the ledger, so one sends on the other's slot (a 429 with
+              // correctly spaced recorded slots; validator M4 §2e, rate-limiter.ts is frozen).
+              limiter: needsRateLimit(a.source)
+                ? new RateLimiter({ store: new PgSlotStore(db), product: adapter.product })
+                : rateLimiterFor(adapter.product),
               guard: a.guard,
               reservationId: a.reservationId,
               ...(a.fetchImpl ? { fetchImpl: a.fetchImpl } : {}),
@@ -665,6 +719,8 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
       'stream reconnect',
       info,
     );
+    if (done.outcome?.result.outcome === 'applied')
+      noteAppliedPbp(a.appliedPbp, done.pbpRequestedAt);
   };
   const feeds: PushFeed[] = [
     'push_events',
