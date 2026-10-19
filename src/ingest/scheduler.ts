@@ -356,24 +356,26 @@ export class Scheduler {
 
   private async defaultWatch(adapter: LeagueAdapter, game: GameRow, push: boolean): Promise<void> {
     const { db, log, config, guard, pulse } = this.deps;
+    await runTrialWatch(
+      {
+        db,
+        log,
+        config,
+        adapter,
+        guard,
+        pulse,
+        ...(this.deps.fault ? { fault: this.deps.fault } : {}),
+        isStopped: this.deps.isStopped,
+        ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+      },
+      { game, push, untilClosed: true, note: 'scheduler' },
+    );
+    // The closing pulse (plan §4: once when the game closes), only after a watch that ran; a pulse
+    // failure is harmless and must not replace the watch outcome.
     try {
-      await runTrialWatch(
-        {
-          db,
-          log,
-          config,
-          adapter,
-          guard,
-          pulse,
-          ...(this.deps.fault ? { fault: this.deps.fault } : {}),
-          isStopped: this.deps.isStopped,
-          ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
-        },
-        { game, push, untilClosed: true, note: 'scheduler' },
-      );
-    } finally {
-      // The closing pulse (plan §4: once when the game closes); the per-game timer ended with the watch.
       await pulse?.sendOnce(game.id);
+    } catch (err) {
+      log.warn({ err, gameId: game.id }, 'closing pulse failed (harmless)');
     }
   }
 }
