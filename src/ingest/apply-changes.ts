@@ -862,7 +862,11 @@ export async function applyChanges(
                  events_updated = events_updated + ${counts.updated},
                  events_deleted = events_deleted + ${counts.deleted}
                where id = ${observation.runId}`;
-      await tx.notify('outbox', gameId);
+      // pg_notify through `tx`, never `tx.notify()`: postgres.js binds `notify` to the pool, so
+      // `tx.notify` runs on another connection immediately, the publisher wakes before this
+      // batch commits, finds nothing, and the rows wait for the 30 s safety drain (live run
+      // 2026-10-19: 429 of 1,306 changes published ~30 s late).
+      await tx`select pg_notify('outbox', ${gameId})`;
       // Crash point (b): every write of this batch is issued; the transaction has not committed.
       deps.fault?.maybeFire('before_commit', newLastSeq);
     }
