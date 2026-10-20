@@ -49,6 +49,42 @@ export interface SlotStore {
 }
 
 /**
+ * How long one store claim may take before the caller gives up. A claim is one short update; a
+ * claim that has not answered in this time is a hung connection or a lock held elsewhere, and
+ * without a bound every later claim of the process would queue behind it (claims are chained).
+ * A claim that completes after the timeout only wastes its slot.
+ */
+export const DEFAULT_CLAIM_TIMEOUT_MS = 10_000;
+
+export class SlotClaimTimeoutError extends Error {
+  constructor(
+    readonly product: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`rate slot claim for ${product} did not answer within ${timeoutMs} ms`);
+    this.name = 'SlotClaimTimeoutError';
+  }
+}
+
+/** `store.claim` bounded by `timeoutMs`; rejects with SlotClaimTimeoutError when it runs out. */
+export async function claimSlot(
+  store: SlotStore,
+  product: string,
+  minIntervalMs: number,
+  timeoutMs: number = DEFAULT_CLAIM_TIMEOUT_MS,
+): Promise<SlotClaim> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SlotClaimTimeoutError(product, timeoutMs)), timeoutMs);
+  });
+  try {
+    return await Promise.race([store.claim(product, minIntervalMs), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * `ingest.provider_rate_slots` as the SlotStore. One statement per claim: the
  * row lock serializes claimants, `next_slot_at` only ever moves forward, and
  * `delay_ms` is computed on the DATABASE clock, so process clock skew can
@@ -103,9 +139,12 @@ export class RateLimiter {
       product?: string;
       now?: () => number;
       sleep?: (ms: number) => Promise<void>;
+      /** Bound on one store claim (DEFAULT_CLAIM_TIMEOUT_MS). */
+      claimTimeoutMs?: number;
     } = {},
   ) {
     this.minIntervalMs = opts.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
+    this.claimTimeoutMs = opts.claimTimeoutMs ?? DEFAULT_CLAIM_TIMEOUT_MS;
     this.now = opts.now ?? (() => Date.now());
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.product = opts.product ?? null;
@@ -116,6 +155,7 @@ export class RateLimiter {
   }
 
   private readonly now: () => number;
+  private readonly claimTimeoutMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private store: SlotStore | null;
   /** Store claims of this process, in call order (see waitForSlot). */
@@ -162,7 +202,8 @@ export class RateLimiter {
       return localSlot;
     }
     const ticket = this.claimChain.then(async () => {
-      const claim = await store.claim(product, this.minIntervalMs);
+      // Bounded, so one hung claim fails its caller instead of stalling every later claim.
+      const claim = await claimSlot(store, product, this.minIntervalMs, this.claimTimeoutMs);
       this.claimed++;
       // Sleep on the store's delay (its clock), never shorter than the local floor.
       const now = this.now();

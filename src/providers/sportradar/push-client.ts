@@ -7,7 +7,7 @@ import {
 } from '../../ingest/quota-guard.js';
 import type { LeagueCode } from '../../leagues/codes.js';
 import type { Logger } from '../../logger.js';
-import type { RateLimiter } from './rate-limiter.js';
+import { claimSlot, type RateLimiter } from './rate-limiter.js';
 import {
   type PushClockMessage,
   PushClockMessageSchema,
@@ -101,12 +101,14 @@ export interface PushStreamDeps {
    * Called after every reconnection (connection 2, 3, ...); `downMs` is the outage length and
    * `reconnectedAt` the moment the new connection answered: the database `now()` read once the
    * response headers arrived when the stream has a database (so it compares with
-   * `provider_calls.called_at`, the slot on the database clock), the local clock otherwise.
+   * `provider_calls.called_at`, the slot on the database clock), the local clock otherwise;
+   * `null` when the stream has a database but the read failed (the moment is unknown on the
+   * database clock, so the caller must not use it to skip a backfill).
    */
   onReconnect?: (info: {
     connections: number;
     downMs: number;
-    reconnectedAt: Date;
+    reconnectedAt: Date | null;
   }) => Promise<void> | void;
   onStateChange?: (state: PushStreamState) => void;
   watchdogMs?: number;
@@ -339,7 +341,7 @@ export class PushStream {
                 hook({
                   connections: this.state.connections,
                   downMs,
-                  reconnectedAt: reconnectedAt ?? new Date(this.now()),
+                  reconnectedAt,
                 }),
               )
               .catch((err) => log.error({ err, feed }, 'push reconnect hook (backfill) failed'));
@@ -416,12 +418,12 @@ export class PushStream {
   }
 
   /**
-   * Claim a slot straight from the shared ledger and leave on it. RateLimiter.waitForSlot() is not
-   * used: its in-process floor can order two concurrent callers differently from the ledger, so a
-   * caller sleeps until its later local floor while reporting its earlier ledger slot and lands on
-   * the other caller's slot (the 429 of validator M4 §2e). The ledger alone serializes claimants
-   * across every process; the wait is the ledger's delay (database clock). A send that would
-   * leave more than PUSH_SEND_TOLERANCE_MS after its slot re-claims instead.
+   * Claim a slot straight from the shared ledger and leave on it. A connection attempt has no
+   * deadline of its own, so a send that would leave more than PUSH_SEND_TOLERANCE_MS after its
+   * slot (a late timer, a slow claim) gives that slot up and claims a new one, up to
+   * PUSH_MAX_SLOT_RECLAIMS times; RateLimiter.waitForSlot() has no re-claim, which is why it is not
+   * used here. The ledger alone serializes claimants across every process (and, since plan rev 4.8,
+   * waitForSlot chains this process's claims too); the wait is the ledger's delay (database clock).
    */
   private async acquireSlot(): Promise<Date> {
     const limiter = this.deps.limiter;
@@ -430,7 +432,7 @@ export class PushStream {
     if (!store || limiter.product === null) return new Date(await limiter.waitForSlot());
     const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     for (let attempt = 0; ; attempt++) {
-      const claim = await store.claim(limiter.product, limiter.minIntervalMs);
+      const claim = await claimSlot(store, limiter.product, limiter.minIntervalMs);
       const sendAt = this.now() + Math.max(0, claim.delayMs);
       for (let t = this.now(); t < sendAt && !this.stopped; t = this.now()) await sleep(sendAt - t);
       const lateMs = this.now() - sendAt;
@@ -450,16 +452,23 @@ export class PushStream {
     }
   }
 
-  /** The reconnect moment on the clock `provider_calls.called_at` uses. */
-  private async clockNow(): Promise<Date> {
-    if (this.deps.dbNow) return this.deps.dbNow();
-    const db = this.deps.db;
-    if (db === null) return new Date(this.now());
+  /**
+   * The reconnect moment on the clock `provider_calls.called_at` uses: the database clock when the
+   * stream has a database, the local clock otherwise. `null` when the database read fails: the
+   * local clock is not a substitute, because a skewed process clock could place the reconnect
+   * before a pbp request that actually followed it and skip a backfill the gap needed.
+   */
+  private async clockNow(): Promise<Date | null> {
+    const { db, dbNow } = this.deps;
+    if (!dbNow && db === null) return new Date(this.now());
     try {
+      if (dbNow) return await dbNow();
+      if (db === null) return null;
       const [row] = await db<{ now: Date }[]>`select now() as now`;
-      return row?.now ?? new Date(this.now());
-    } catch {
-      return new Date(this.now());
+      return row?.now ?? null;
+    } catch (err) {
+      this.deps.log.warn({ err, feed: this.deps.feed }, 'reconnect: database clock read failed');
+      return null;
     }
   }
 

@@ -52,11 +52,11 @@ are applied with `supabase db push` against the linked project, never by the app
 ## Runbook (NOT RUN; needs a Fly account)
 
 **Prerequisites before the first `fly deploy`** (all after the M3 polling validation passes):
-1. The `RateLimiter.waitForSlot()` concurrency defect is fixed (see "Rate limiting and push" below):
-   the production scheduler runs several watches of one product in one process, which is exactly the
-   case that can send two requests on one slot. Fix: claim the ledger slot first and sleep to it (drop
-   the local floor when a store is present), with a unit test of two concurrent callers whose ledger
-   order differs from their call order. Review round 4 confirmed the defect from the code (2026-10-19).
+1. ~~The `RateLimiter.waitForSlot()` concurrency defect is fixed~~ **Done** (M3 `d34931a`, plan rev 4.8
+   (3), carried into M4 by the rebase onto `m3-ncaawb-live`): one process's store claims are chained in
+   call order, with a unit test of concurrent callers whose claims finish out of order. Each claim is
+   also bounded (`DEFAULT_CLAIM_TIMEOUT_MS`, 10 s), so one hung claim fails its caller instead of
+   stalling every later claim of the process.
 2. `ingest.product_quotas` verified for every product the deployment has a key for (the guard refuses
    every call otherwise).
 3. The `ANTHROPIC_API_KEY` repository secret for the hosted review row.
@@ -198,19 +198,20 @@ generation was requested at or after the reconnect, by that document (logged "ba
 
 ### Rate limiting and push
 
-Every connection attempt claims one slot from `ingest.provider_rate_slots` like any REST call, but the
-push client claims **straight from the ledger** and sends on that slot with nothing awaited in between;
-if it would leave more than 200 ms after its slot (timer lateness, an event-loop stall) it abandons the
-slot and claims a new one (`slotReclaims` in the stream state). It does not go through
-`RateLimiter.waitForSlot()`: that method's in-process floor can order two concurrent callers of one
-limiter differently from the ledger, so a caller sleeps until its later local floor while reporting its
-earlier ledger slot and lands on the other caller's slot (one 429 in the 2026-10-18 restart rehearsal,
-with correctly spaced recorded slots, so `rate_limited_calls_spaced_at_least_one_second_per_product`
-cannot see it). For the same reason each push-mode backfill uses its own single-caller limiter on the
-ledger instead of the registry limiter the cadence loop holds. The defect itself is in
-`src/providers/sportradar/rate-limiter.ts` (frozen for the M3 live run) and also applies to any two
-concurrent `SportradarHttp` callers sharing `rateLimiterFor(product)` in one process, e.g. two
-scheduler watches of one product; it is reported for a fix after the M3 run.
+Slots are 2 s apart per product (plan rev 4.8: 1.2 s drew 8 x 429 on the first live game, and
+Sportradar counts a 429 against the quota). Every connection attempt claims one slot from
+`ingest.provider_rate_slots` like any REST call, but the push client claims **straight from the
+ledger** (`claimSlot`, bounded like every claim) and sends on that slot with nothing awaited in
+between; if it would leave more than 200 ms after its slot (timer lateness, an event-loop stall) it
+abandons the slot and claims a new one (`slotReclaims` in the stream state), up to 4 times, then sends
+late rather than never. `RateLimiter.waitForSlot()` has no re-claim, which is why push does not use
+it. History: before plan rev 4.8, `waitForSlot()`'s in-process floor could order two concurrent
+callers of one limiter differently from the ledger, so one caller landed on the other's slot (one 429
+in the 2026-10-18 restart rehearsal, with correctly spaced recorded slots, so
+`rate_limited_calls_spaced_at_least_one_second_per_product` could not see it); push-mode backfills
+were given their own single-caller limiter for that reason and keep it. Since M3 `d34931a` the claims
+of one limiter are chained in call order, which also covers two scheduler watches of one product in
+one process.
 
 ## Alerts (`GET /health`)
 
