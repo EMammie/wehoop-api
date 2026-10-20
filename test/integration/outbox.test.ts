@@ -287,7 +287,12 @@ describe('outbox publisher', () => {
         },
       };
       await expect(
-        apply({ ...deps, fault: failBeforeCommit }, rb.gameId, rolledBack, observation(rbRun, rolledBack, T0)),
+        apply(
+          { ...deps, fault: failBeforeCommit },
+          rb.gameId,
+          rolledBack,
+          observation(rbRun, rolledBack, T0),
+        ),
       ).rejects.toThrow('injected rollback');
       // A committed batch wakes the publisher with every row already visible.
       const nd = pbpQ1();
