@@ -387,7 +387,10 @@ export interface PushWatchOptions {
 export interface PushWatchOutcome {
   streams: PushStreamState[];
   ingest: PushIngestStats;
+  /** Reconnects reconciled by a backfill sub-run that finished `ok`. */
   backfills: number;
+  /** Backfills that ended in error (the reconnect is left to the next REST reconciliation). */
+  backfillsFailed: number;
   /** Reconnects that needed no backfill: a pbp document of this generation was fetched at or after the reconnect. */
   backfillsSkipped: number;
   /** Connection attempts left of PUSH_CONNECTION_ALLOWANCE. */
@@ -661,6 +664,7 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
   const subRun = await ingest.start();
   let backfills = 0;
   let backfillsSkipped = 0;
+  let backfillsFailed = 0;
   const backfill = async (info: {
     connections: number;
     downMs: number;
@@ -685,45 +689,51 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
       );
       return;
     }
+    let done: Awaited<ReturnType<typeof runBackfill>>;
+    try {
+      done = await runBackfill(
+        {
+          db,
+          log,
+          adapter,
+          apply: a.apply,
+          gameId: a.game.id,
+          parentRun: a.run,
+          source: a.source,
+          observationSource: a.observationSource,
+          makeSource: (r) =>
+            new HttpDocumentSource(
+              new SportradarHttp({
+                db,
+                log,
+                league: adapter.league,
+                product: adapter.product,
+                runId: r.id,
+                resolver: a.resolver,
+                // A dedicated single-caller limiter on the same ledger. It was introduced when the
+                // registry limiter's in-process floor could order two concurrent callers differently
+                // from the ledger (validator M4 §2e); since plan rev 4.8 one limiter's claims are
+                // chained, so either choice is safe. The ledger spaces it from the cadence loop.
+                limiter: needsRateLimit(a.source)
+                  ? new RateLimiter({ store: new PgSlotStore(db), product: adapter.product })
+                  : rateLimiterFor(adapter.product),
+                guard: a.guard,
+                reservationId: a.reservationId,
+                ...(a.fetchImpl ? { fetchImpl: a.fetchImpl } : {}),
+              }),
+              a.observationSource,
+              null,
+              { gameId: a.game.providerGameId },
+            ),
+        },
+        'stream reconnect',
+        info,
+      );
+    } catch (err) {
+      backfillsFailed++;
+      throw err;
+    }
     backfills++;
-    const done = await runBackfill(
-      {
-        db,
-        log,
-        adapter,
-        apply: a.apply,
-        gameId: a.game.id,
-        parentRun: a.run,
-        source: a.source,
-        observationSource: a.observationSource,
-        makeSource: (r) =>
-          new HttpDocumentSource(
-            new SportradarHttp({
-              db,
-              log,
-              league: adapter.league,
-              product: adapter.product,
-              runId: r.id,
-              resolver: a.resolver,
-              // A dedicated single-caller limiter on the same ledger: sharing the registry limiter
-              // with the concurrently running cadence loop lets its in-process floor order the two
-              // callers differently from the ledger, so one sends on the other's slot (a 429 with
-              // correctly spaced recorded slots; validator M4 §2e, rate-limiter.ts is frozen).
-              limiter: needsRateLimit(a.source)
-                ? new RateLimiter({ store: new PgSlotStore(db), product: adapter.product })
-                : rateLimiterFor(adapter.product),
-              guard: a.guard,
-              reservationId: a.reservationId,
-              ...(a.fetchImpl ? { fetchImpl: a.fetchImpl } : {}),
-            }),
-            a.observationSource,
-            null,
-            { gameId: a.game.providerGameId },
-          ),
-      },
-      'stream reconnect',
-      info,
-    );
     if (done.outcome?.result.outcome === 'applied')
       noteAppliedPbp(a.appliedPbp, done.pbpRequestedAt);
   };
@@ -792,6 +802,7 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
         streams: streams.map((s) => s.state),
         ingest: ingest.stats,
         backfills,
+        backfillsFailed,
         backfillsSkipped,
         connectionBudgetLeft: attemptBudget.remaining,
       };
