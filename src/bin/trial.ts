@@ -131,12 +131,15 @@ async function main() {
         `pipeline lag [acceptance measure] (change.ts -> subscriber receivedAt, n=${stats.pipeline.n}): median ${fmt(stats.pipeline.medianMs)} p95 ${fmt(stats.pipeline.p95Ms)}`,
       );
       console.log(
-        `provider-revision lag [reported where the feed carries updated] (receivedAt - play_events.provider_updated_at, n=${stats.providerUpdated.n}${args.game ? '' : '; pass --game <uuid>'}): median ${fmt(stats.providerUpdated.medianMs)} p95 ${fmt(stats.providerUpdated.p95Ms)}`,
+        `catch-up deliveries (change.ts -> receivedAt via /changes, n=${stats.catchUp.n}): median ${fmt(stats.catchUp.medianMs)} p95 ${fmt(stats.catchUp.p95Ms)}`,
+      );
+      console.log(
+        `provider-revision lag [reported where the feed carries updated] (last delivered change of each event: receivedAt - play_events.provider_updated_at, n=${stats.providerUpdated.n}, excluded ${stats.providerUpdated.excluded} revised after receipt${args.game ? '' : '; pass --game <uuid>'}): median ${fmt(stats.providerUpdated.medianMs)} p95 ${fmt(stats.providerUpdated.p95Ms)}`,
       );
       console.log(
         stats.wallClock.n === 0
           ? 'wall_clock lag [reported only where the feed carries wall_clock]: not carried by this feed (n=0; stated, not failed)'
-          : `wall_clock lag [reported only where the feed carries wall_clock] (receivedAt - event wallClock, n=${stats.wallClock.n}): median ${fmt(stats.wallClock.medianMs)} p95 ${fmt(stats.wallClock.p95Ms)}`,
+          : `wall_clock lag [reported only where the feed carries wall_clock] (event_insert: receivedAt - event wallClock, n=${stats.wallClock.n}): median ${fmt(stats.wallClock.medianMs)} p95 ${fmt(stats.wallClock.p95Ms)}`,
       );
     }
     await db.end({ timeout: 2 });

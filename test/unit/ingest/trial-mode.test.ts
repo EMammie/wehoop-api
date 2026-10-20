@@ -119,8 +119,9 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
     const stats = lagFromRecord(lines);
     expect(stats.changes).toBe(4); // catch-up lines are not live delivery
     expect(stats.wallClock).toEqual({ n: 2, medianMs: 2200, p95Ms: 2500 });
-    expect(stats.providerUpdated).toEqual({ n: 0, medianMs: null, p95Ms: null });
+    expect(stats.providerUpdated).toEqual({ n: 0, medianMs: null, p95Ms: null, excluded: 0 });
     expect(stats.pipeline).toEqual({ n: 4, medianMs: 200, p95Ms: 500 });
+    expect(stats.catchUp).toEqual({ n: 1, medianMs: 900, p95Ms: 900 });
     // Feeds without wall_clock (NCAAWB): lag from the stored provider revision of each event.
     const revisions = new Map([
       ['e1', '2026-11-08T01:00:00.000Z'],
@@ -130,12 +131,52 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
       n: 2,
       medianMs: 1000,
       p95Ms: 1500,
+      excluded: 0,
     });
     expect(lagFromRecord([])).toEqual({
       changes: 0,
       wallClock: { n: 0, medianMs: null, p95Ms: null },
-      providerUpdated: { n: 0, medianMs: null, p95Ms: null },
+      providerUpdated: { n: 0, medianMs: null, p95Ms: null, excluded: 0 },
       pipeline: { n: 0, medianMs: null, p95Ms: null },
+      catchUp: { n: 0, medianMs: null, p95Ms: null },
     });
+  });
+
+  it('measures each event once, on its last delivered change; a later stored revision is excluded, not negative', () => {
+    const ev = (seq: number, type: string, id: string, receivedAt: string, wallClock: string) =>
+      JSON.stringify({
+        via: 'broadcast',
+        receivedAt,
+        change: {
+          v: 1,
+          id: `00000000-0000-4000-8000-${String(seq).padStart(12, '0')}`,
+          gameId: '11111111-1111-4111-8111-111111111111',
+          seq,
+          ts: receivedAt,
+          type,
+          providerEventId: id,
+          body: {
+            type: 'other',
+            providerEventType: 'x',
+            period: { number: 1, type: 'quarter', sequence: 1 },
+            clock: '9:00',
+            wallClock,
+            score: { home: 1, away: 0 },
+          },
+        },
+      });
+    const lines = [
+      ev(1, 'event_insert', 'a', '2026-10-20T00:20:10.000Z', '2026-10-20T00:20:00.000Z'),
+      ev(2, 'event_insert', 'b', '2026-10-20T00:20:40.000Z', '2026-10-20T00:20:30.000Z'),
+      // 'a' corrected 10 min later: its wall clock lag must not count the correction delay.
+      ev(3, 'event_update', 'a', '2026-10-20T00:30:10.000Z', '2026-10-20T00:20:00.000Z'),
+    ];
+    const revisions = new Map([
+      ['a', '2026-10-20T00:30:05.000Z'], // the revision delivered by seq 3
+      ['b', '2026-10-20T00:45:00.000Z'], // revised after receipt without a change (revision-only)
+    ]);
+    const stats = lagFromRecord(lines, revisions);
+    expect(stats.wallClock).toEqual({ n: 2, medianMs: 10_000, p95Ms: 10_000 });
+    expect(stats.providerUpdated).toEqual({ n: 1, medianMs: 5000, p95Ms: 5000, excluded: 1 });
   });
 });

@@ -524,16 +524,31 @@ export async function heldProfileImpact(db: Db): Promise<HeldProfileImpact> {
 /* ---------------------------------------------------------------------- */
 
 export interface LagStats {
+  /** Changes delivered by broadcast (live delivery). */
   changes: number;
-  /** receivedAt - event wallClock, for event changes carrying a wallClock (provider time -> subscriber). */
+  /**
+   * receivedAt - event wallClock, for `event_insert` changes carrying a wallClock (provider time ->
+   * subscriber, first report of a play). An `event_update` of an old play measures how late the
+   * provider corrected it, not delivery, so it is left out.
+   */
   wallClock: { n: number; medianMs: number | null; p95Ms: number | null };
   /**
    * receivedAt - the event's provider revision (`updated`, play_events.provider_updated_at), for
    * feeds without wall_clock (NCAAWB pbp carries none). Needs the game's play_events (`--game`).
+   * Only the stored (current) revision is known, so each event is measured once, on its LAST
+   * delivered change; `excluded` counts events whose stored revision is later than that receipt
+   * (a revision-only update after it), which would otherwise read as negative lag.
    */
-  providerUpdated: { n: number; medianMs: number | null; p95Ms: number | null };
+  providerUpdated: {
+    n: number;
+    medianMs: number | null;
+    p95Ms: number | null;
+    excluded: number;
+  };
   /** receivedAt - change.ts (applyChanges commit -> subscriber): the pipeline's own lag. */
   pipeline: { n: number; medianMs: number | null; p95Ms: number | null };
+  /** receivedAt - change.ts for changes the subscriber got by catch-up (/changes), not broadcast. */
+  catchUp: { n: number; medianMs: number | null; p95Ms: number | null };
 }
 
 function quantile(sorted: number[], q: number): number | null {
@@ -558,31 +573,42 @@ export async function providerRevisions(db: Db, gameId: string): Promise<Map<str
  */
 export function lagFromRecord(lines: string[], revisions?: Map<string, string>): LagStats {
   const wall: number[] = [];
-  const revised: number[] = [];
   const pipe: number[] = [];
+  const caught: number[] = [];
+  /** Per provider event, the receipt of its last broadcast-delivered event change (by seq). */
+  const lastReceipt = new Map<string, { seq: number; received: number }>();
   let changes = 0;
   for (const raw of lines) {
     if (!raw.trim()) continue;
     const parsed = JSON.parse(raw) as { via?: string; receivedAt?: string; change?: unknown };
-    if (!parsed.receivedAt || parsed.via !== 'broadcast') continue;
+    if (!parsed.receivedAt) continue;
     const change = GameChangeSchema.safeParse(parsed.change);
     if (!change.success) continue;
-    changes++;
     const received = Date.parse(parsed.receivedAt);
-    pipe.push(received - Date.parse(change.data.ts));
-    const body = change.data.body as { wallClock?: string | null };
     const c = change.data;
-    const providerEventId =
-      c.type === 'event_insert' || c.type === 'event_update' ? c.providerEventId : null;
-    if (providerEventId !== null && typeof body.wallClock === 'string') {
+    if (parsed.via === 'catch-up') caught.push(received - Date.parse(c.ts));
+    if (parsed.via !== 'broadcast') continue;
+    changes++;
+    pipe.push(received - Date.parse(c.ts));
+    const body = c.body as { wallClock?: string | null };
+    if (c.type === 'event_insert' && typeof body.wallClock === 'string') {
       wall.push(received - Date.parse(body.wallClock));
     }
-    const updated = providerEventId !== null ? revisions?.get(providerEventId) : undefined;
-    if (updated) revised.push(received - Date.parse(updated));
+    if ((c.type === 'event_insert' || c.type === 'event_update') && c.providerEventId) {
+      const prev = lastReceipt.get(c.providerEventId);
+      if (!prev || c.seq > prev.seq) lastReceipt.set(c.providerEventId, { seq: c.seq, received });
+    }
   }
-  wall.sort((a, b) => a - b);
-  revised.sort((a, b) => a - b);
-  pipe.sort((a, b) => a - b);
+  const revised: number[] = [];
+  let excluded = 0;
+  for (const [providerEventId, { received }] of lastReceipt) {
+    const updated = revisions?.get(providerEventId);
+    if (!updated) continue;
+    const lag = received - Date.parse(updated);
+    if (lag < 0) excluded++;
+    else revised.push(lag);
+  }
+  for (const xs of [wall, revised, pipe, caught]) xs.sort((a, b) => a - b);
   const stats = (xs: number[]) => ({
     n: xs.length,
     medianMs: quantile(xs, 0.5),
@@ -591,7 +617,8 @@ export function lagFromRecord(lines: string[], revisions?: Map<string, string>):
   return {
     changes,
     wallClock: stats(wall),
-    providerUpdated: stats(revised),
+    providerUpdated: { ...stats(revised), excluded },
     pipeline: stats(pipe),
+    catchUp: stats(caught),
   };
 }

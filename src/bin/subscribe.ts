@@ -9,7 +9,7 @@ import { canonicalState, stateFromSnapshot } from '../model/game-state.js';
 import { ChangesPageSchema, SnapshotSchema } from '../model/snapshot.js';
 
 /**
- * pnpm subscribe --game <uuid> [--record <path.jsonl>] [--auth anon|guest] [--until closed]
+ * pnpm subscribe --game <uuid> [--record <path.jsonl>] [--auth anon|guest] [--until closed] [--settle-ms 20000]
  * Reference client: subscribes to the private channel game:{id} with the anon
  * key (or an anonymous-sign-in guest JWT, the real iOS session), then runs
  * the reconnect contract (src/live/subscriber.ts) against the Hono API.
@@ -25,6 +25,7 @@ async function main() {
       record: { type: 'string' },
       auth: { type: 'string', default: 'anon' },
       until: { type: 'string', default: 'closed' },
+      'settle-ms': { type: 'string', default: '20000' },
       api: { type: 'string' },
     },
     strict: true,
@@ -82,7 +83,27 @@ async function main() {
     onSnapshot: (snap, reason) => {
       if (reason === 'closed') {
         log('closed', { seq: snap.seq, score: snap.game.score });
-        if (args.until === 'closed') done?.();
+        // The watcher fetches the closing summary + boxscore AFTER the pbp that reported `closed`
+        // (their stats changes follow the status change; live run 2026-10-19 stopped at 1305 of
+        // 1306). Keep listening for --settle-ms, then catch up from /changes and re-snapshot.
+        if (args.until === 'closed') {
+          const settleMs = Number(args['settle-ms'] ?? 20_000);
+          log('settling after closed', { settleMs });
+          setTimeout(() => {
+            void (async () => {
+              await subscriber.reconnect();
+              subscriber.finalSnapshot = await api.snapshot(gameId);
+              log('final catch-up', {
+                lastSeq: subscriber.lastSeq,
+                snapshotSeq: subscriber.finalSnapshot.seq,
+              });
+              done?.();
+            })().catch((e) => {
+              log('final catch-up failed', { err: String(e) });
+              done?.();
+            });
+          }, settleMs);
+        }
       }
     },
   });
