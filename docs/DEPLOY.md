@@ -128,6 +128,11 @@ kill $(lsof -ti tcp:3100 -sTCP:LISTEN) $(lsof -ti tcp:8787 -sTCP:LISTEN); sleep 
 grep -o 'FAKE_PROVIDER_STATS=.*' $S/fake.log                  # rejected429 must be 0
 ```
 
+Re-run on 2026-10-20 at `11b0159` (2 s slots): SIGKILL at 11:11:14.606 EDT, worker B acquired the lock
+1.36 s later, `/health` clean, `pnpm health check` exit 0, B closed the game 93-85, invariants 59/59, fake
+provider 61/61 served with **0 x 429**, every per-product gap >= 2 s (`devlog/evidence/M4.md` R.3a-R.3e).
+The figures below are the earlier run at 1.2 s slots, kept for comparison.
+
 Observed on 2026-10-19 08:53 ET (dev stack, HEAD `0498f7d`, API on 3100): worker A killed at
 08:53:37, worker B logged `worker lock acquired` at 12:53:38.113Z, then `aborted orphaned sub-runs`,
 `aborted orphaned runs`, `released orphaned reservations`, `trial watch started`, `push streams
@@ -183,6 +188,13 @@ sees fewer intermediate states but adds clock-carried score steps), `play_events
 `stale_observations` (push mode logs more `superseded_observation` rows: REST documents racing
 newer push observations, by design), `provider_calls` (push mode makes far fewer REST calls plus
 one row per stream connection).
+
+Re-run on 2026-10-20 at `11b0159` (2 s slots): one events reconnect, reconciled by a backfill sub-run
+(`backfills 1 + skipped 0 = reconnects 1`), 408 = 408 events against the polling-only replay, 93-85,
+0 x 429, invariants 59/59 (`devlog/evidence/M4.md` R.2a-R.2d). With 2 s slots the backfill's own pbp
+left about 6 s after the decision, behind the next cadence pbp, which already carried the missed events;
+the backfill then inserted nothing (one redundant pbp call per reconnect; accepted). The figures below
+are the earlier run at 1.2 s slots.
 
 Observed on 2026-10-19 08:51 ET (dev stack after `pnpm supabase db reset`, HEAD `0498f7d`, `--speed 300`,
 drop after 12 s for 3 s): both streams disconnected at 12:51:26Z, events stream reconnected at
