@@ -3,7 +3,11 @@ import type { Db } from '../db/client.js';
 import type { LeagueAdapter, NormalizeContext } from '../leagues/adapter.js';
 import type { PulseSender } from '../live/pulse.js';
 import type { Logger } from '../logger.js';
-import type { FetchedDocument, SportradarHttp } from '../providers/sportradar/http.js';
+import {
+  type FetchedDocument,
+  ProviderHttpError,
+  type SportradarHttp,
+} from '../providers/sportradar/http.js';
 import { BoxscoreDocumentSchema } from '../providers/sportradar/schemas/boxscore.js';
 import { PbpDocumentSchema } from '../providers/sportradar/schemas/pbp.js';
 import { SummaryDocumentSchema } from '../providers/sportradar/schemas/summary.js';
@@ -311,6 +315,8 @@ export interface CadenceOutcome {
   status: string | null;
   calls: number;
   failed: number;
+  /** HTTP 429s retried at once through the next rate slot (each retry is a logged call). */
+  retried429: number;
   elapsedMs: number;
 }
 
@@ -321,6 +327,9 @@ export interface CadenceOutcome {
  * game is `closed`. The horizon is a planning number: a game that runs long
  * (overtime) keeps being watched; the quota guard, not the horizon, is what
  * refuses calls. A fetch that fails is logged and retried at its next due time.
+ * An HTTP 429 is retried at once through the next rate slot (once for a cadence
+ * feed, twice for a closing feed, which has no next due time), because the
+ * provider's spacing rule is not known exactly (live run 2026-10-19).
  */
 export async function cadenceLoop(
   watcher: GameWatcher,
@@ -341,25 +350,43 @@ export async function cadenceLoop(
   let status: string | null = null;
   let calls = 0;
   let failed = 0;
+  let retried429 = 0;
   let horizonWarned = false;
-  const fetchOne = async (feed: GameFeedName): Promise<void> => {
-    try {
-      const doc = await source.fetch(feed, schemaFor(feed));
-      calls++;
-      opts.onCall?.(feed);
-      const out = await watcher.process(
-        feed,
-        JSON.parse(doc.rawText),
-        doc.requestedAt,
-        source.observationSource,
-      );
-      status = out?.status ?? status;
-    } catch (err) {
-      // No budget: stop the watch (the run ends as error, the reservation is released) instead
-      // of issuing a guard query per tick forever.
-      if (err instanceof QuotaRefusedError) throw err;
-      failed++;
-      log.error({ err, feed, calls }, 'fetch failed; retrying at the next due time');
+  const fetchOne = async (feed: GameFeedName, retriesOn429 = 1): Promise<void> => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const doc = await source.fetch(feed, schemaFor(feed));
+        calls++;
+        opts.onCall?.(feed);
+        const out = await watcher.process(
+          feed,
+          JSON.parse(doc.rawText),
+          doc.requestedAt,
+          source.observationSource,
+        );
+        status = out?.status ?? status;
+        return;
+      } catch (err) {
+        // No budget: stop the watch (the run ends as error, the reservation is released) instead
+        // of issuing a guard query per tick forever.
+        if (err instanceof QuotaRefusedError) throw err;
+        if (
+          err instanceof ProviderHttpError &&
+          err.status === 429 &&
+          attempt < retriesOn429 &&
+          !opts.isStopped()
+        ) {
+          retried429++;
+          log.warn(
+            { feed, attempt: attempt + 1, calls },
+            'HTTP 429; retrying at the next rate slot',
+          );
+          continue;
+        }
+        failed++;
+        log.error({ err, feed, calls }, 'fetch failed; retrying at the next due time');
+        return;
+      }
     }
   };
   // Periodic feeds: next due time per feed. One-offs: a sorted queue of offsets.
@@ -385,9 +412,9 @@ export async function cadenceLoop(
       await fetchOne('boxscore');
     }
     if (status === 'closed' && opts.untilClosed) {
-      for (const feed of cadence.closing) await fetchOne(feed);
-      log.info({ calls, failed, elapsedMs: now() - startedAt }, 'game closed');
-      return { status, calls, failed, elapsedMs: now() - startedAt };
+      for (const feed of cadence.closing) await fetchOne(feed, 2);
+      log.info({ calls, failed, retried429, elapsedMs: now() - startedAt }, 'game closed');
+      return { status, calls, failed, retried429, elapsedMs: now() - startedAt };
     }
     if (!horizonWarned && now() - startedAt >= cadence.horizonMs) {
       horizonWarned = true;
@@ -407,7 +434,7 @@ export async function cadenceLoop(
     const waitMs = Math.max(0, Math.min(...dueTimes) - now());
     await sleep(Math.min(waitMs, 1000));
   }
-  return { status, calls, failed, elapsedMs: now() - startedAt };
+  return { status, calls, failed, retried429, elapsedMs: now() - startedAt };
 }
 
 type GameFeedName = 'pbp' | 'summary' | 'boxscore';
