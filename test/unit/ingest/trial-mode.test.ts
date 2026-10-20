@@ -213,4 +213,8 @@ describe('backfillNeeded (push reconnect -> REST pbp backfill?)', () => {
     expect(backfillNeeded({ lastPbpCalledAt: reconnectedAt, reconnectedAt })).toBe(false);
     expect(backfillNeeded({ lastPbpCalledAt: at(-2), reconnectedAt })).toBe(false);
   });
+  it('a reconnect moment that could not be read on the database clock: always backfill', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: at(-2), reconnectedAt: null })).toBe(true);
+    expect(backfillNeeded({ lastPbpCalledAt: null, reconnectedAt: null })).toBe(true);
+  });
 });

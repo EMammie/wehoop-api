@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../../src/db/client.js';
 import {
+  claimSlot,
   RateLimiter,
   rateLimiterFor,
   type SlotClaim,
+  SlotClaimTimeoutError,
   type SlotStore,
 } from '../../../src/providers/sportradar/rate-limiter.js';
 
@@ -212,6 +214,35 @@ describe('RateLimiter with a shared SlotStore (cross-process spacing, plan rev 4
     expect(limiter.claimed).toBe(2);
     await limiter.waitForSlot();
     expect(limiter.claimed).toBe(3);
+  });
+
+  it('a claim that never answers times out for its caller; later callers of the limiter still get slots', async () => {
+    const clock = fakeClock();
+    const { store: inner } = fakeStore(clock.now);
+    let n = 0;
+    const store: SlotStore = {
+      claim(product, minIntervalMs) {
+        n++;
+        if (n === 1) return new Promise<SlotClaim>(() => undefined); // hung connection
+        return inner.claim(product, minIntervalMs);
+      },
+    };
+    await expect(claimSlot(store, 'wnba', 1000, 20)).rejects.toEqual(
+      new SlotClaimTimeoutError('wnba', 20),
+    );
+    n = 0;
+    const limiter = new RateLimiter({
+      minIntervalMs: 1000,
+      store,
+      product: 'wnba',
+      now: clock.now,
+      sleep: clock.sleep,
+      claimTimeoutMs: 20,
+    });
+    const results = await Promise.allSettled([limiter.waitForSlot(), limiter.waitForSlot()]);
+    expect(results.map((r) => r.status)).toEqual(['rejected', 'fulfilled']);
+    expect((results[0] as PromiseRejectedResult).reason).toBeInstanceOf(SlotClaimTimeoutError);
+    expect(limiter.claimed).toBe(1);
   });
 
   it('the delay is taken on the store clock: a process clock ahead of the database still waits the full gap', async () => {

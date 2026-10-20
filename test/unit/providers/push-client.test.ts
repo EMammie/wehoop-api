@@ -5,6 +5,8 @@ import { createLogger } from '../../../src/logger.js';
 import {
   backoffDelayMs,
   classifyPushLine,
+  PUSH_MAX_SLOT_RECLAIMS,
+  PUSH_SEND_TOLERANCE_MS,
   type PushLine,
   PushStream,
 } from '../../../src/providers/sportradar/push-client.js';
@@ -379,7 +381,7 @@ describe('PushStream', () => {
     server = s.server;
     const dbClock = new Date('2026-10-19T12:36:08.501Z');
     let dbReads = 0;
-    const seen: Date[] = [];
+    const seen: (Date | null)[] = [];
     const stream = new PushStream({
       db: null,
       log,
@@ -403,6 +405,99 @@ describe('PushStream', () => {
     await stream.stop();
     expect(seen[0]?.toISOString()).toBe(dbClock.toISOString());
     expect(dbReads).toBe(1); // only the reconnect reads the clock, not the first connection
+  });
+
+  it('a failed database clock read gives onReconnect reconnectedAt = null, never the local clock', async () => {
+    const s = await pushServer((res, n) => {
+      res.write(`${JSON.stringify(events[0])}\n`);
+      if (n === 1) setTimeout(() => res.destroy(), 10);
+    });
+    server = s.server;
+    const seen: (Date | null)[] = [];
+    const stream = new PushStream({
+      db: null,
+      log,
+      resolver: resolverFor(s.url),
+      league: 'wnba',
+      runId: null,
+      feed: 'push_events',
+      backoffMinMs: 10,
+      backoffMaxMs: 20,
+      dbNow: async () => {
+        throw new Error('connection terminated');
+      },
+      onLine: () => undefined,
+      onReconnect: (info) => {
+        seen.push(info.reconnectedAt);
+      },
+    });
+    void stream.start();
+    await until(() => seen.length === 1);
+    await stream.stop();
+    expect(seen).toEqual([null]);
+  });
+
+  it('after the maximum re-claims a late send leaves anyway, on the last claimed slot', async () => {
+    // Every claim stalls 500 ms past its slot: the stream re-claims PUSH_MAX_SLOT_RECLAIMS times,
+    // then sends late rather than never.
+    let t = 1_000_000;
+    const claims: Date[] = [];
+    let stallNext = false;
+    const store: SlotStore = {
+      claim: async () => {
+        const slotAt = new Date(t + 100);
+        claims.push(slotAt);
+        stallNext = true;
+        return { slotAt, delayMs: 100 };
+      },
+    };
+    const limiter = new RateLimiter({ store, product: 'wnba' });
+    const sends: number[] = [];
+    let release: (() => void) | null = null;
+    const fetchImpl = (async () => {
+      sends.push(t);
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(`${JSON.stringify(events[0])}\n`));
+          release = () => c.close();
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as unknown as typeof fetch;
+    let lastError: string | null = null;
+    const stream = new PushStream({
+      db: null,
+      log,
+      resolver: {
+        source: 'rehearsal',
+        resolvePush: () => ({ url: 'http://127.0.0.1:1/stream/en/clock/subscribe', headers: {} }),
+      },
+      league: 'wnba',
+      runId: null,
+      feed: 'push_clock',
+      limiter,
+      fetchImpl,
+      guard: { assertCall: async () => undefined } as unknown as QuotaGuard,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms + (stallNext ? 500 : 0);
+        stallNext = false;
+      },
+      onLine: () => undefined,
+      onStateChange: (st) => {
+        if (st.lastError) lastError = st.lastError;
+      },
+    });
+    void stream.start();
+    await until(() => stream.state.connections === 1 || lastError !== null);
+    expect(lastError).toBeNull();
+    expect(claims).toHaveLength(PUSH_MAX_SLOT_RECLAIMS + 1);
+    expect(stream.state.slotReclaims).toBe(PUSH_MAX_SLOT_RECLAIMS);
+    expect(sends).toHaveLength(1);
+    const last = claims[claims.length - 1]?.getTime() ?? 0;
+    expect((sends[0] ?? 0) - last).toBeGreaterThan(PUSH_SEND_TOLERANCE_MS);
+    (release as (() => void) | null)?.();
+    await stream.stop();
   });
 
   it('refuses a rate-limited source without limiter and guard, and a counted source without a database', () => {
