@@ -69,7 +69,7 @@ describe('RateLimiter (1 s slots per product)', () => {
     await Promise.all([limiter.waitForSlot(), limiter.waitForSlot()]);
     expect(limiter.granted).toBe(2);
     expect(rateLimiterFor('unit-test-product')).toBe(rateLimiterFor('unit-test-product'));
-    expect(rateLimiterFor('unit-test-product').minIntervalMs).toBe(1200);
+    expect(rateLimiterFor('unit-test-product').minIntervalMs).toBe(2000);
     expect(rateLimiterFor('unit-test-product').product).toBe('unit-test-product');
     expect(rateLimiterFor('unit-test-product').shared).toBe(false);
     expect(rateLimiterFor('unit-test-other')).not.toBe(rateLimiterFor('unit-test-product'));
@@ -149,6 +149,36 @@ describe('RateLimiter with a shared SlotStore (cross-process spacing, plan rev 4
     const b = mk();
     const slots = await Promise.all([a.waitForSlot(), b.waitForSlot(), a.waitForSlot()]);
     expect([...slots].sort((x, y) => x - y)).toEqual([1_000_000, 1_001_000, 1_002_000]);
+  });
+
+  it('concurrent callers of ONE limiter leave an interval apart even when their store claims finish out of order', async () => {
+    // Real clock, slow first claim: without chaining, caller A took local floor t0 and caller B
+    // t0+100, B's claim finished first (store slot t0) and A's second (t0+100); B slept to its
+    // floor t0+100 and A to its store slot t0+100, so both requests left together.
+    const interval = 100;
+    let next = 0;
+    const latencies = [30, 0];
+    const store: SlotStore = {
+      async claim(_product, minIntervalMs): Promise<SlotClaim> {
+        const latency = latencies.shift() ?? 0;
+        await new Promise((r) => setTimeout(r, latency));
+        const now = Date.now();
+        const slot = Math.max(next, now);
+        next = slot + minIntervalMs;
+        return { slotAt: new Date(slot), delayMs: slot - now };
+      },
+    };
+    const limiter = new RateLimiter({ minIntervalMs: interval, store, product: 'wnba' });
+    const departures: number[] = [];
+    const call = async () => {
+      const slot = await limiter.waitForSlot();
+      departures.push(Date.now());
+      return slot;
+    };
+    const slots = await Promise.all([call(), call()]);
+    expect(slots[1] - slots[0]).toBeGreaterThanOrEqual(interval); // store order = call order
+    departures.sort((a, b) => a - b);
+    expect((departures[1] ?? 0) - (departures[0] ?? 0)).toBeGreaterThanOrEqual(interval - 10);
   });
 
   it('the delay is taken on the store clock: a process clock ahead of the database still waits the full gap', async () => {

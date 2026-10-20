@@ -18,17 +18,18 @@ import type { Db } from '../../db/client.js';
  * given (simulation / fixture sources, `db: null`).
  */
 /**
- * 1 s slots with a 200 ms margin. The provider measures spacing on ARRIVAL,
- * while slots are dispatch times: a request leaves late by the timer, the
- * database round trip and, for a process's first request, the cold connection
- * setup, and the next one (warm keep-alive) leaves on time, so two slots 1 s
- * apart can arrive closer than 1 s. A 50 ms margin was not enough: in the M3
- * corrective rehearsal a worker's first two calls had slots 1050 ms apart and
- * arrived 999 ms apart (one 429). The margin costs nothing live (cadences are
- * 30-60 s) and only lowers the call count of a 60x rehearsal, which is
- * limiter-bound anyway. `provider_calls.called_at` spacing is >= 1.2 s.
+ * 2 s slots. The provider measures spacing on ARRIVAL, while slots are dispatch
+ * times: a request leaves late by the timer, the database round trip and, for a
+ * process's first request, the cold connection setup, so two slots 1 s apart can
+ * arrive closer than 1 s. 1050 ms failed in the M3 corrective rehearsal (999 ms
+ * on arrival, one 429). 1200 ms failed on the first live run (2026-10-19, WNBA
+ * Finals G2): 8 of the 28 summary calls sent 1.200 s after a pbp call got HTTP
+ * 429 on a warm connection, every pbp 30 s apart passed. Sportradar's exact rule
+ * is unknown, so the margin is a full second; it costs nothing live (cadences
+ * are 30-60 s, and only a call due together with another waits) and a residual
+ * 429 is retried by the watcher. `provider_calls.called_at` spacing is >= 2 s.
  */
-export const DEFAULT_MIN_INTERVAL_MS = 1200;
+export const DEFAULT_MIN_INTERVAL_MS = 2000;
 
 /** A claimed slot: when the request may start, and how long the claimant must wait for it. */
 export interface SlotClaim {
@@ -116,6 +117,8 @@ export class RateLimiter {
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private store: SlotStore | null;
+  /** Store claims of this process, in call order (see waitForSlot). */
+  private claimChain: Promise<void> = Promise.resolve();
 
   /** Whether slots are claimed from a shared store (cross-process) or only in this process. */
   get shared(): boolean {
@@ -137,28 +140,42 @@ export class RateLimiter {
 
   /**
    * Resolves when the caller's slot has arrived, returning the slot time (ms
-   * epoch). The local slot is claimed synchronously, before any await, so
-   * concurrent callers in this process never share one; with a store, the slot
-   * actually used is the store's (database clock), and the local schedule is
-   * only a floor.
+   * epoch). Without a store the local slot is claimed synchronously, before any
+   * await, so concurrent callers in this process never share one. With a store,
+   * claims are chained: each caller claims its store slot and derives its local
+   * floor only after the previous caller has, so store order and local order
+   * agree. (Claiming the local floor first and the store slot after an await let
+   * two concurrent callers receive store slots in the opposite order; one then
+   * slept past its own slot to the other's floor and both left together.)
    */
   async waitForSlot(): Promise<number> {
-    const now = this.now();
-    const localSlot = Math.max(this.nextSlot ?? now, now);
-    this.nextSlot = localSlot + this.minIntervalMs;
     this.granted++;
-    if (this.store === null || this.product === null) {
+    const store = this.store;
+    const product = this.product;
+    if (store === null || product === null) {
+      const now = this.now();
+      const localSlot = Math.max(this.nextSlot ?? now, now);
+      this.nextSlot = localSlot + this.minIntervalMs;
       if (this.minIntervalMs <= 0) return localSlot;
       await this.sleepUntil(localSlot);
       return localSlot;
     }
-    const claim = await this.store.claim(this.product, this.minIntervalMs);
-    this.claimed++;
-    // Sleep on the store's delay (its clock), never shorter than the local floor.
-    const target = Math.max(localSlot, this.now() + Math.max(0, claim.delayMs));
-    this.nextSlot = Math.max(this.nextSlot ?? 0, target + this.minIntervalMs);
+    const ticket = this.claimChain.then(async () => {
+      const claim = await store.claim(product, this.minIntervalMs);
+      this.claimed++;
+      // Sleep on the store's delay (its clock), never shorter than the local floor.
+      const now = this.now();
+      const target = Math.max(this.nextSlot ?? now, now + Math.max(0, claim.delayMs));
+      this.nextSlot = target + this.minIntervalMs;
+      return { slotAt: claim.slotAt.getTime(), target };
+    });
+    this.claimChain = ticket.then(
+      () => undefined,
+      () => undefined,
+    );
+    const { slotAt, target } = await ticket;
     await this.sleepUntil(target);
-    return claim.slotAt.getTime();
+    return slotAt;
   }
 
   private async sleepUntil(t: number): Promise<void> {
