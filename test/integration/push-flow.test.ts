@@ -145,6 +145,7 @@ describe('push mode against the fake provider with a mid-game stream drop', () =
       // an APPLIED REST pbp of this generation was requested at or after the reconnect
       // (backfillNeeded). The skip branch is checked against the ledger: a 200 pbp call of the
       // generation whose called_at is at or after the push_events reconnect call.
+      expect(push.backfillsFailed).toBe(0);
       expect(push.backfills + push.backfillsSkipped).toBe(events?.reconnects);
       if (push.backfillsSkipped > 0) {
         const [cover] = await db<{ n: number }[]>`

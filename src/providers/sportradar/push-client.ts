@@ -7,7 +7,7 @@ import {
 } from '../../ingest/quota-guard.js';
 import type { LeagueCode } from '../../leagues/codes.js';
 import type { Logger } from '../../logger.js';
-import { claimSlot, type RateLimiter } from './rate-limiter.js';
+import { claimSlot, type RateLimiter, SlotClaimTimeoutError } from './rate-limiter.js';
 import {
   type PushClockMessage,
   PushClockMessageSchema,
@@ -387,6 +387,12 @@ export class PushStream {
       } catch (err) {
         this.clearWatchdog();
         if (this.stopped) break;
+        // A slot claim that timed out sent nothing: it is not a connection attempt, so it does not
+        // spend the watch's connection allowance (a database stall must not stop push for good).
+        if (err instanceof SlotClaimTimeoutError && requestedAt === null) {
+          if (budget) budget.remaining++;
+          this.state.attempts--;
+        }
         const message = (err as Error).message.slice(0, 500);
         this.consecutiveFailures++;
         this.state.lastError = message;
@@ -432,7 +438,12 @@ export class PushStream {
     if (!store || limiter.product === null) return new Date(await limiter.waitForSlot());
     const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     for (let attempt = 0; ; attempt++) {
-      const claim = await claimSlot(store, limiter.product, limiter.minIntervalMs);
+      const claim = await claimSlot(
+        store,
+        limiter.product,
+        limiter.minIntervalMs,
+        limiter.claimTimeoutMs,
+      );
       const sendAt = this.now() + Math.max(0, claim.delayMs);
       for (let t = this.now(); t < sendAt && !this.stopped; t = this.now()) await sleep(sendAt - t);
       const lateMs = this.now() - sendAt;

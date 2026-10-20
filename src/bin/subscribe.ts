@@ -36,6 +36,7 @@ async function main() {
     strict: true,
   });
   if (!args.game && !args.league) throw new Error('--game <uuid> or --league <code> is required');
+  if (args.game && args.league) throw new Error('--game and --league are exclusive');
   const settleMs = Number(args['settle-ms']);
   if (!Number.isInteger(settleMs) || settleMs < 0) {
     throw new Error('--settle-ms must be an integer >= 0');

@@ -437,6 +437,55 @@ describe('PushStream', () => {
     expect(seen).toEqual([null]);
   });
 
+  it('a slot claim that times out is not a connection attempt: the shared allowance is refunded', async () => {
+    let claims = 0;
+    const store: SlotStore = {
+      claim: async () => {
+        claims++;
+        if (claims <= 3) return new Promise<never>(() => undefined); // a stalled database
+        return { slotAt: new Date(), delayMs: 0 };
+      },
+    };
+    const limiter = new RateLimiter({ store, product: 'wnba', claimTimeoutMs: 5 });
+    const budget = { remaining: 2 };
+    let release: (() => void) | null = null;
+    const fetchImpl = (async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(`${JSON.stringify(events[0])}\n`));
+          release = () => c.close();
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as unknown as typeof fetch;
+    const stream = new PushStream({
+      db: null,
+      log,
+      resolver: {
+        source: 'rehearsal',
+        resolvePush: () => ({ url: 'http://127.0.0.1:1/stream/en/clock/subscribe', headers: {} }),
+      },
+      league: 'wnba',
+      runId: null,
+      feed: 'push_clock',
+      limiter,
+      fetchImpl,
+      guard: { assertCall: async () => undefined } as unknown as QuotaGuard,
+      attemptBudget: budget,
+      backoffMinMs: 1,
+      backoffMaxMs: 2,
+      onLine: () => undefined,
+    });
+    void stream.start();
+    await until(() => stream.state.connections === 1);
+    expect(claims).toBe(4);
+    // Three stalled claims sent nothing; only the connection that was made spent the allowance.
+    expect(stream.state.attempts).toBe(1);
+    expect(budget.remaining).toBe(1);
+    (release as (() => void) | null)?.();
+    await stream.stop();
+  });
+
   it('after the maximum re-claims a late send leaves anyway, on the last claimed slot', async () => {
     // Every claim stalls 500 ms past its slot: the stream re-claims PUSH_MAX_SLOT_RECLAIMS times,
     // then sends late rather than never.

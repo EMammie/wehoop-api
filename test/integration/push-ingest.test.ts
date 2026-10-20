@@ -5,7 +5,7 @@ import type { DocumentSource } from '../../src/ingest/game-watcher.js';
 import { PushIngest } from '../../src/ingest/push-ingest.js';
 import type { RunHandle } from '../../src/ingest/runs.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
-import type { FetchedDocument } from '../../src/providers/sportradar/http.js';
+import { type FetchedDocument, ProviderHttpError } from '../../src/providers/sportradar/http.js';
 import type { PushLine } from '../../src/providers/sportradar/push-client.js';
 import {
   type PushClockMessage,
@@ -321,11 +321,47 @@ describe('push ingestion', () => {
     expect(ingest.stats.otherGame).toBe(1);
   });
 
-  it('backfill: a complete REST pbp through a backfill sub-run of the same generation reconciles without staleness', async () => {
+  it('backfill: a 429 that never clears ends the backfill sub-run as error after one retry, nothing applied', async () => {
+    let fetches = 0;
+    const source: DocumentSource = {
+      observationSource: 'rest',
+      async fetch<T>(): Promise<FetchedDocument<T>> {
+        fetches++;
+        throw new ProviderHttpError(429, 'pbp', 'Too Many Requests');
+      },
+    };
+    const before = await counts(db, gameId);
+    await expect(
+      runBackfill(
+        {
+          db,
+          log: silentLog,
+          adapter: wnbaAdapter,
+          apply: deps,
+          gameId,
+          parentRun: root,
+          source: 'fixture',
+          observationSource: 'rest',
+          makeSource: () => source,
+        },
+        'test drop (429)',
+      ),
+    ).rejects.toBeInstanceOf(ProviderHttpError);
+    expect(fetches).toBe(2);
+    expect((await counts(db, gameId)).changes).toBe(before.changes);
+    const [run] = await db<{ status: string }[]>`
+      select status from ingest.ingestion_runs
+       where kind = 'backfill' and parent_run_id = ${root.id} order by id desc limit 1`;
+    expect(run?.status).toBe('error');
+  });
+
+  it('backfill: a complete REST pbp through a backfill sub-run of the same generation reconciles without staleness (after one HTTP 429, retried at the next slot)', async () => {
     const halftime = fixture('sim-93ee7c68-pbp-halftime.json');
+    let fetches = 0;
     const source: DocumentSource = {
       observationSource: 'rest',
       async fetch<T>(_feed: string, schema: ZodType<T>): Promise<FetchedDocument<T>> {
+        if (++fetches === 1) throw new ProviderHttpError(429, 'pbp', 'Too Many Requests');
         const body = retarget(halftime);
         const now = new Date(T0.getTime() + 10_000);
         return {
@@ -352,6 +388,7 @@ describe('push ingestion', () => {
       },
       'test drop',
     );
+    expect(fetches).toBe(2);
     expect(out.watchId).toBe(root.id);
     expect(out.outcome?.result.outcome).toBe('applied');
     expect(out.outcome?.status).toBe('halftime');
