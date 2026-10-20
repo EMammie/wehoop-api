@@ -155,7 +155,8 @@ export class RateLimiter {
   }
 
   private readonly now: () => number;
-  private readonly claimTimeoutMs: number;
+  /** Bound on one store claim (also used by callers that claim straight from the store). */
+  readonly claimTimeoutMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private store: SlotStore | null;
   /** Store claims of this process, in call order (see waitForSlot). */

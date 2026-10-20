@@ -1,6 +1,7 @@
 import type { Db } from '../db/client.js';
 import type { LeagueAdapter } from '../leagues/adapter.js';
 import type { Logger } from '../logger.js';
+import { ProviderHttpError } from '../providers/sportradar/http.js';
 import { PbpDocumentSchema } from '../providers/sportradar/schemas/pbp.js';
 import type { ApplyDeps } from './apply-changes.js';
 import { type DocumentSource, GameWatcher, type ProcessOutcome } from './game-watcher.js';
@@ -30,6 +31,8 @@ export interface BackfillDeps {
   observationSource: ObservationSource;
   /** The REST source for this game, attributed to the backfill run (`provider_calls.run_id`). */
   makeSource: (run: RunHandle) => DocumentSource;
+  /** Retries of a provider 429 at the next rate slot (plan rev 4.8 (2)); default 1, like a cadence feed. */
+  retriesOn429?: number;
 }
 
 export interface BackfillOutcome {
@@ -68,7 +71,27 @@ export async function runBackfill(
   try {
     await watcher.attach(deps.gameId);
     const source = deps.makeSource(run);
-    const pbp = await source.fetch('pbp', PbpDocumentSchema);
+    const retries = deps.retriesOn429 ?? 1;
+    // A residual 429 is retried at the next slot, as the cadence loop does (each retry is a logged,
+    // quota-counted call); otherwise one 429 would leave the outage unreconciled until the next
+    // 5-minute REST reconciliation.
+    const fetchPbp = async () => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await source.fetch('pbp', PbpDocumentSchema);
+        } catch (err) {
+          if (err instanceof ProviderHttpError && err.status === 429 && attempt < retries) {
+            deps.log.warn(
+              { runId: run.id, gameId: deps.gameId, attempt: attempt + 1 },
+              'backfill pbp got HTTP 429; retrying at the next rate slot',
+            );
+            continue;
+          }
+          throw err;
+        }
+      }
+    };
+    const pbp = await fetchPbp();
     const outcome = await watcher.process(
       'pbp',
       JSON.parse(pbp.rawText),
