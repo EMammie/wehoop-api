@@ -39,7 +39,7 @@ export interface SportradarHttpDeps {
   product?: string;
   runId: number | null;
   /**
-   * Required for trial/production resolvers (plan §4 "Rate/quota"): one shared 1 s slot limiter
+   * Required for trial/production resolvers (plan §4 "Rate/quota"): one shared rate-slot limiter (2 s slots)
    * per product and the guard that refuses below reserve. Ignored for simulation sources.
    */
   limiter?: RateLimiter;

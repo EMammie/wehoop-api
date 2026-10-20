@@ -119,7 +119,13 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
     const stats = lagFromRecord(lines);
     expect(stats.changes).toBe(4); // catch-up lines are not live delivery
     expect(stats.wallClock).toEqual({ n: 2, medianMs: 2200, p95Ms: 2500 });
-    expect(stats.providerUpdated).toEqual({ n: 0, medianMs: null, p95Ms: null, excluded: 0 });
+    expect(stats.providerUpdated).toEqual({
+      n: 0,
+      medianMs: null,
+      p95Ms: null,
+      excluded: 0,
+      notBroadcast: 0,
+    });
     expect(stats.pipeline).toEqual({ n: 4, medianMs: 200, p95Ms: 500 });
     expect(stats.catchUp).toEqual({ n: 1, medianMs: 900, p95Ms: 900 });
     // Feeds without wall_clock (NCAAWB): lag from the stored provider revision of each event.
@@ -132,11 +138,12 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
       medianMs: 1000,
       p95Ms: 1500,
       excluded: 0,
+      notBroadcast: 0,
     });
     expect(lagFromRecord([])).toEqual({
       changes: 0,
       wallClock: { n: 0, medianMs: null, p95Ms: null },
-      providerUpdated: { n: 0, medianMs: null, p95Ms: null, excluded: 0 },
+      providerUpdated: { n: 0, medianMs: null, p95Ms: null, excluded: 0, notBroadcast: 0 },
       pipeline: { n: 0, medianMs: null, p95Ms: null },
       catchUp: { n: 0, medianMs: null, p95Ms: null },
     });
@@ -177,6 +184,12 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
     ]);
     const stats = lagFromRecord(lines, revisions);
     expect(stats.wallClock).toEqual({ n: 2, medianMs: 10_000, p95Ms: 10_000 });
-    expect(stats.providerUpdated).toEqual({ n: 1, medianMs: 5000, p95Ms: 5000, excluded: 1 });
+    expect(stats.providerUpdated).toEqual({
+      n: 1,
+      medianMs: 5000,
+      p95Ms: 5000,
+      excluded: 1,
+      notBroadcast: 0,
+    });
   });
 });

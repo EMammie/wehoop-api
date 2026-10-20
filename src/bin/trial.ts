@@ -134,7 +134,7 @@ async function main() {
         `catch-up deliveries (change.ts -> receivedAt via /changes, n=${stats.catchUp.n}): median ${fmt(stats.catchUp.medianMs)} p95 ${fmt(stats.catchUp.p95Ms)}`,
       );
       console.log(
-        `provider-revision lag [reported where the feed carries updated] (last delivered change of each event: receivedAt - play_events.provider_updated_at, n=${stats.providerUpdated.n}, excluded ${stats.providerUpdated.excluded} revised after receipt${args.game ? '' : '; pass --game <uuid>'}): median ${fmt(stats.providerUpdated.medianMs)} p95 ${fmt(stats.providerUpdated.p95Ms)}`,
+        `provider-revision lag [reported where the feed carries updated] (last delivered change of each event: receivedAt - play_events.provider_updated_at, n=${stats.providerUpdated.n} events not re-stamped after delivery; excluded ${stats.providerUpdated.excluded} re-stamped, ${stats.providerUpdated.notBroadcast} last delivered by catch-up${args.game ? '' : '; pass --game <uuid>'}): median ${fmt(stats.providerUpdated.medianMs)} p95 ${fmt(stats.providerUpdated.p95Ms)}`,
       );
       console.log(
         stats.wallClock.n === 0

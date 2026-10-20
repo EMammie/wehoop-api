@@ -82,4 +82,23 @@ describe('cadenceLoop and the quota guard', () => {
     expect(src.feeds).toEqual(['pbp', 'summary', 'summary', 'summary', 'boxscore', 'boxscore']);
     expect(out).toMatchObject({ status: 'closed', failed: 0, retried429: 3, calls: 3 });
   });
+
+  it('a 429 while the watch is stopping is not retried', async () => {
+    let stopped = false;
+    const src = source(['429']);
+    const stopping = {
+      ...src,
+      observationSource: src.observationSource,
+      fetch: ((...a: Parameters<DocumentSource['fetch']>) => {
+        stopped = true; // the operator stops the watch while this call is in flight
+        return src.fetch(...a);
+      }) as DocumentSource['fetch'],
+    } as DocumentSource;
+    const out = await cadenceLoop(watcher, stopping, silent, cadence, {
+      untilClosed: false,
+      isStopped: () => stopped,
+    });
+    expect(src.calls).toBe(1);
+    expect(out).toMatchObject({ calls: 0, failed: 1, retried429: 0 });
+  });
 });

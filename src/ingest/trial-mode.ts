@@ -536,14 +536,18 @@ export interface LagStats {
    * receivedAt - the event's provider revision (`updated`, play_events.provider_updated_at), for
    * feeds without wall_clock (NCAAWB pbp carries none). Needs the game's play_events (`--game`).
    * Only the stored (current) revision is known, so each event is measured once, on its LAST
-   * delivered change; `excluded` counts events whose stored revision is later than that receipt
-   * (a revision-only update after it), which would otherwise read as negative lag.
+   * delivered change, when that change came by broadcast (`notBroadcast` counts the others);
+   * `excluded` counts events whose stored revision is later than that receipt (re-stamped after
+   * delivery), which would otherwise read as negative lag. `n` therefore covers only events not
+   * re-stamped after delivery; a provider that re-stamps every event at finalization leaves n ~ 0.
    */
   providerUpdated: {
     n: number;
     medianMs: number | null;
     p95Ms: number | null;
     excluded: number;
+    /** Events whose last change arrived by catch-up (measured on live delivery only). */
+    notBroadcast: number;
   };
   /** receivedAt - change.ts (applyChanges commit -> subscriber): the pipeline's own lag. */
   pipeline: { n: number; medianMs: number | null; p95Ms: number | null };
@@ -575,8 +579,8 @@ export function lagFromRecord(lines: string[], revisions?: Map<string, string>):
   const wall: number[] = [];
   const pipe: number[] = [];
   const caught: number[] = [];
-  /** Per provider event, the receipt of its last broadcast-delivered event change (by seq). */
-  const lastReceipt = new Map<string, { seq: number; received: number }>();
+  /** Per provider event, the receipt of its last delivered event change (by seq, any path). */
+  const lastReceipt = new Map<string, { seq: number; received: number; broadcast: boolean }>();
   let changes = 0;
   for (const raw of lines) {
     if (!raw.trim()) continue;
@@ -587,6 +591,16 @@ export function lagFromRecord(lines: string[], revisions?: Map<string, string>):
     const received = Date.parse(parsed.receivedAt);
     const c = change.data;
     if (parsed.via === 'catch-up') caught.push(received - Date.parse(c.ts));
+    if ((c.type === 'event_insert' || c.type === 'event_update') && c.providerEventId) {
+      const prev = lastReceipt.get(c.providerEventId);
+      if (!prev || c.seq > prev.seq) {
+        lastReceipt.set(c.providerEventId, {
+          seq: c.seq,
+          received,
+          broadcast: parsed.via === 'broadcast',
+        });
+      }
+    }
     if (parsed.via !== 'broadcast') continue;
     changes++;
     pipe.push(received - Date.parse(c.ts));
@@ -594,16 +608,17 @@ export function lagFromRecord(lines: string[], revisions?: Map<string, string>):
     if (c.type === 'event_insert' && typeof body.wallClock === 'string') {
       wall.push(received - Date.parse(body.wallClock));
     }
-    if ((c.type === 'event_insert' || c.type === 'event_update') && c.providerEventId) {
-      const prev = lastReceipt.get(c.providerEventId);
-      if (!prev || c.seq > prev.seq) lastReceipt.set(c.providerEventId, { seq: c.seq, received });
-    }
   }
   const revised: number[] = [];
   let excluded = 0;
-  for (const [providerEventId, { received }] of lastReceipt) {
+  let notBroadcast = 0;
+  for (const [providerEventId, { received, broadcast }] of lastReceipt) {
     const updated = revisions?.get(providerEventId);
     if (!updated) continue;
+    if (!broadcast) {
+      notBroadcast++;
+      continue;
+    }
     const lag = received - Date.parse(updated);
     if (lag < 0) excluded++;
     else revised.push(lag);
@@ -617,7 +632,7 @@ export function lagFromRecord(lines: string[], revisions?: Map<string, string>):
   return {
     changes,
     wallClock: stats(wall),
-    providerUpdated: { ...stats(revised), excluded },
+    providerUpdated: { ...stats(revised), excluded, notBroadcast },
     pipeline: stats(pipe),
     catchUp: stats(caught),
   };

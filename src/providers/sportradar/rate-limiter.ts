@@ -3,9 +3,10 @@ import type { Db } from '../../db/client.js';
 /**
  * RateLimiter (plan §4 "Rate/quota"): grants slots at least `minIntervalMs`
  * apart across concurrent callers. Modelled on the Wehoop iOS actor: slot
- * assignment is serialized, so N concurrent callers get t, t+1 s, t+2 s, ...
+ * assignment is serialized, so N concurrent callers get t, t+2 s, t+4 s, ...
  * regardless of arrival order. Sportradar trial and production keys allow
- * 1 request/second per product; exceeding it returns HTTP 429.
+ * 1 request/second per product (the floor; slots are 2 s, see below);
+ * exceeding it returns HTTP 429.
  *
  * The limit is per product KEY, not per process. `pnpm trial plan` (a CLI
  * process) followed within 1 s by `pnpm trial watch` (which spawns the worker)

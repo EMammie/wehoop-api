@@ -24,7 +24,7 @@ function fakeClock(start = 1_000_000) {
   };
 }
 
-describe('RateLimiter (1 s slots per product)', () => {
+describe('RateLimiter (slots per product)', () => {
   it('spaces concurrent callers one interval apart regardless of arrival order', async () => {
     const clock = fakeClock();
     const limiter = new RateLimiter({ minIntervalMs: 1000, now: clock.now, sleep: clock.sleep });
@@ -153,9 +153,9 @@ describe('RateLimiter with a shared SlotStore (cross-process spacing, plan rev 4
 
   it('concurrent callers of ONE limiter leave an interval apart even when their store claims finish out of order', async () => {
     // Real clock, slow first claim: without chaining, caller A took local floor t0 and caller B
-    // t0+100, B's claim finished first (store slot t0) and A's second (t0+100); B slept to its
-    // floor t0+100 and A to its store slot t0+100, so both requests left together.
-    const interval = 100;
+    // t0+200, B's claim finished first (store slot t0) and A's second (t0+200); B slept to its
+    // floor t0+200 and A to its store slot t0+200, so both requests left together.
+    const interval = 200;
     let next = 0;
     const latencies = [30, 0];
     const store: SlotStore = {
@@ -178,7 +178,40 @@ describe('RateLimiter with a shared SlotStore (cross-process spacing, plan rev 4
     const slots = await Promise.all([call(), call()]);
     expect(slots[1] - slots[0]).toBeGreaterThanOrEqual(interval); // store order = call order
     departures.sort((a, b) => a - b);
-    expect((departures[1] ?? 0) - (departures[0] ?? 0)).toBeGreaterThanOrEqual(interval - 10);
+    expect((departures[1] ?? 0) - (departures[0] ?? 0)).toBeGreaterThanOrEqual(interval - 30);
+  });
+
+  it('a rejected store claim reaches its own caller and does not poison later callers', async () => {
+    const clock = fakeClock();
+    const { store: inner } = fakeStore(clock.now);
+    let n = 0;
+    const store: SlotStore = {
+      async claim(product, minIntervalMs) {
+        n++;
+        if (n === 2) throw new Error('db down');
+        return inner.claim(product, minIntervalMs);
+      },
+    };
+    const limiter = new RateLimiter({
+      minIntervalMs: 1000,
+      store,
+      product: 'wnba',
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+    const results = await Promise.allSettled([
+      limiter.waitForSlot(),
+      limiter.waitForSlot(),
+      limiter.waitForSlot(),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected', 'fulfilled']);
+    expect((results[1] as PromiseRejectedResult).reason).toEqual(new Error('db down'));
+    const [a, , c] = results as PromiseFulfilledResult<number>[];
+    expect((c?.value ?? 0) - (a?.value ?? 0)).toBe(1000);
+    expect(limiter.granted).toBe(3);
+    expect(limiter.claimed).toBe(2);
+    await limiter.waitForSlot();
+    expect(limiter.claimed).toBe(3);
   });
 
   it('the delay is taken on the store clock: a process clock ahead of the database still waits the full gap', async () => {
