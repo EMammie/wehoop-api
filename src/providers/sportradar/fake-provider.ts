@@ -158,16 +158,16 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
       feed = game[1] ?? 'pbp';
       body = pick(feed as 'pbp' | 'summary' | 'boxscore');
     } else if (daily) {
-      // The recording's one game, listed only on its calendar day: assumed UTC day until the first
-      // live daily call is captured (the real feed's boundary is likely the Eastern calendar day).
-      // `planDay` lists what the document returned, so this choice never changes the operator's list.
+      // The recording's one game, listed only on its US Eastern calendar day, like the real feed:
+      // the first live daily call (WNBA, 2026-10-19) listed a game tipping at 2026-10-20T00:00Z
+      // under 2026-10-19. `planDay` lists what the document returned either way.
       feed = 'daily_schedule';
       const date = `${daily[1]}-${daily[2]}-${daily[3]}`;
       body = {
         league: schedule.league,
         date,
         season: schedule.season,
-        games: schedule.games.filter((g) => String(g.scheduled).slice(0, 10) === date),
+        games: schedule.games.filter((g) => easternDate(String(g.scheduled)) === date),
       };
     } else if (sched) {
       feed = 'schedule';
@@ -205,4 +205,16 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
         server.closeAllConnections();
       }),
   };
+}
+
+const EASTERN_DAY = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/New_York',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+/** `YYYY-MM-DD` of an ISO instant on the US Eastern calendar (the daily feed's day boundary). */
+export function easternDate(iso: string): string {
+  return EASTERN_DAY.format(new Date(iso));
 }

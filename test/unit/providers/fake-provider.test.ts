@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  easternDate,
   type FakeProvider,
   startFakeProvider,
 } from '../../../src/providers/sportradar/fake-provider.js';
@@ -77,5 +78,13 @@ describe('fake provider (rehearsal stand-in for api.sportradar.com)', () => {
     const doc = SummaryDocumentSchema.parse(await res.json());
     expect(doc.status).toBe('closed');
     expect(server.documents).toBeGreaterThan(100);
+  });
+});
+
+describe('easternDate (the daily feed day boundary, live run 2026-10-19)', () => {
+  it('files an evening ET game under its Eastern date, not its UTC date', () => {
+    expect(easternDate('2026-10-20T00:00:00Z')).toBe('2026-10-19'); // WNBA Finals G2, 8 pm EDT
+    expect(easternDate('2026-10-19T16:00:00Z')).toBe('2026-10-19');
+    expect(easternDate('2026-11-08T04:30:00Z')).toBe('2026-11-07'); // 11:30 pm EST
   });
 });
