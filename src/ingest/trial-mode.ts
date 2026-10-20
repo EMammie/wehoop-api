@@ -370,9 +370,10 @@ export function planWatch(
  */
 export function backfillNeeded(args: {
   lastPbpCalledAt: Date | null;
-  reconnectedAt: Date;
+  /** null: the reconnect moment could not be read on the database clock; always backfill. */
+  reconnectedAt: Date | null;
 }): boolean {
-  if (args.lastPbpCalledAt === null) return true;
+  if (args.lastPbpCalledAt === null || args.reconnectedAt === null) return true;
   return args.lastPbpCalledAt.getTime() < args.reconnectedAt.getTime();
 }
 
@@ -660,7 +661,11 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
   const subRun = await ingest.start();
   let backfills = 0;
   let backfillsSkipped = 0;
-  const backfill = async (info: { connections: number; downMs: number; reconnectedAt: Date }) => {
+  const backfill = async (info: {
+    connections: number;
+    downMs: number;
+    reconnectedAt: Date | null;
+  }) => {
     // Only an APPLIED pbp document of this generation (REST reconciliation or an earlier backfill)
     // requested at or after the reconnect covers the gap; one requested during the outage still
     // leaves the events between its request and the reconnect missing, and a fetched document that
