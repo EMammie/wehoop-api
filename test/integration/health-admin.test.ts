@@ -2,7 +2,19 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/api/server.js';
 import { loadConfig } from '../../src/config.js';
-import { silentLog, testDb } from '../helpers/db.js';
+import { endRun, startRun } from '../../src/ingest/runs.js';
+import { requeueDead } from '../../src/live/outbox-admin.js';
+import { OutboxPublisher } from '../../src/live/outbox-publisher.js';
+import { MemoryTransport } from '../../src/live/transport.js';
+import {
+  apply,
+  observation,
+  pbpQ1,
+  replayRun,
+  seedGame,
+  silentLog,
+  testDb,
+} from '../helpers/db.js';
 
 /**
  * GET /health and GET /v1/admin/quota (plan §5): outbox lag, dead count, lock
@@ -51,6 +63,51 @@ describe('GET /health', () => {
     const tick = worker.lastTick as Record<string, unknown>;
     expect('providerCallAt' in tick && 'observedAt' in tick).toBe(true);
     expect(JSON.stringify(body)).not.toMatch(/key|token|secret/i);
+    expect(Array.isArray(body.alerts)).toBe(true);
+    expect(typeof body.degraded).toBe('boolean');
+    expect(Array.isArray(body.push)).toBe(true);
+  });
+
+  it('degraded (dead outbox row, push stream down > 60 s) stays HTTP 200 with the alerts listed', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    await apply({ db, log: silentLog }, gameId, nd, observation(run, nd, new Date()));
+    await new OutboxPublisher({ db, log: silentLog, transport: new MemoryTransport() }).drain();
+    await db`update ingest.broadcast_outbox set published_at = null, dead_at = now(), attempts = 10
+             where game_id = ${gameId} and seq = 1`;
+    const sub = await startRun(db, {
+      kind: 'push_stream',
+      league: 'wnba',
+      gameId,
+      source: 'fixture',
+      parentRunId: run.id,
+      meta: {
+        push: {
+          push_events: {
+            status: 'backoff',
+            disconnectedSince: new Date(Date.now() - 120_000).toISOString(),
+          },
+        },
+      },
+    });
+    try {
+      const res = await withAdmin.request('/health');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { degraded: boolean; alerts: string[]; push: unknown[] };
+      expect(body.degraded).toBe(true);
+      expect(body.alerts.some((a) => a.startsWith('outbox_dead'))).toBe(true);
+      expect(
+        body.alerts.some((a) =>
+          a.startsWith(`push_stream_disconnected: push_events of game ${gameId}`),
+        ),
+      ).toBe(true);
+      expect(body.push.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await endRun(db, sub.id, 'aborted');
+      await requeueDead(db, { gameId });
+      await new OutboxPublisher({ db, log: silentLog, transport: new MemoryTransport() }).drain();
+    }
   });
 });
 

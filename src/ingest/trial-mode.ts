@@ -6,28 +6,84 @@ import type { PulseSender } from '../live/pulse.js';
 import type { Logger } from '../logger.js';
 import { GameChangeSchema } from '../model/game-change.js';
 import { SportradarHttp } from '../providers/sportradar/http.js';
-import { rateLimiterFor } from '../providers/sportradar/rate-limiter.js';
+import {
+  PushStream,
+  type PushStreamDeps,
+  type PushStreamState,
+} from '../providers/sportradar/push-client.js';
+import { PgSlotStore, RateLimiter, rateLimiterFor } from '../providers/sportradar/rate-limiter.js';
 import { createResolver } from '../providers/sportradar/resolver.js';
 import {
   DailyScheduleDocumentSchema,
   SeasonScheduleDocumentSchema,
 } from '../providers/sportradar/schemas/schedule.js';
-import type { ResolverSource } from '../providers/sportradar/urls.js';
+import type {
+  Feed,
+  PushFeed,
+  PushUrlResolver,
+  ResolverSource,
+  UrlResolver,
+} from '../providers/sportradar/urls.js';
+import { runBackfill } from './backfill.js';
 import {
   type Budget,
   budgetFor,
   type Cadence,
   cadenceFor,
+  PUSH_CONNECTION_ALLOWANCE,
   scaleCadence,
   type TrialProfile,
 } from './cadence.js';
 import type { FaultInjector } from './fault.js';
-import { cadenceLoop, GameWatcher, HttpDocumentSource } from './game-watcher.js';
+import {
+  cadenceLoop,
+  GameWatcher,
+  HttpDocumentSource,
+  type ProcessOutcome,
+  type WatcherDeps,
+} from './game-watcher.js';
+import { PushIngest, type PushIngestStats } from './push-ingest.js';
 import { needsRateLimit, type QuotaGuard, type Reservation } from './quota-guard.js';
 import { ReferenceIngester } from './reference.js';
-import { endRun, type RunSource, startRun } from './runs.js';
+import { endRun, type RunHandle, type RunSource, setRunMeta, startRun } from './runs.js';
 import { seasonFor } from './season.js';
 import type { ObservationSource } from './types.js';
+
+/**
+ * Push mode: the newest pbp document of this generation that was APPLIED (outcome `applied`),
+ * by its request time (database clock). A reconnect's backfill is skipped only when this is at or
+ * after the reconnect; a fetched pbp whose document failed or was stale covers nothing.
+ */
+interface AppliedPbp {
+  lastRequestedAt: Date | null;
+}
+
+function noteAppliedPbp(tracker: AppliedPbp, requestedAt: Date): void {
+  if (tracker.lastRequestedAt === null || requestedAt > tracker.lastRequestedAt)
+    tracker.lastRequestedAt = requestedAt;
+}
+
+/** The cadence watcher in push mode: records every applied pbp document for the backfill decision. */
+class PbpTrackingWatcher extends GameWatcher {
+  constructor(
+    deps: WatcherDeps,
+    private readonly tracker: AppliedPbp,
+  ) {
+    super(deps);
+  }
+
+  override async process(
+    feed: Feed,
+    body: unknown,
+    observedAt: Date,
+    source: ObservationSource,
+  ): Promise<ProcessOutcome | null> {
+    const out = await super.process(feed, body, observedAt, source);
+    if (feed === 'pbp' && out?.result.outcome === 'applied')
+      noteAppliedPbp(this.tracker, observedAt);
+    return out;
+  }
+}
 
 /**
  * Trial mode (plan §4): no automatic discovery. The operator plans a date (one
@@ -275,12 +331,17 @@ export interface WatchPlan {
   budget: Budget;
 }
 
-/** The cadence and budget a game takes under a profile (defaulting the profile from coverage). */
+/**
+ * The cadence and budget a game takes under a profile (defaulting the profile from coverage).
+ * With `push` (M4, opt-in) the cadence is the 5-minute REST reconciliation and the budget
+ * carries the stream connection allowance on top.
+ */
 export function planWatch(
   adapter: LeagueAdapter,
   source: RunSource,
   coverage: string | null,
   profile?: TrialProfile,
+  push = false,
 ): WatchPlan {
   const chosen = profile ?? (coverage === 'full' ? 'full' : 'extended');
   // Trial profiles apply to every polled source; the simulation cadence is for `--recording`
@@ -291,8 +352,53 @@ export function planWatch(
     capabilities: adapter.capabilities,
     coverage,
     profile: chosen,
+    push,
   });
-  return { profile: chosen, cadence, budget: budgetFor(cadence) };
+  const budget = budgetFor(cadence);
+  return {
+    profile: chosen,
+    cadence,
+    budget: push ? { ...budget, total: budget.total + PUSH_CONNECTION_ALLOWANCE } : budget,
+  };
+}
+
+/**
+ * Does a reconnect need a backfill? A REST pbp document covers everything up to its request time
+ * and the stream everything after the reconnect, so only a 200 pbp call of this generation made
+ * AT OR AFTER the reconnect moment covers the gap; anything earlier (even one fetched during the
+ * outage) leaves the events between its request and the reconnect to the backfill. Pure, unit-tested.
+ */
+export function backfillNeeded(args: {
+  lastPbpCalledAt: Date | null;
+  /** null: the reconnect moment could not be read on the database clock; always backfill. */
+  reconnectedAt: Date | null;
+}): boolean {
+  if (args.lastPbpCalledAt === null || args.reconnectedAt === null) return true;
+  return args.lastPbpCalledAt.getTime() < args.reconnectedAt.getTime();
+}
+
+/** Push-mode knobs (tests compress the watchdog and the backoff; production uses the defaults). */
+export interface PushWatchOptions {
+  watchdogMs?: number;
+  backoffMinMs?: number;
+  backoffMaxMs?: number;
+}
+
+export interface PushWatchOutcome {
+  streams: PushStreamState[];
+  ingest: PushIngestStats;
+  /** Reconnects reconciled by a backfill sub-run that finished `ok`. */
+  backfills: number;
+  /** Backfills that ended in error (the reconnect is left to the next REST reconciliation). */
+  backfillsFailed: number;
+  /** Reconnects that needed no backfill: a pbp document of this generation was fetched at or after the reconnect. */
+  backfillsSkipped: number;
+  /** Connection attempts left of PUSH_CONNECTION_ALLOWANCE. */
+  connectionBudgetLeft: number;
+}
+
+function hasPush(resolver: UrlResolver): resolver is UrlResolver & PushUrlResolver {
+  return typeof (resolver as Partial<PushUrlResolver>).resolvePush === 'function';
 }
 
 export interface TrialWatchDeps {
@@ -317,6 +423,12 @@ export interface TrialWatchOptions {
   speed?: number;
   note?: string | null;
   untilClosed?: boolean;
+  /**
+   * Opt-in push mode (M4): open the push events (and WNBA clock) streams as a push_stream
+   * sub-run, reconcile with REST pbp every 5 minutes, backfill on every stream reconnect.
+   * Default off: a trial watch polls exactly as before.
+   */
+  push?: boolean | PushWatchOptions;
 }
 
 export interface TrialWatchOutcome {
@@ -329,6 +441,8 @@ export interface TrialWatchOutcome {
   refused: number;
   changes: number;
   stale: number;
+  /** Present only in push mode. */
+  push?: PushWatchOutcome;
 }
 
 /**
@@ -350,7 +464,14 @@ export async function runTrialWatch(
   if (opts.game.status === 'closed') {
     throw new Error(`game ${opts.game.id} is already closed; nothing to watch`);
   }
-  const plan = planWatch(adapter, source, opts.game.coverage, opts.profile);
+  const pushOpts: PushWatchOptions | null =
+    opts.push === undefined || opts.push === false ? null : opts.push === true ? {} : opts.push;
+  if (pushOpts && !hasPush(resolver)) {
+    throw new Error(
+      'push mode needs a production-shaped host (trial, production or rehearsal); the simulation service has no push streams',
+    );
+  }
+  const plan = planWatch(adapter, source, opts.game.coverage, opts.profile, pushOpts !== null);
   const speed = opts.speed ?? 1;
   assertSpeedAllowed(config, speed);
   const cadence = speed === 1 ? plan.cadence : scaleCadence(plan.cadence, speed);
@@ -374,6 +495,7 @@ export async function runTrialWatch(
       reservationId: reservation.id,
       speed,
       providerGameId: opts.game.providerGameId,
+      push: pushOpts !== null,
       ...(deps.sim ? { recordingId: deps.sim.recordingId, sessionId: deps.sim.sessionId } : {}),
     },
   });
@@ -407,7 +529,7 @@ export async function runTrialWatch(
   const docs = new HttpDocumentSource(http, observationSource, null, {
     gameId: opts.game.providerGameId,
   });
-  const watcher = new GameWatcher({
+  const watcherDeps: WatcherDeps = {
     db,
     log,
     adapter,
@@ -415,20 +537,58 @@ export async function runTrialWatch(
     apply: { db, log, ...(deps.fault ? { fault: deps.fault } : {}) },
     pulse: deps.pulse,
     ...(deps.onGameKnown ? { onGameKnown: deps.onGameKnown } : {}),
-  });
+  };
+  const appliedPbp: AppliedPbp = { lastRequestedAt: null };
+  // Push mode only: the tracking subclass; a polling watch keeps the plain GameWatcher.
+  const watcher =
+    pushOpts !== null
+      ? new PbpTrackingWatcher(watcherDeps, appliedPbp)
+      : new GameWatcher(watcherDeps);
   await watcher.attach(opts.game.id);
   let status: string | null = null;
+  let pushOutcome: PushWatchOutcome | undefined;
+  let push: Awaited<ReturnType<typeof openPushStreams>> | null = null;
   try {
+    // Inside the try: a failure to open the streams must still end the run and release the budget.
+    if (pushOpts !== null && hasPush(resolver)) {
+      push = await openPushStreams({
+        appliedPbp,
+        db,
+        log,
+        adapter,
+        run,
+        game: opts.game,
+        source,
+        observationSource,
+        resolver,
+        guard: deps.guard,
+        reservationId: reservation.id,
+        apply: { db, log, ...(deps.fault ? { fault: deps.fault } : {}) },
+        options: pushOpts,
+        ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      });
+    }
     const out = await cadenceLoop(watcher, docs, log, cadence, {
       untilClosed: opts.untilClosed ?? true,
       isStopped: deps.isStopped,
     });
     status = out.status;
+    if (push) pushOutcome = await push.close('ok');
     await endRun(db, run.id, deps.isStopped() ? 'aborted' : 'ok');
   } catch (err) {
+    if (push) {
+      try {
+        pushOutcome = await push.close('error', (err as Error).message);
+      } catch (closeErr) {
+        log.error({ err: closeErr }, 'push streams did not close cleanly');
+      }
+    }
     await endRun(db, run.id, 'error', (err as Error).message);
     throw err;
   } finally {
+    // This game's pulse timer ends with its watch (the scheduler watches many games); the caller
+    // still sends the closing pulse (`sendOnce`) after its final drain.
+    deps.pulse?.stop(opts.game.id);
     await deps.guard.release(reservation.id);
   }
   const final = (await deps.guard.reservation(reservation.id)) ?? reservation;
@@ -442,6 +602,7 @@ export async function runTrialWatch(
       status,
       changes: watcher.applied,
       stale: watcher.stale,
+      push: pushOutcome ?? null,
     },
     'trial watch finished',
   );
@@ -455,6 +616,198 @@ export async function runTrialWatch(
     refused: http.refused,
     changes: watcher.applied,
     stale: watcher.stale,
+    ...(pushOutcome ? { push: pushOutcome } : {}),
+  };
+}
+
+interface OpenPushArgs {
+  /** Newest applied pbp of this generation (cadence watcher + backfills), for the backfill decision. */
+  appliedPbp: AppliedPbp;
+  db: Db;
+  log: Logger;
+  adapter: LeagueAdapter;
+  run: RunHandle;
+  game: GameRow;
+  source: RunSource;
+  observationSource: ObservationSource;
+  resolver: UrlResolver & PushUrlResolver;
+  guard: QuotaGuard;
+  reservationId: number;
+  apply: Parameters<typeof runBackfill>[0]['apply'];
+  options: PushWatchOptions;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Push mode wiring (plan §4): one push_stream sub-run of the watch generation,
+ * a PushStream per feed the league offers (events; clock for WNBA), every line
+ * routed through PushIngest -> applyChanges, and on every reconnect of the
+ * EVENTS stream a backfill sub-run that fetches the full REST pbp (the clock
+ * stream carries nothing a backfill could recover). Stream state is mirrored
+ * into the sub-run's meta so `/health` (another process) can alert on a stream
+ * disconnected for more than 60 s.
+ */
+async function openPushStreams(a: OpenPushArgs): Promise<{
+  close(status: 'ok' | 'error' | 'aborted', error?: string): Promise<PushWatchOutcome>;
+}> {
+  const { db, log, adapter } = a;
+  const ingest = new PushIngest({
+    db,
+    log,
+    adapter,
+    apply: a.apply,
+    gameId: a.game.id,
+    providerGameId: a.game.providerGameId,
+    parentRun: a.run,
+    source: a.source,
+  });
+  const subRun = await ingest.start();
+  let backfills = 0;
+  let backfillsSkipped = 0;
+  let backfillsFailed = 0;
+  const backfill = async (info: {
+    connections: number;
+    downMs: number;
+    reconnectedAt: Date | null;
+  }) => {
+    // Only an APPLIED pbp document of this generation (REST reconciliation or an earlier backfill)
+    // requested at or after the reconnect covers the gap; one requested during the outage still
+    // leaves the events between its request and the reconnect missing, and a fetched document that
+    // failed or was stale covers nothing. Both times are on the database clock (`requestedAt` is the
+    // limiter slot, `reconnectedAt` the database now() at the reconnect). Only the events stream
+    // carries this hook, so two streams reconnecting together cannot trigger two backfills.
+    const lastApplied = a.appliedPbp.lastRequestedAt;
+    const needed = backfillNeeded({
+      lastPbpCalledAt: lastApplied,
+      reconnectedAt: info.reconnectedAt,
+    });
+    if (!needed) {
+      backfillsSkipped++;
+      log.info(
+        { ...info, gameId: a.game.id, lastAppliedPbpRequestedAt: lastApplied },
+        'backfill skipped: an applied pbp document of this generation was requested at or after the reconnect',
+      );
+      return;
+    }
+    let done: Awaited<ReturnType<typeof runBackfill>>;
+    try {
+      done = await runBackfill(
+        {
+          db,
+          log,
+          adapter,
+          apply: a.apply,
+          gameId: a.game.id,
+          parentRun: a.run,
+          source: a.source,
+          observationSource: a.observationSource,
+          makeSource: (r) =>
+            new HttpDocumentSource(
+              new SportradarHttp({
+                db,
+                log,
+                league: adapter.league,
+                product: adapter.product,
+                runId: r.id,
+                resolver: a.resolver,
+                // A dedicated single-caller limiter on the same ledger. It was introduced when the
+                // registry limiter's in-process floor could order two concurrent callers differently
+                // from the ledger (validator M4 §2e); since plan rev 4.8 one limiter's claims are
+                // chained, so either choice is safe. The ledger spaces it from the cadence loop.
+                limiter: needsRateLimit(a.source)
+                  ? new RateLimiter({ store: new PgSlotStore(db), product: adapter.product })
+                  : rateLimiterFor(adapter.product),
+                guard: a.guard,
+                reservationId: a.reservationId,
+                ...(a.fetchImpl ? { fetchImpl: a.fetchImpl } : {}),
+              }),
+              a.observationSource,
+              null,
+              { gameId: a.game.providerGameId },
+            ),
+        },
+        'stream reconnect',
+        info,
+      );
+    } catch (err) {
+      backfillsFailed++;
+      throw err;
+    }
+    backfills++;
+    if (done.outcome?.result.outcome === 'applied')
+      noteAppliedPbp(a.appliedPbp, done.pbpRequestedAt);
+  };
+  const feeds: PushFeed[] = [
+    'push_events',
+    ...(adapter.capabilities.pushClock ? ['push_clock' as const] : []),
+  ];
+  // PUSH_CONNECTION_ALLOWANCE is the cap for the whole watch: both streams draw on one budget and
+  // stop for good when it is spent; the 5-minute REST cadence keeps the game moving.
+  const attemptBudget = { remaining: PUSH_CONNECTION_ALLOWANCE };
+  const states = new Map<PushFeed, PushStreamState>();
+  let metaWrite: Promise<void> = Promise.resolve();
+  const mirror = (state: PushStreamState) => {
+    states.set(state.feed, state);
+    const snapshot = Object.fromEntries(
+      [...states.values()].map((s) => [
+        s.feed,
+        {
+          status: s.status,
+          connections: s.connections,
+          reconnects: s.reconnects,
+          disconnectedSince: s.disconnectedSince?.toISOString() ?? null,
+          lastError: s.lastError,
+          lastByteAt: s.lastByteAt?.toISOString() ?? null,
+        },
+      ]),
+    );
+    metaWrite = metaWrite
+      .then(() => setRunMeta(db, subRun.id, { push: snapshot }))
+      .catch((err) => log.warn({ err }, 'push state mirror failed'));
+  };
+  const streams: PushStream[] = feeds.map((feed) => {
+    const deps: PushStreamDeps = {
+      db,
+      log,
+      resolver: a.resolver,
+      league: adapter.league,
+      product: adapter.product,
+      runId: subRun.id,
+      reservationId: a.reservationId,
+      limiter: rateLimiterFor(adapter.product, needsRateLimit(a.source) ? { db } : {}),
+      guard: a.guard,
+      feed,
+      params: { providerGameId: a.game.providerGameId },
+      onLine: (line, at) => ingest.handle(line, at).then(() => undefined),
+      onStateChange: mirror,
+      attemptBudget,
+      ...(feed === 'push_events' ? { onReconnect: backfill } : {}),
+      ...(a.options.watchdogMs !== undefined ? { watchdogMs: a.options.watchdogMs } : {}),
+      ...(a.options.backoffMinMs !== undefined ? { backoffMinMs: a.options.backoffMinMs } : {}),
+      ...(a.options.backoffMaxMs !== undefined ? { backoffMaxMs: a.options.backoffMaxMs } : {}),
+      ...(a.fetchImpl ? { fetchImpl: a.fetchImpl } : {}),
+    };
+    return new PushStream(deps);
+  });
+  for (const s of streams) void s.start();
+  log.info({ feeds, runId: subRun.id, watchId: subRun.watchId }, 'push streams opened');
+  let closed: PushWatchOutcome | null = null;
+  return {
+    async close(status, error) {
+      if (closed) return closed; // idempotent: an error path never ends the sub-run twice
+      await Promise.all(streams.map((s) => s.stop()));
+      await metaWrite;
+      await ingest.end(status, error);
+      closed = {
+        streams: streams.map((s) => s.state),
+        ingest: ingest.stats,
+        backfills,
+        backfillsFailed,
+        backfillsSkipped,
+        connectionBudgetLeft: attemptBudget.remaining,
+      };
+      return closed;
+    },
   };
 }
 

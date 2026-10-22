@@ -45,6 +45,27 @@ describe('UrlResolver', () => {
     expect(prod.resolve('hierarchy', {}).url).not.toContain('k=');
   });
 
+  it('push streams: /{league}/{access}/stream/en/{events|clock|statistics}/subscribe, optional match filter, key in the header', () => {
+    const root = 'https://api.sportradar.com/unrivaled/trial/stream/en';
+    expect(prod.resolvePush('push_events', {}).url).toBe(`${root}/events/subscribe`);
+    expect(prod.resolvePush('push_clock', {}).url).toBe(`${root}/clock/subscribe`);
+    expect(prod.resolvePush('push_statistics', {}).url).toBe(`${root}/statistics/subscribe`);
+    const filtered = prod.resolvePush('push_events', { providerGameId: 'g-1' });
+    expect(filtered.url).toBe(`${root}/events/subscribe?match=sd%3Amatch%3Ag-1`);
+    expect(filtered.headers).toEqual({ 'x-api-key': 'k' });
+    expect(filtered.url).not.toContain('k=');
+    const local = new ProdUrlResolver({
+      league: 'wnba',
+      accessLevel: 'trial',
+      apiKey: 'k',
+      baseUrl: 'http://127.0.0.1:8787',
+    });
+    expect(local.source).toBe('rehearsal');
+    expect(local.resolvePush('push_clock', {}).url).toBe(
+      'http://127.0.0.1:8787/wnba/trial/stream/en/clock/subscribe',
+    );
+  });
+
   it('refuses a feed without its parameters', () => {
     expect(() => prod.resolve('pbp', {})).toThrow(/gameId/);
     expect(() => prod.resolve('player_profile', {})).toThrow(/playerId/);
