@@ -966,6 +966,7 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
       select status::text as status from public.games where id = ${gameId}`;
     expect(g?.status).toBe('closed');
     // Its stats were still reconciled per entity (the only changes it produced).
+    expect(r2.outcome === 'applied' && r2.changes.length).toBeGreaterThan(0);
     const after = await counts(db, gameId);
     expect(after.changes - stored.changes).toBe(r2.outcome === 'applied' ? r2.changes.length : -1);
     expect(
