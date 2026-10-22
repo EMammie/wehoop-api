@@ -12,37 +12,43 @@ import { ncaawbAdapter } from '../../../src/leagues/ncaawb/adapter.js';
 import { wnbaAdapter } from '../../../src/leagues/wnba/adapter.js';
 
 describe('trial profiles: budgets derived from the cadence constants (plan §4)', () => {
-  it('full ≈ 330: pbp every 30 s + statistics (summary) every 5 min over 2.5 h, plus the closing pair', () => {
+  it('full ≈ 350: pbp every 30 s + statistics (summary) every 5 min over 2.5 h, the complete -> closed wait, closing pair and 429 allowance (rev 4.9)', () => {
     expect(budgetFor(PROFILE_CADENCE.full)).toEqual({
-      pbp: 300,
-      summary: 30,
+      pbp: 301, // t=0 through 2.5 h inclusive (the G3 run made 301)
+      summary: 30, // first at +15 s
       boxscore: 0,
+      afterComplete: 12, // 30 min at one pbp + one summary per 5 min
       closing: 2,
-      total: 332,
+      retries: 2,
+      total: 347,
     });
   });
   it('extended ≈ 150: summary every 60 s + one boxscore at +120 min, plus closing', () => {
     expect(budgetFor(PROFILE_CADENCE.extended)).toEqual({
       pbp: 0,
-      summary: 150,
+      summary: 151,
       boxscore: 1,
+      afterComplete: 6,
       closing: 2,
-      total: 153,
+      retries: 2,
+      total: 162,
     });
   });
   it('lean-full ≈ 165: pbp every 60 s + statistics every 10 min, plus closing', () => {
     expect(budgetFor(PROFILE_CADENCE['lean-full'])).toEqual({
-      pbp: 150,
-      summary: 15,
+      pbp: 151,
+      summary: 15, // first at +30 s
       boxscore: 0,
+      afterComplete: 9, // pbp every 5 min, summary stays at 10 min
       closing: 2,
-      total: 167,
+      retries: 2,
+      total: 179,
     });
   });
   it('two full games plus one extended fit a 1,000-call trial with discovery to spare', () => {
     const two = 2 * budgetFor(PROFILE_CADENCE.full).total;
     const one = budgetFor(PROFILE_CADENCE.extended).total;
-    expect(two + one).toBe(817);
+    expect(two + one).toBe(856);
     expect(1000 - 100 - (two + one)).toBeGreaterThan(0); // 100 = default reserve
   });
 });

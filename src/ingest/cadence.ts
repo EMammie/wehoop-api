@@ -19,6 +19,23 @@ export interface Cadence {
   horizonMs: number;
   /** Fetched once the game closes: one summary and one boxscore. */
   closing: GameFeed[];
+  /**
+   * First summary poll at this offset from the watch start (rev 4.9 (2)): half the pbp
+   * interval, so the two feeds never leave 2 s apart. Both live runs drew a 429 on the
+   * watch's first pbp -> summary pair at the minimum spacing. Default 0.
+   */
+  summaryOffsetMs?: number;
+  /**
+   * While the stored status is `complete` (game over, statistics not yet validated) every
+   * periodic feed polls at most this often until `closed` (rev 4.9 (3)): no play happens any
+   * more, and `closed` can trail `complete` by 13 min (WNBA G3) to about 2 h (NCAAWB docs).
+   * Null = no change.
+   */
+  afterCompleteMs?: number | null;
+  /** Budgeted complete -> closed wait, polled at the `afterCompleteMs` cadence. Default 0. */
+  closeWaitMs?: number;
+  /** Budgeted HTTP 429 retries (each is a counted call). Default 0. */
+  retryAllowance?: number;
 }
 
 export const TRIAL_PROFILES = ['full', 'extended', 'lean-full'] as const;
@@ -27,6 +44,8 @@ export type TrialProfile = (typeof TRIAL_PROFILES)[number];
 const MIN = 60_000;
 const GAME_HORIZON_MS = 150 * MIN;
 const CLOSING: GameFeed[] = ['summary', 'boxscore'];
+/** Trial/production pacing after `complete`, the budgeted wait for `closed`, and 429 retries (rev 4.9). */
+const AFTER_COMPLETE = { afterCompleteMs: 5 * MIN, closeWaitMs: 30 * MIN, retryAllowance: 2 };
 
 /**
  * Plan §4: full = pbp/30 s + box-score statistics/5 min; extended = summary/60 s
@@ -44,6 +63,8 @@ export const PROFILE_CADENCE: Record<TrialProfile, Cadence> = {
     boxscoreAtMs: [],
     horizonMs: GAME_HORIZON_MS,
     closing: CLOSING,
+    summaryOffsetMs: 15_000,
+    ...AFTER_COMPLETE,
   },
   extended: {
     pbpMs: null,
@@ -52,6 +73,7 @@ export const PROFILE_CADENCE: Record<TrialProfile, Cadence> = {
     boxscoreAtMs: [120 * MIN],
     horizonMs: GAME_HORIZON_MS,
     closing: CLOSING,
+    ...AFTER_COMPLETE,
   },
   'lean-full': {
     pbpMs: 60_000,
@@ -60,6 +82,8 @@ export const PROFILE_CADENCE: Record<TrialProfile, Cadence> = {
     boxscoreAtMs: [],
     horizonMs: GAME_HORIZON_MS,
     closing: CLOSING,
+    summaryOffsetMs: 30_000,
+    ...AFTER_COMPLETE,
   },
 };
 
@@ -87,18 +111,43 @@ export interface Budget {
   pbp: number;
   summary: number;
   boxscore: number;
+  /** Polls while waiting for `closed` after `complete` (rev 4.9). */
+  afterComplete: number;
   closing: number;
+  /** Budgeted 429 retries (rev 4.9). */
+  retries: number;
   total: number;
 }
 
-/** Calls a cadence makes over its horizon (first poll at t=0, then every interval, plus one-offs and closing). */
+/**
+ * Calls a cadence makes: every periodic feed from its first poll (t=0, the summary at its
+ * offset) through the horizon inclusive, one-offs, the complete -> closed wait at the slower
+ * cadence, the closing pair and the 429 allowance. Rev 4.9: the horizon end is inclusive (the
+ * G3 run made 301 pbp calls in 2.5 h at 30 s, the old formula counted 300).
+ */
 export function budgetFor(c: Cadence): Budget {
-  const periodic = (ms: number | null) => (ms === null ? 0 : Math.ceil(c.horizonMs / ms));
+  const periodic = (ms: number | null, offsetMs = 0) =>
+    ms === null ? 0 : Math.floor((c.horizonMs - offsetMs) / ms) + 1;
   const pbp = periodic(c.pbpMs);
-  const summary = periodic(c.summaryMs);
+  const summary = periodic(c.summaryMs, c.summaryOffsetMs ?? 0);
   const boxscore = periodic(c.boxscoreMs) + c.boxscoreAtMs.length;
+  const wait = c.closeWaitMs ?? 0;
+  const slow = (ms: number | null) =>
+    ms === null || c.afterCompleteMs == null || wait === 0
+      ? 0
+      : Math.floor(wait / Math.max(ms, c.afterCompleteMs));
+  const afterComplete = slow(c.pbpMs) + slow(c.summaryMs) + slow(c.boxscoreMs);
   const closing = c.closing.length;
-  return { pbp, summary, boxscore, closing, total: pbp + summary + boxscore + closing };
+  const retries = c.retryAllowance ?? 0;
+  return {
+    pbp,
+    summary,
+    boxscore,
+    afterComplete,
+    closing,
+    retries,
+    total: pbp + summary + boxscore + afterComplete + closing + retries,
+  };
 }
 
 /** `full` coverage carries play-by-play; anything else is score-only (adapter.ts). */
@@ -148,7 +197,7 @@ export function cadenceFor(args: {
 export function scaleCadence(c: Cadence, speed: number): Cadence {
   if (speed <= 0) throw new Error('speed must be > 0');
   const s = (ms: number | null) => (ms === null ? null : Math.max(1, Math.round(ms / speed)));
-  return {
+  const scaled: Cadence = {
     pbpMs: s(c.pbpMs),
     summaryMs: s(c.summaryMs),
     boxscoreMs: s(c.boxscoreMs),
@@ -156,4 +205,9 @@ export function scaleCadence(c: Cadence, speed: number): Cadence {
     horizonMs: Math.round(c.horizonMs / speed),
     closing: c.closing,
   };
+  if (c.summaryOffsetMs !== undefined) scaled.summaryOffsetMs = s(c.summaryOffsetMs) ?? 0;
+  if (c.afterCompleteMs !== undefined) scaled.afterCompleteMs = s(c.afterCompleteMs);
+  if (c.closeWaitMs !== undefined) scaled.closeWaitMs = Math.round(c.closeWaitMs / speed);
+  if (c.retryAllowance !== undefined) scaled.retryAllowance = c.retryAllowance;
+  return scaled;
 }

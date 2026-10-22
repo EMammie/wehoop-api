@@ -138,7 +138,7 @@ afterAll(async () => {
 });
 
 describe('trial flow against the fake provider (MODE=trial, made-up key, local host)', () => {
-  it('full game: plan makes one schedule call; watch reserves 332, rate-limits, counts and releases (rehearsal: never quota-counted)', async () => {
+  it('full game: plan makes one schedule call; watch reserves 347, rate-limits, counts and releases (rehearsal: never quota-counted)', async () => {
     const server = await startFakeProvider({ replayFile: fullCopy, speed: SPEED });
     try {
       const config = configFor(server);
@@ -148,7 +148,7 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       expect(plan.season).toEqual({ year: 2025, type: 'REG' });
       const planned = plan.games.find((g) => g.providerGameId === fullId);
       expect(planned).toMatchObject({ coverage: 'full', profile: 'full', status: 'created' });
-      expect(planned?.budget.total).toBe(332);
+      expect(planned?.budget.total).toBe(347);
       const [schedCall] = await db<
         { feed: string; quotaCounted: boolean; url: string; source: string }[]
       >`
@@ -174,7 +174,7 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       expect(out.refused).toBe(0);
       expect(out.reservation).toMatchObject({
         profile: 'full',
-        reservedCalls: 332,
+        reservedCalls: 347,
         source: 'rehearsal',
         runId: out.runId,
         gameId: game.id,
@@ -182,7 +182,7 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       expect(out.reservation.releasedAt).toBeInstanceOf(Date);
       expect(out.reservation.usedCalls).toBe(out.calls);
       expect(out.calls).toBeGreaterThanOrEqual(4);
-      expect(out.calls).toBeLessThanOrEqual(332);
+      expect(out.calls).toBeLessThanOrEqual(347);
       const calls = await callRows(out.reservation.id);
       expect(calls).toHaveLength(out.reservation.usedCalls);
       for (const c of calls) {
@@ -307,7 +307,7 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
     }
   });
 
-  it('extended_boxscore game: profile defaults to extended (153), emits status/period only while live, stats once closed, no pbp calls', async () => {
+  it('extended_boxscore game: profile defaults to extended (162), emits status/period only while live, stats once closed, no pbp calls', async () => {
     const server = await startFakeProvider({ replayFile: extCopy, speed: SPEED });
     try {
       const config = configFor(server);
@@ -322,7 +322,7 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       expect(seasonCall?.url).toContain('/games/2025/REG/schedule.json');
       const planned = plan.games.find((g) => g.providerGameId === extId);
       expect(planned).toMatchObject({ coverage: 'extended_boxscore', profile: 'extended' });
-      expect(planned?.budget.total).toBe(153);
+      expect(planned?.budget.total).toBe(162);
       const game = await resolveGame(db, 'ncaawb', extId);
       if (!game) throw new Error('plan did not create the extended game');
       const out = await runTrialWatch(
@@ -330,7 +330,7 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
         { game, speed: SPEED },
       );
       expect(out.status).toBe('closed');
-      expect(out.reservation).toMatchObject({ profile: 'extended', reservedCalls: 153 });
+      expect(out.reservation).toMatchObject({ profile: 'extended', reservedCalls: 162 });
       const calls = await callRows(out.reservation.id);
       expect(calls.some((c) => c.feed === 'pbp')).toBe(false);
       expect(calls.filter((c) => c.feed === 'summary').length).toBeGreaterThan(2);

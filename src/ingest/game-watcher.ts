@@ -394,7 +394,11 @@ export async function cadenceLoop(
   if (cadence.pbpMs !== null)
     periodic.push({ feed: 'pbp', everyMs: cadence.pbpMs, nextAt: startedAt });
   if (cadence.summaryMs !== null)
-    periodic.push({ feed: 'summary', everyMs: cadence.summaryMs, nextAt: startedAt });
+    periodic.push({
+      feed: 'summary',
+      everyMs: cadence.summaryMs,
+      nextAt: startedAt + (cadence.summaryOffsetMs ?? 0),
+    });
   if (cadence.boxscoreMs !== null)
     periodic.push({ feed: 'boxscore', everyMs: cadence.boxscoreMs, nextAt: startedAt });
   const oneOffs = [...cadence.boxscoreAtMs].sort((a, b) => a - b).map((ms) => startedAt + ms);
@@ -404,7 +408,12 @@ export async function cadenceLoop(
       if (t >= p.nextAt) {
         await fetchOne(p.feed);
         // Keep the grid anchored to the start, skipping slots a slow fetch already passed.
-        while (p.nextAt <= now()) p.nextAt += p.everyMs;
+        // While `complete` waits for `closed`, poll at most every `afterCompleteMs` (rev 4.9).
+        const everyMs =
+          status === 'complete' && cadence.afterCompleteMs != null
+            ? Math.max(p.everyMs, cadence.afterCompleteMs)
+            : p.everyMs;
+        while (p.nextAt <= now()) p.nextAt += everyMs;
       }
     }
     while (oneOffs.length > 0 && t >= (oneOffs[0] ?? Number.POSITIVE_INFINITY)) {

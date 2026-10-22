@@ -102,3 +102,70 @@ describe('cadenceLoop and the quota guard', () => {
     expect(out).toMatchObject({ calls: 0, failed: 1, retried429: 0 });
   });
 });
+
+describe('cadenceLoop pacing (rev 4.9)', () => {
+  /** A fake clock: sleep advances it; the provider status follows the clock. */
+  function clocked(statusAt: (t: number) => string) {
+    let t = 0;
+    const calls: Array<{ feed: string; at: number }> = [];
+    const src: DocumentSource = {
+      observationSource: 'rest',
+      async fetch<T>(feed: string, _schema: ZodType<T>): Promise<FetchedDocument<T>> {
+        calls.push({ feed, at: t });
+        const d = new Date(t);
+        return { data: {} as T, requestedAt: d, receivedAt: d, bytes: 2, rawText: '{}' };
+      },
+    };
+    const w = {
+      process: async () => ({ gameId: 'g', status: statusAt(t), result: { outcome: 'applied' } }),
+    } as unknown as GameWatcher;
+    const opts = {
+      untilClosed: true,
+      isStopped: () => false,
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += Math.max(ms, 1);
+      },
+    };
+    return { src, w, opts, calls };
+  }
+  const MIN = 60_000;
+  const paced = {
+    pbpMs: 30_000,
+    summaryMs: 5 * MIN,
+    boxscoreMs: null,
+    boxscoreAtMs: [],
+    horizonMs: 150 * MIN,
+    closing: [] as never[],
+    summaryOffsetMs: 15_000,
+    afterCompleteMs: 5 * MIN,
+  };
+
+  it('the first summary leaves at its offset, never 2 s after a pbp', async () => {
+    const { src, w, opts, calls } = clocked((t) => (t >= 10 * MIN ? 'closed' : 'inprogress'));
+    await cadenceLoop(w, src, silent, paced, opts);
+    const pbpAt = calls.filter((c) => c.feed === 'pbp').map((c) => c.at);
+    const sumAt = calls.filter((c) => c.feed === 'summary').map((c) => c.at);
+    expect(sumAt[0]).toBe(15_000);
+    for (const s of sumAt) {
+      const gap = Math.min(...pbpAt.map((p) => Math.abs(p - s)));
+      expect(gap).toBeGreaterThanOrEqual(15_000);
+    }
+  });
+
+  it('while complete waits for closed, every feed polls at most every 5 min; inprogress resumes the normal grid', async () => {
+    // inprogress until 20 min, complete until 50 min, closed after.
+    const { src, w, opts, calls } = clocked((t) =>
+      t >= 50 * MIN ? 'closed' : t >= 20 * MIN ? 'complete' : 'inprogress',
+    );
+    await cadenceLoop(w, src, silent, paced, opts);
+    const pbpAt = calls.filter((c) => c.feed === 'pbp').map((c) => c.at);
+    const before = pbpAt.filter((t) => t <= 20 * MIN);
+    expect(before.length).toBe(41); // every 30 s from 0 through 20 min
+    const after = pbpAt.filter((t) => t > 20 * MIN);
+    for (let i = 1; i < after.length; i++) {
+      expect((after[i] ?? 0) - (after[i - 1] ?? 0)).toBeGreaterThanOrEqual(5 * MIN);
+    }
+    expect(after.length).toBeLessThanOrEqual(7); // 30 min at 5 min, plus the slot already due
+  });
+});
