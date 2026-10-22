@@ -31,6 +31,23 @@ export function phaseOf(status: GameStatus): Phase {
   return PHASE[status];
 }
 
+/**
+ * Finality inside the post phase (rev 4.9). `complete` (game over, statistics not yet
+ * validated) precedes `closed` (validated, final); Sportradar documents no transition back.
+ * On the second live run (2026-10-21) the closing boxscore, requested 4 s after the pbp that
+ * reported `closed`, was a cached document still carrying `complete`, and following
+ * `observedAt` emitted a durable `status` change from closed back to complete. Other post
+ * statuses carry no order among themselves or against these two.
+ */
+const FINALITY: Partial<Record<GameStatus, number>> = { complete: 0, closed: 1 };
+
+/** True when `incoming` is a less final post status than `stored` (complete after closed). */
+export function behindInFinality(stored: GameStatus, incoming: GameStatus): boolean {
+  const s = FINALITY[stored];
+  const i = FINALITY[incoming];
+  return s !== undefined && i !== undefined && i < s;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Event positions (rule 2c)                                                  */
 /* ------------------------------------------------------------------------- */
@@ -208,6 +225,16 @@ export function decideBatch(
           };
         }
       } else if (
+        gameView.status !== null &&
+        incomingPhase === storedPhase &&
+        behindInFinality(stored.status, gameView.status)
+      ) {
+        return {
+          kind: 'stale',
+          reason: 'run_regresses_state',
+          detail: `2a: status ${gameView.status} < stored ${stored.status} (finality)`,
+        };
+      } else if (
         incomingPhase === storedPhase &&
         gameView.period !== null &&
         stored.currentPeriodSequence !== null &&
@@ -331,8 +358,9 @@ export function decideBatch(
  * `observedAt` alone would emit a durable `status` change back to halftime and
  * another when the next pbp restores period 3 (status flicker). A view whose
  * phase is lower than the stored phase (post -> pre still allowed only while
- * `last_seq = 0`), or, at the same phase, whose period sequence is lower than
- * the stored one, is therefore a lagging view, not a correction, unless the
+ * `last_seq = 0`), or, at the same phase, whose status is less final (`complete`
+ * after `closed`, rev 4.9) or whose period sequence is lower than the stored
+ * one, is therefore a lagging view, not a correction, unless the
  * batch carries an event whose position is newer than the stored newest live
  * event (the 2(c) comparison; a batch with no events never qualifies). Score
  * is deliberately not read here: a lower score at the same phase and period
@@ -353,6 +381,12 @@ export function laggingView(
     if (!rescheduled) {
       why = `phase ${incomingPhase} (${gameView.status}) < stored ${storedPhase} (${stored.status})`;
     }
+  } else if (
+    gameView.status !== null &&
+    incomingPhase === storedPhase &&
+    behindInFinality(stored.status, gameView.status)
+  ) {
+    why = `status ${gameView.status} < stored ${stored.status} (finality)`;
   } else if (
     incomingPhase === storedPhase &&
     gameView.period !== null &&

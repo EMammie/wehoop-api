@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { diffEvents } from '../../../src/ingest/diff.js';
 import {
   type BatchInput,
+  behindInFinality,
   comparePositions,
   decideBatch,
   decideEvent,
@@ -763,6 +764,71 @@ describe('freshness rule 3: stats observation precedence', () => {
     expect(
       decideStats({ contentHash: 'h', observedAt: null }, { contentHash: 'x', observedAt: T1 }),
     ).toBe('update');
+  });
+});
+
+describe('freshness rule 3 lagging view: finality inside post (rev 4.9)', () => {
+  // Stored: the pbp already reported the official close; newest live event at (4, 480).
+  const closed = () =>
+    stored({ status: 'closed', currentPeriodSequence: 4, clock: '0:00', lastSeq: 1942 });
+  const q4Events = [storedEv('e1', 4, 470), storedEv('e2', 4, 480)];
+  const final = (status: 'complete' | 'closed') =>
+    view({
+      status,
+      period: { number: 4, type: 'quarter', sequence: 4 },
+      clock: '0:00',
+      score: { home: 97, away: 71 },
+    });
+  // The closing boxscore: requested 4 s after the pbp, no events, provider-cached `complete`.
+  const boxscore = (over: Partial<BatchInput> = {}) =>
+    batch({
+      isComplete: false,
+      gameView: final('complete'),
+      eventPositions: [],
+      observedAt: t('2026-06-30T23:20:30Z'),
+      ...over,
+    });
+
+  it('complete after closed (second live run, seq 1942 -> 1943) is superseded (3-lagging-view), not written', () => {
+    const d = decideBatch(closed(), boxscore(), q4Events);
+    expect(d).toMatchObject({ kind: 'accept', generation: 'same', gameLevel: 'superseded' });
+    expect(d.kind === 'accept' && d.detail).toContain('3-lagging-view');
+    expect(d.kind === 'accept' && d.detail).toContain('status complete < stored closed (finality)');
+    // Generation-less polls were already limited to pre / last_seq = 0; still superseded.
+    const poll = decideBatch(closed(), boxscore({ watchId: null }), q4Events);
+    expect(poll.kind === 'accept' && poll.gameLevel).toBe('superseded');
+  });
+
+  it('the forward direction and newer event evidence are unchanged: complete -> closed writes; complete with a newer event writes', () => {
+    const forward = decideBatch(
+      stored({ status: 'complete', currentPeriodSequence: 4 }),
+      boxscore({ gameView: final('closed') }),
+      q4Events,
+    );
+    expect(forward.kind === 'accept' && forward.gameLevel).toBe('write');
+    // A provider that reopened the game and added a play proves it moved on: a correction.
+    const reopened = decideBatch(closed(), boxscore({ eventPositions: [pos(4, 490)] }), q4Events);
+    expect(reopened.kind === 'accept' && reopened.gameLevel).toBe('write');
+    // closed -> closed (a later stats correction) is not behind.
+    const again = decideBatch(closed(), boxscore({ gameView: final('closed') }), q4Events);
+    expect(again.kind === 'accept' && again.gameLevel).toBe('write');
+  });
+
+  it('a new generation whose first document says complete after closed is stale (2a finality)', () => {
+    const d = decideBatch(closed(), boxscore({ watchId: 11 }), q4Events);
+    expect(d).toMatchObject({ kind: 'stale', reason: 'run_regresses_state' });
+    expect(d.kind === 'stale' && d.detail).toContain(
+      '2a: status complete < stored closed (finality)',
+    );
+  });
+
+  it('only complete -> closed is ordered; other post statuses keep following observedAt', () => {
+    expect(behindInFinality('closed', 'complete')).toBe(true);
+    expect(behindInFinality('complete', 'closed')).toBe(false);
+    expect(behindInFinality('closed', 'closed')).toBe(false);
+    expect(behindInFinality('closed', 'cancelled')).toBe(false);
+    expect(behindInFinality('postponed', 'complete')).toBe(false);
+    expect(behindInFinality('inprogress', 'complete')).toBe(false);
   });
 });
 

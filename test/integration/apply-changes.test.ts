@@ -921,6 +921,59 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     expect(statusChanges?.n).toBe(0);
   });
 
+  /**
+   * Second live run (2026-10-21, WNBA Finals G3): the pbp at 02:33:20Z reported `closed`
+   * (seq 1942); the closing boxscore requested 4 s later was provider-cached and still said
+   * `complete`, and rule 3 followed its newer `observedAt`: seq 1943 moved the game from
+   * closed back to complete and the stored game was left `complete`. Rev 4.9: inside the post
+   * phase `complete` is less final than `closed`, so the view is lagging (3-lagging-view).
+   */
+  it('same generation: a closing boxscore still carrying complete after the pbp reported closed is a lagging view: no status change, game stays closed', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    const final = (status: 'complete' | 'closed') => ({
+      status,
+      period: { number: 4, type: 'quarter' as const, sequence: 4 },
+      clock: '0:00',
+      score: { home: 97, away: 71 },
+    });
+    const closedPbp = {
+      ...nd,
+      gameView: nd.gameView ? { ...nd.gameView, ...final('closed') } : null,
+    };
+    const r1 = await apply(deps, gameId, closedPbp, observation(run, closedPbp, later(30)));
+    expect(r1.outcome === 'applied' && r1.changes.some((c) => c.type === 'status')).toBe(true);
+    const stored = await counts(db, gameId);
+
+    const sum = summaryQ1();
+    const cachedBox = {
+      ...sum,
+      gameView: sum.gameView ? { ...sum.gameView, ...final('complete') } : null,
+    };
+    const r2 = await apply(
+      deps,
+      gameId,
+      cachedBox,
+      observation(run, cachedBox, later(34), { source: 'rest' }),
+    );
+    expect(r2.outcome === 'applied' && r2.gameLevel).toBe('superseded');
+    expect(r2.outcome === 'applied' && r2.changes.filter((c) => c.type === 'status')).toEqual([]);
+    const [stale] = await db<{ detail: string }[]>`
+      select observation->>'detail' as detail from ingest.stale_observations where game_id = ${gameId}`;
+    expect(stale?.detail ?? '').toContain('status complete < stored closed (finality)');
+    const [g] = await db<{ status: string }[]>`
+      select status::text as status from public.games where id = ${gameId}`;
+    expect(g?.status).toBe('closed');
+    // Its stats were still reconciled per entity (the only changes it produced).
+    const after = await counts(db, gameId);
+    expect(after.changes - stored.changes).toBe(r2.outcome === 'applied' ? r2.changes.length : -1);
+    expect(
+      r2.outcome === 'applied' &&
+        r2.changes.every((c) => c.type === 'stats_team' || c.type === 'stats_player'),
+    ).toBe(true);
+  });
+
   it('same generation: the same lagging summary carrying an event newer than the stored newest is a correction: game-level write', async () => {
     const nd = pbpQ1();
     const { gameId } = await seedGame(db, nd);
