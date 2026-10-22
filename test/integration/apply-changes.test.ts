@@ -837,4 +837,193 @@ describe('applyChanges: durable + observation writes in one transaction', () => 
     expect(c.changes).toBe(c.lastSeq);
     expect(c.outbox).toBe(c.changes);
   });
+
+  /**
+   * Status "flicker" within ONE generation (M3 corrective pass, external review; evidence M3
+   * finding 3 notes the case "did not occur in these runs"). Sportradar caches the summary /
+   * boxscore feed longer than pbp, so inside one watch a summary REQUESTED later (newer
+   * `observedAt`) can carry OLDER game-level content: `halftime` / period 2 while the pbp
+   * already showed period 3 in progress. Plan §4 rule 3 as written says game-level fields
+   * follow the newest `observedAt`, and rule 2(b) (period behind stored) only gates a NEW
+   * generation, so today this emits a durable `status` change back to halftime / period 2 and a
+   * second one when the next pbp document restores period 3: two regressive seqs broadcast to
+   * every client. Rule 3 "lagging view" (rev 4.6, ratified 2026-10-17): a view whose phase or
+   * period is behind stored state, in a batch with no event newer than the stored newest, is
+   * `superseded_observation` for game-level fields (detail `3-lagging-view`); events and stats
+   * are still reconciled per entity.
+   */
+  it('same generation: a later summary carrying provider-cached older game-level content (halftime/P2 after pbp P3) is a lagging view: superseded, no status change', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    const p3 = {
+      ...nd,
+      gameView: nd.gameView
+        ? {
+            ...nd.gameView,
+            status: 'inprogress' as const,
+            period: { number: 3, type: 'quarter' as const, sequence: 3 },
+            clock: '7:25',
+            score: { home: 40, away: 38 },
+          }
+        : null,
+    };
+    const r1 = await apply(deps, gameId, p3, observation(run, p3, later(30)));
+    expect(r1.outcome === 'applied' && r1.changes.some((c) => c.type === 'status')).toBe(true);
+    const stored = await counts(db, gameId);
+    const [g1] = await db<{ status: string; period: number | null }[]>`
+      select status::text as status, current_period as period from public.games where id = ${gameId}`;
+    expect(g1).toEqual({ status: 'inprogress', period: 3 });
+
+    // Same generation, requested 30 s later, but the provider served a cached halftime summary.
+    const sum = summaryQ1();
+    const laggingSummary = {
+      ...sum,
+      gameView: sum.gameView
+        ? {
+            ...sum.gameView,
+            status: 'halftime' as const,
+            period: { number: 2, type: 'quarter' as const, sequence: 2 },
+            clock: '0:00',
+            score: { home: 40, away: 38 }, // same score: nothing in the batch is newer than stored
+          }
+        : null,
+    };
+    const r2 = await apply(
+      deps,
+      gameId,
+      laggingSummary,
+      observation(run, laggingSummary, later(60), { source: 'rest' }),
+    );
+    // Lagging view: superseded, logged once, no game_changes row of any kind, stored state intact.
+    expect(r2.outcome === 'applied' && r2.gameLevel).toBe('superseded');
+    expect(r2.outcome === 'applied' && r2.changes.filter((c) => c.type === 'status')).toEqual([]);
+    expect(await staleReasons(db, gameId)).toEqual({ superseded_observation: 1 });
+    const [stale] = await db<{ detail: string }[]>`
+      select observation->>'detail' as detail from ingest.stale_observations where game_id = ${gameId}`;
+    expect(stale?.detail ?? '').toContain('3-lagging-view');
+    const [g2] = await db<{ status: string; period: number | null; seq: number | null }[]>`
+      select status::text as status, current_period as period, current_period_sequence as seq from public.games where id = ${gameId}`;
+    expect(g2).toEqual({ status: 'inprogress', period: 3, seq: 3 });
+    const mid = await counts(db, gameId);
+    // Its team and player stats were still reconciled per entity (the only changes it produced).
+    expect(mid.changes - stored.changes).toBe(r2.outcome === 'applied' ? r2.changes.length : -1);
+    expect(
+      r2.outcome === 'applied' &&
+        r2.changes.every((c) => c.type === 'stats_team' || c.type === 'stats_player'),
+    ).toBe(true);
+
+    // The next pbp (period 3 again) then has nothing to restore: no flip-back change either.
+    const r3 = await apply(deps, gameId, p3, observation(run, p3, later(90)));
+    expect(r3.outcome === 'applied' && r3.changes.filter((c) => c.type === 'status')).toEqual([]);
+    const [statusChanges] = await db<{ n: number }[]>`
+      select count(*)::int as n from public.game_changes where game_id = ${gameId} and change_type = 'status' and seq > ${stored.lastSeq}`;
+    expect(statusChanges?.n).toBe(0);
+  });
+
+  /**
+   * Second live run (2026-10-21, WNBA Finals G3): the pbp at 02:33:20Z reported `closed`
+   * (seq 1942); the closing boxscore requested 4 s later was provider-cached and still said
+   * `complete`, and rule 3 followed its newer `observedAt`: seq 1943 moved the game from
+   * closed back to complete and the stored game was left `complete`. Rev 4.9: inside the post
+   * phase `complete` is less final than `closed`, so the view is lagging (3-lagging-view).
+   */
+  it('same generation: a closing boxscore still carrying complete after the pbp reported closed is a lagging view: no status change, game stays closed', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    const final = (status: 'complete' | 'closed') => ({
+      status,
+      period: { number: 4, type: 'quarter' as const, sequence: 4 },
+      clock: '0:00',
+      score: { home: 97, away: 71 },
+    });
+    const closedPbp = {
+      ...nd,
+      gameView: nd.gameView ? { ...nd.gameView, ...final('closed') } : null,
+    };
+    const r1 = await apply(deps, gameId, closedPbp, observation(run, closedPbp, later(30)));
+    expect(r1.outcome === 'applied' && r1.changes.some((c) => c.type === 'status')).toBe(true);
+    const stored = await counts(db, gameId);
+
+    const sum = summaryQ1();
+    const cachedBox = {
+      ...sum,
+      gameView: sum.gameView ? { ...sum.gameView, ...final('complete') } : null,
+    };
+    const r2 = await apply(
+      deps,
+      gameId,
+      cachedBox,
+      observation(run, cachedBox, later(34), { source: 'rest' }),
+    );
+    expect(r2.outcome === 'applied' && r2.gameLevel).toBe('superseded');
+    expect(r2.outcome === 'applied' && r2.changes.filter((c) => c.type === 'status')).toEqual([]);
+    const [stale] = await db<{ detail: string }[]>`
+      select observation->>'detail' as detail from ingest.stale_observations where game_id = ${gameId}`;
+    expect(stale?.detail ?? '').toContain('status complete < stored closed (finality)');
+    const [g] = await db<{ status: string }[]>`
+      select status::text as status from public.games where id = ${gameId}`;
+    expect(g?.status).toBe('closed');
+    // Its stats were still reconciled per entity (the only changes it produced).
+    expect(r2.outcome === 'applied' && r2.changes.length).toBeGreaterThan(0);
+    const after = await counts(db, gameId);
+    expect(after.changes - stored.changes).toBe(r2.outcome === 'applied' ? r2.changes.length : -1);
+    expect(
+      r2.outcome === 'applied' &&
+        r2.changes.every((c) => c.type === 'stats_team' || c.type === 'stats_player'),
+    ).toBe(true);
+  });
+
+  it('same generation: the same lagging summary carrying an event newer than the stored newest is a correction: game-level write', async () => {
+    const nd = pbpQ1();
+    const { gameId } = await seedGame(db, nd);
+    const run = await replayRun(db, gameId);
+    const p3 = {
+      ...nd,
+      gameView: nd.gameView
+        ? {
+            ...nd.gameView,
+            status: 'inprogress' as const,
+            period: { number: 3, type: 'quarter' as const, sequence: 3 },
+            score: { home: 40, away: 38 },
+          }
+        : null,
+    };
+    await apply(deps, gameId, p3, observation(run, p3, later(30)));
+    const last = nd.batch.events.at(-1);
+    if (!last) throw new Error('fixture has no events');
+    const maxSeq = Math.max(...nd.batch.events.map((e) => e.providerSequence ?? 0));
+    const maxNum = Math.max(...nd.batch.events.map((e) => e.providerNumber ?? 0));
+    const newer = {
+      ...last,
+      providerEventId: `newer-evidence-${gameId}`,
+      providerSequence: maxSeq + 1,
+      providerNumber: maxNum + 1,
+    };
+    const sum = summaryQ1();
+    const withEvidence = {
+      ...sum,
+      batch: { ...sum.batch, events: [newer] },
+      gameView: sum.gameView
+        ? {
+            ...sum.gameView,
+            status: 'halftime' as const,
+            period: { number: 2, type: 'quarter' as const, sequence: 2 },
+            score: { home: 40, away: 38 },
+          }
+        : null,
+    };
+    const r = await apply(
+      deps,
+      gameId,
+      withEvidence,
+      observation(run, withEvidence, later(60), { source: 'rest', isComplete: false }),
+    );
+    expect(r.outcome === 'applied' && r.gameLevel).toBe('write');
+    const types = r.outcome === 'applied' ? r.changes.map((c) => c.type) : [];
+    expect(types).toContain('event_insert');
+    expect(types).toContain('status'); // the rule fires only on lagging views
+    expect(await staleReasons(db, gameId)).toEqual({});
+  });
 });

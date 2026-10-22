@@ -1,0 +1,48 @@
+{
+ "league": {
+  "id": "affab7b6-647e-4304-bbe2-1f9d68cd0cea",
+  "name": "NCAA WOMEN",
+  "alias": "NCAAW"
+ },
+ "date": "2022-11-07",
+ "games": [
+  {
+   "id": "02d0040b-d0e8-4b0a-913b-0eb97a816ceb",
+   "status": "closed",
+   "coverage": "boxscore",
+   "scheduled": "2022-11-07T16:00:00Z",
+   "home_points": 88,
+   "away_points": 56,
+   "conference_game": false,
+   "time_zones": {
+    "venue": "US/Eastern",
+    "home": "US/Eastern",
+    "away": "US/Eastern"
+   },
+   "venue": {
+    "id": "9770a04e-e7a8-4665-9fff-419191dc5664",
+    "name": "Savage Arena",
+    "capacity": 7014,
+    "address": "2801 W Bancroft Street",
+    "city": "Toledo",
+    "state": "OH",
+    "zip": "43606",
+    "country": "USA",
+    "location": {
+     "lat": "41.6601653",
+     "lng": "-83.6119204"
+    }
+   },
+   "home": {
+    "name": "Toledo Rockets",
+    "alias": "TOL",
+    "id": "f5f56256-ce91-4123-8dff-19a411d96172"
+   },
+   "away": {
+    "name": "Wright State Raiders",
+    "alias": "WRST",
+    "id": "b5e353c4-af1e-4f20-9eb8-9d397f5c8f49"
+   }
+  }
+ ]
+}

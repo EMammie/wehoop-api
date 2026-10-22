@@ -6,6 +6,7 @@ import type { HierarchyTeam } from '../providers/sportradar/schemas/hierarchy.js
 import { LeagueHierarchyDocumentSchema } from '../providers/sportradar/schemas/hierarchy.js';
 import { PlayerProfileDocumentSchema } from '../providers/sportradar/schemas/profile.js';
 import {
+  DailyScheduleDocumentSchema,
   type ScheduleGame,
   SeasonScheduleDocumentSchema,
 } from '../providers/sportradar/schemas/schedule.js';
@@ -40,7 +41,8 @@ import {
   ensureTournament,
   type TeamFacts,
 } from './identity.js';
-import { type RunHandle, startRun } from './runs.js';
+import { type RunHandle, type RunSource, startRun } from './runs.js';
+import { seasonFor } from './season.js';
 import type { GameView, ObservationSource } from './types.js';
 
 /**
@@ -60,7 +62,9 @@ export interface ReferenceDeps {
   log: Logger;
   league: LeagueCode;
   source: ObservationSource;
-  runSource: 'production' | 'trial' | 'simulation' | 'fixture';
+  runSource: RunSource;
+  /** Attribute every batch to this run instead of opening a `poll_schedule` run lazily. */
+  run?: RunHandle;
 }
 
 export interface ReferenceOutcome {
@@ -75,6 +79,8 @@ export interface ReferenceOutcome {
   merged: number;
   /** Profile references held for reconciliation (ingest.player_merge_holds) instead of linked or merged. */
   held: number;
+  /** Profile documents skipped whole (own id held or conflicting_profiles): counted here, never in `players`. */
+  profilesSkipped: number;
   /** Game-level batches rejected or superseded by the freshness policy. */
   stale: number;
 }
@@ -88,13 +94,16 @@ const EMPTY: Omit<ReferenceOutcome, 'feed'> = {
   tournaments: 0,
   merged: 0,
   held: 0,
+  profilesSkipped: 0,
   stale: 0,
 };
 
 export class ReferenceIngester {
   private run: RunHandle | null = null;
 
-  constructor(private readonly deps: ReferenceDeps) {}
+  constructor(private readonly deps: ReferenceDeps) {
+    this.run = deps.run ?? null;
+  }
 
   /** The generation-less run every schedule-derived game batch is attributed to. */
   private async runHandle(): Promise<RunHandle> {
@@ -118,6 +127,9 @@ export class ReferenceIngester {
     switch (feed) {
       case 'schedule':
         await this.schedule(body, observedAt, out);
+        break;
+      case 'daily_schedule':
+        await this.dailySchedule(body, observedAt, out);
         break;
       case 'tournament_list':
         await this.tournamentList(body, out);
@@ -158,6 +170,34 @@ export class ReferenceIngester {
     for (const g of doc.games) {
       await this.scheduledGame(g, seasonId, null, observedAt, out);
     }
+  }
+
+  /**
+   * One day's games. The season link comes from the document's season header when it has one;
+   * otherwise the EXISTING `seasons` row for the season the date falls in (never created here:
+   * only a season schedule knows the provider season id), or null when no such row exists.
+   */
+  private async dailySchedule(body: unknown, observedAt: Date, out: ReferenceOutcome) {
+    const doc = DailyScheduleDocumentSchema.parse(body);
+    const seasonId = doc.season
+      ? await ensureSeason(
+          this.deps.db,
+          this.deps.league,
+          { providerSeasonId: doc.season.id, year: doc.season.year, type: doc.season.type },
+          this.deps.log,
+        )
+      : await this.existingSeasonId(seasonFor(this.deps.league, new Date(`${doc.date}T00:00:00Z`)));
+    for (const g of doc.games) {
+      await this.scheduledGame(g, seasonId, null, observedAt, out);
+    }
+  }
+
+  private async existingSeasonId(season: { year: number; type: string }): Promise<string | null> {
+    const [row] = await this.deps.db<{ id: string }[]>`
+      select id from public.seasons
+      where league = ${this.deps.league} and year = ${season.year} and type::text = ${season.type}
+      order by created_at limit 1`;
+    return row?.id ?? null;
   }
 
   private async tournamentList(body: unknown, out: ReferenceOutcome) {
@@ -396,7 +436,8 @@ export class ReferenceIngester {
       runId: run.id,
       observedAt,
     });
-    out.players++;
+    if (result.playerId !== null) out.players++;
+    else out.profilesSkipped++;
     out.merged += result.mergedFrom.length;
     out.held += result.held.length;
     out.seasonLines += result.seasonLines;

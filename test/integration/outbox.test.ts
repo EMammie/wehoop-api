@@ -1,3 +1,4 @@
+import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createFaultInjector } from '../../src/ingest/fault.js';
 import { OutboxPublisher } from '../../src/live/outbox-publisher.js';
@@ -264,5 +265,50 @@ describe('outbox publisher', () => {
       observedAt: T0.toISOString(),
     });
     expect(pulse?.clockAsOf).toBe(T0.toISOString());
+  });
+  it('the outbox wake-up is sent at commit, never before it (rolled-back batch sends none)', async () => {
+    const url = process.env.DATABASE_URL ?? '';
+    const listener = postgres(url, { max: 1, onnotice: () => {} });
+    const heard: Array<{ gameId: string; visible: number }> = [];
+    try {
+      await listener.listen('outbox', async (payload) => {
+        // What the publisher would see at wake-up time, on another connection.
+        const [r] = await db<{ n: number }[]>`
+          select count(*)::int as n from ingest.broadcast_outbox where game_id = ${payload}`;
+        heard.push({ gameId: payload, visible: r?.n ?? 0 });
+      });
+      // A batch that dies before COMMIT must not wake anyone.
+      const rolledBack = pbpQ1();
+      const rb = await seedGame(db, rolledBack);
+      const rbRun = await replayRun(db, rb.gameId);
+      const failBeforeCommit = {
+        maybeFire(kind: string) {
+          if (kind === 'before_commit') throw new Error('injected rollback');
+        },
+      };
+      await expect(
+        apply(
+          { ...deps, fault: failBeforeCommit },
+          rb.gameId,
+          rolledBack,
+          observation(rbRun, rolledBack, T0),
+        ),
+      ).rejects.toThrow('injected rollback');
+      // A committed batch wakes the publisher with every row already visible.
+      const nd = pbpQ1();
+      const { gameId } = await seedGame(db, nd);
+      const run = await replayRun(db, gameId);
+      const r = await apply(deps, gameId, nd, observation(run, nd, T0));
+      for (let i = 0; i < 50 && !heard.some((h) => h.gameId === gameId); i++) {
+        await new Promise((res) => setTimeout(res, 20));
+      }
+      expect(heard.filter((h) => h.gameId === rb.gameId)).toEqual([]);
+      expect(heard.filter((h) => h.gameId === gameId)).toEqual([
+        { gameId, visible: r.changes.length },
+      ]);
+      expect((await counts(db, rb.gameId)).changes).toBe(0);
+    } finally {
+      await listener.end({ timeout: 2 });
+    }
   });
 });

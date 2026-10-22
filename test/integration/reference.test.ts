@@ -88,6 +88,54 @@ describe('ReferenceIngester', () => {
     expect(after?.lastSeq).toBe('0');
   });
 
+  it('daily schedule: games are created like season-schedule entries; without a season header the EXISTING season row for the date is linked, never created', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const raw = fixture('docs-daily-schedule-2022-11-07.json', 'ncaawb') as {
+      date: string;
+      games: { id: string }[];
+    };
+    const ids = raw.games.map((g) => g.id);
+    // No 2099 REG season exists: the link stays null and no seasons row appears.
+    const far = suffixed<{ date: string; games: { id: string }[] }>(raw, ids, `${suffix}-far`);
+    far.date = '2099-11-07';
+    const outFar = await ingester('ncaawb').process('daily_schedule', far, T0);
+    expect(outFar).toMatchObject({ feed: 'daily_schedule', games: ids.length, stale: 0 });
+    const [farRow] = await db<{ seasonId: string | null }[]>`
+      select season_id as "seasonId" from public.games where league = 'ncaawb' and provider_game_id = ${`${ids[0]}-${suffix}-far`}`;
+    expect(farRow).toEqual({ seasonId: null });
+    expect(await db`select 1 from public.seasons where league = 'ncaawb' and year = 2099`).toEqual(
+      [],
+    );
+    // The season schedule creates 2022 REG; the daily document for 2022-11-07 then links to it.
+    const seasonDoc = suffixed<{ games: { id: string }[] }>(
+      fixture('docs-schedule-2022-REG.json', 'ncaawb'),
+      (fixture('docs-schedule-2022-REG.json', 'ncaawb') as { games: { id: string }[] }).games.map(
+        (g) => g.id,
+      ),
+      `${suffix}-season`,
+    );
+    await ingester('ncaawb').process('schedule', seasonDoc, T0);
+    const [season] = await db<{ id: string }[]>`
+      select id from public.seasons where league = 'ncaawb' and year = 2022 and type = 'REG' order by created_at limit 1`;
+    const doc = suffixed<{ games: { id: string }[] }>(raw, ids, suffix);
+    const out = await ingester('ncaawb').process('daily_schedule', doc, T0);
+    expect(out).toMatchObject({ feed: 'daily_schedule', games: ids.length, stale: 0 });
+    const rows = await db<
+      { status: string; coverage: string; seasonId: string | null; home: string }[]
+    >`
+      select g.status::text as status, g.coverage::text as coverage, g.season_id as "seasonId", h.name as home
+      from public.games g join public.teams h on h.id = g.home_team_id
+      where g.league = 'ncaawb' and g.provider_game_id = ${`${ids[0]}-${suffix}`}`;
+    expect(rows).toEqual([
+      {
+        status: 'closed',
+        coverage: 'boxscore',
+        seasonId: season?.id ?? 'missing',
+        home: 'Toledo Rockets',
+      },
+    ]);
+  });
+
   it('a lagging schedule entry during a live game writes nothing game-level and is logged superseded_observation', async () => {
     const nd = pbpQ1();
     const { gameId, providerGameId } = await seedGame(db, nd);
