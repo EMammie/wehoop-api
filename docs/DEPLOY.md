@@ -49,7 +49,11 @@ Supabase cloud rules (from `.env.example`): pooled `DATABASE_URL` may be any mod
 `DATABASE_SESSION_URL` must be session mode; `prepare: false` is already set for poolers; migrations
 are applied with `supabase db push` against the linked project, never by the app.
 
-## Runbook (NOT RUN; needs a Fly account)
+## Runbook (NOT RUN; waits for the M3 polling validation)
+
+Fly account and app exist since 2026-10-21: org `personal` ("WBB", dedicated to this project), app
+`wehoop-api` created empty with `fly apps create wehoop-api --org personal` (no machines, no IPs).
+A payment card must be on the account before `fly deploy` can start machines.
 
 **Prerequisites before the first `fly deploy`** (all after the M3 polling validation passes):
 1. ~~The `RateLimiter.waitForSlot()` concurrency defect is fixed~~ **Done** (M3 `d34931a`, plan rev 4.8
@@ -62,8 +66,8 @@ are applied with `supabase db push` against the linked project, never by the app
 3. The `ANTHROPIC_API_KEY` repository secret for the hosted review row.
 
 ```
-fly auth login
-fly launch --no-deploy --copy-config --name wehoop-api --region ewr   # reads fly.toml; say no to Postgres/Redis
+fly auth login                    # the project's own Fly account (fly auth whoami)
+# app already created (see above); fly.toml carries app name and region, so no `fly launch`
 fly secrets set MODE=production SPORTRADAR_ACCESS_LEVEL=production \
   DATABASE_URL=... DATABASE_SESSION_URL=... SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... \
   SPORTRADAR_WNBA_KEY=... ADMIN_BEARER_TOKEN=...
