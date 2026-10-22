@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ZodType } from 'zod';
+import { budgetFor } from '../../../src/ingest/cadence.js';
 import {
   cadenceLoop,
   type DocumentSource,
@@ -153,7 +154,7 @@ describe('cadenceLoop pacing (rev 4.9)', () => {
     }
   });
 
-  it('while complete waits for closed, every feed polls at most every 5 min; inprogress resumes the normal grid', async () => {
+  it('while complete waits for closed, every feed polls at most every 5 min', async () => {
     // inprogress until 20 min, complete until 50 min, closed after.
     const { src, w, opts, calls } = clocked((t) =>
       t >= 50 * MIN ? 'closed' : t >= 20 * MIN ? 'complete' : 'inprogress',
@@ -167,5 +168,38 @@ describe('cadenceLoop pacing (rev 4.9)', () => {
       expect((after[i] ?? 0) - (after[i - 1] ?? 0)).toBeGreaterThanOrEqual(5 * MIN);
     }
     expect(after.length).toBeLessThanOrEqual(7); // 30 min at 5 min, plus the slot already due
+  });
+  it('leaving complete (the summary re-opened play) pulls the slow-booked pbp slot back to its 30 s grid', async () => {
+    // complete from 10:00 to 15:10; the summary at 15:15 sees inprogress again; closed at 25 min.
+    const { src, w, opts, calls } = clocked((t) =>
+      t >= 25 * MIN ? 'closed' : t >= 10 * MIN && t < 15 * MIN + 10_000 ? 'complete' : 'inprogress',
+    );
+    await cadenceLoop(w, src, silent, paced, opts);
+    const pbpAt = calls.filter((c) => c.feed === 'pbp').map((c) => c.at);
+    // pbp at 15:00 (complete) booked 20:00; after the summary at 15:15 it is 15:30 again.
+    expect(pbpAt).toContain(15 * MIN);
+    expect(pbpAt).toContain(15 * MIN + 30_000);
+    expect(pbpAt.filter((t) => t > 10 * MIN && t < 15 * MIN)).toEqual([]);
+    expect(pbpAt.every((t) => t % 30_000 === 0)).toBe(true); // still on the pbp grid
+  });
+
+  it('a 150-min game with a 30-min complete -> closed wait makes exactly the budgeted calls', async () => {
+    const budgeted = { ...paced, closeWaitMs: 30 * MIN };
+    const { src, w, opts, calls } = clocked((t) =>
+      t >= 180 * MIN ? 'closed' : t >= 150 * MIN ? 'complete' : 'inprogress',
+    );
+    await cadenceLoop(w, src, silent, budgeted, opts);
+    const b = budgetFor(budgeted);
+    expect(b).toMatchObject({ pbp: 301, summary: 30, afterComplete: 12, closing: 0, retries: 0 });
+    expect(calls.length).toBe(b.total);
+  });
+
+  it('the closing pair waits the summary offset after the pbp that reported closed', async () => {
+    const { src, w, opts, calls } = clocked((t) => (t >= 60_000 ? 'closed' : 'inprogress'));
+    await cadenceLoop(w, src, silent, { ...paced, closing: ['summary', 'boxscore'] }, opts);
+    const closing = calls.slice(-2);
+    const lastPbp = calls.filter((c) => c.feed === 'pbp').at(-1)?.at ?? 0;
+    expect(closing.map((c) => c.feed)).toEqual(['summary', 'boxscore']);
+    expect((closing[0]?.at ?? 0) - lastPbp).toBeGreaterThanOrEqual(15_000);
   });
 });

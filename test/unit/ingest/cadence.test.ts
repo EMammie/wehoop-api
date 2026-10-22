@@ -12,7 +12,7 @@ import { ncaawbAdapter } from '../../../src/leagues/ncaawb/adapter.js';
 import { wnbaAdapter } from '../../../src/leagues/wnba/adapter.js';
 
 describe('trial profiles: budgets derived from the cadence constants (plan §4)', () => {
-  it('full ≈ 350: pbp every 30 s + statistics (summary) every 5 min over 2.5 h, the complete -> closed wait, closing pair and 429 allowance (rev 4.9)', () => {
+  it('full 347: pbp every 30 s + statistics (summary) every 5 min over 2.5 h, the complete -> closed wait, closing pair and 429 allowance (rev 4.9)', () => {
     expect(budgetFor(PROFILE_CADENCE.full)).toEqual({
       pbp: 301, // t=0 through 2.5 h inclusive (the G3 run made 301)
       summary: 30, // first at +15 s
@@ -23,7 +23,7 @@ describe('trial profiles: budgets derived from the cadence constants (plan §4)'
       total: 347,
     });
   });
-  it('extended ≈ 150: summary every 60 s + one boxscore at +120 min, plus closing', () => {
+  it('extended 162: summary every 60 s + one boxscore at +120 min, the complete -> closed wait, closing and 429 allowance', () => {
     expect(budgetFor(PROFILE_CADENCE.extended)).toEqual({
       pbp: 0,
       summary: 151,
@@ -34,7 +34,7 @@ describe('trial profiles: budgets derived from the cadence constants (plan §4)'
       total: 162,
     });
   });
-  it('lean-full ≈ 165: pbp every 60 s + statistics every 10 min, plus closing', () => {
+  it('lean-full 179: pbp every 60 s + statistics every 10 min, the complete -> closed wait, closing and 429 allowance', () => {
     expect(budgetFor(PROFILE_CADENCE['lean-full'])).toEqual({
       pbp: 151,
       summary: 15, // first at +30 s

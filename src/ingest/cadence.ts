@@ -6,7 +6,7 @@ import type { RunSource } from './runs.js';
  * How often a watcher polls each game feed (plan §4 "Production/simulation
  * scheduler", "Trial mode"). A cadence is the unit the call budget is derived
  * from: `budgetFor` counts the calls a cadence makes over its horizon, so the
- * profile totals in the plan (≈330 / ≈150 / ≈165) are computed, never typed.
+ * profile totals in the plan (347 / 162 / 179 since rev 4.9) are computed, never typed.
  */
 export interface Cadence {
   /** Poll interval per feed; null = the feed is not polled. */
@@ -205,7 +205,8 @@ export function scaleCadence(c: Cadence, speed: number): Cadence {
     horizonMs: Math.round(c.horizonMs / speed),
     closing: c.closing,
   };
-  if (c.summaryOffsetMs !== undefined) scaled.summaryOffsetMs = s(c.summaryOffsetMs) ?? 0;
+  if (c.summaryOffsetMs !== undefined)
+    scaled.summaryOffsetMs = Math.round(c.summaryOffsetMs / speed);
   if (c.afterCompleteMs !== undefined) scaled.afterCompleteMs = s(c.afterCompleteMs);
   if (c.closeWaitMs !== undefined) scaled.closeWaitMs = Math.round(c.closeWaitMs / speed);
   if (c.retryAllowance !== undefined) scaled.retryAllowance = c.retryAllowance;

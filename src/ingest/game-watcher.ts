@@ -390,27 +390,34 @@ export async function cadenceLoop(
     }
   };
   // Periodic feeds: next due time per feed. One-offs: a sorted queue of offsets.
-  const periodic: Array<{ feed: GameFeedName; everyMs: number; nextAt: number }> = [];
-  if (cadence.pbpMs !== null)
-    periodic.push({ feed: 'pbp', everyMs: cadence.pbpMs, nextAt: startedAt });
-  if (cadence.summaryMs !== null)
-    periodic.push({
-      feed: 'summary',
-      everyMs: cadence.summaryMs,
-      nextAt: startedAt + (cadence.summaryOffsetMs ?? 0),
-    });
-  if (cadence.boxscoreMs !== null)
-    periodic.push({ feed: 'boxscore', everyMs: cadence.boxscoreMs, nextAt: startedAt });
+  // `base` anchors each feed's grid (the summary sits half a pbp interval off the pbp grid).
+  const periodic: Array<{ feed: GameFeedName; everyMs: number; base: number; nextAt: number }> = [];
+  const addPeriodic = (feed: GameFeedName, everyMs: number | null, offsetMs = 0) => {
+    if (everyMs !== null)
+      periodic.push({ feed, everyMs, base: startedAt + offsetMs, nextAt: startedAt + offsetMs });
+  };
+  addPeriodic('pbp', cadence.pbpMs);
+  addPeriodic('summary', cadence.summaryMs, cadence.summaryOffsetMs ?? 0);
+  addPeriodic('boxscore', cadence.boxscoreMs);
+  // While the game waits for `closed` after `complete` (or idles on `closed` without
+  // `--until closed`), poll at most every `afterCompleteMs` (rev 4.9).
+  const slowed = () =>
+    cadence.afterCompleteMs != null &&
+    (status === 'complete' || (status === 'closed' && !opts.untilClosed));
   const oneOffs = [...cadence.boxscoreAtMs].sort((a, b) => a - b).map((ms) => startedAt + ms);
   while (!opts.isStopped()) {
     const t = now();
     for (const p of periodic) {
+      // Leaving `complete` (a newer event re-opened play): pull a slot booked at the slow pace
+      // back to the next slot of the feed's own grid.
+      if (!slowed() && p.nextAt - t > p.everyMs) {
+        p.nextAt = p.base + Math.ceil((t - p.base) / p.everyMs) * p.everyMs;
+      }
       if (t >= p.nextAt) {
         await fetchOne(p.feed);
         // Keep the grid anchored to the start, skipping slots a slow fetch already passed.
-        // While `complete` waits for `closed`, poll at most every `afterCompleteMs` (rev 4.9).
         const everyMs =
-          status === 'complete' && cadence.afterCompleteMs != null
+          slowed() && cadence.afterCompleteMs != null
             ? Math.max(p.everyMs, cadence.afterCompleteMs)
             : p.everyMs;
         while (p.nextAt <= now()) p.nextAt += everyMs;
@@ -421,6 +428,10 @@ export async function cadenceLoop(
       await fetchOne('boxscore');
     }
     if (status === 'closed' && opts.untilClosed) {
+      // The pbp usually reports `closed`: keep the summary's offset from it before the closing
+      // pair (rev 4.9 (2)), so no pbp -> summary pair leaves at the minimum spacing.
+      if (cadence.summaryOffsetMs && cadence.closing.length > 0)
+        await sleep(cadence.summaryOffsetMs);
       for (const feed of cadence.closing) await fetchOne(feed, 2);
       log.info({ calls, failed, retried429, elapsedMs: now() - startedAt }, 'game closed');
       return { status, calls, failed, retried429, elapsedMs: now() - startedAt };

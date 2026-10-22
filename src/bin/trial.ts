@@ -206,7 +206,7 @@ async function main() {
         const source = config.mode === 'sim' ? 'simulation' : config.mode;
         const plan = planWatch(adapter, source, game.coverage, profile);
         console.log(
-          `game ${game.id} (${game.providerGameId}) status=${game.status} coverage=${game.coverage}: profile ${plan.profile}, budget ${plan.budget.total} calls (pbp ${plan.budget.pbp}, summary ${plan.budget.summary}, boxscore ${plan.budget.boxscore}, closing ${plan.budget.closing})`,
+          `game ${game.id} (${game.providerGameId}) status=${game.status} coverage=${game.coverage}: profile ${plan.profile}, budget ${plan.budget.total} calls (pbp ${plan.budget.pbp}, summary ${plan.budget.summary}, boxscore ${plan.budget.boxscore}, after complete ${plan.budget.afterComplete}, closing ${plan.budget.closing}, 429 retries ${plan.budget.retries})`,
         );
         const [q] = (await guard.status()).filter((s) => s.product === adapter.product);
         if (q) {
