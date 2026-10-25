@@ -6,10 +6,14 @@ import { type ChangesApi, GameSubscriber } from '../live/subscriber.js';
 import { gameChannel } from '../live/transport.js';
 import { canonicalJson } from '../model/content-hash.js';
 import { canonicalState, stateFromSnapshot } from '../model/game-state.js';
+import { leagueScoresChannel, ScoreboardSchema } from '../model/scoreboard.js';
 import { ChangesPageSchema, SnapshotSchema } from '../model/snapshot.js';
 
 /**
  * pnpm subscribe --game <uuid> [--record <path.jsonl>] [--auth anon|guest] [--until closed] [--settle-ms 20000]
+ * pnpm subscribe --league wnba [--record <path.jsonl>] [--auth anon|guest]
+ *   (M4) receive the league:{code}:scores scoreboard deltas (plan §5) and print each tick;
+ *   --record appends every decoded message as JSONL; stop with SIGINT.
  * Reference client: subscribes to the private channel game:{id} with the anon
  * key (or an anonymous-sign-in guest JWT, the real iOS session), then runs
  * the reconnect contract (src/live/subscriber.ts) against the Hono API.
@@ -27,15 +31,17 @@ async function main() {
       until: { type: 'string', default: 'closed' },
       'settle-ms': { type: 'string', default: '20000' },
       api: { type: 'string' },
+      league: { type: 'string' },
     },
     strict: true,
   });
-  if (!args.game) throw new Error('--game <uuid> is required');
+  if (!args.game && !args.league) throw new Error('--game <uuid> or --league <code> is required');
+  if (args.game && args.league) throw new Error('--game and --league are exclusive');
   const settleMs = Number(args['settle-ms']);
   if (!Number.isInteger(settleMs) || settleMs < 0) {
     throw new Error('--settle-ms must be an integer >= 0');
   }
-  const gameId = args.game;
+  const gameId = args.game ?? '';
   const config = loadConfig();
   if (!config.supabase.anonKey) throw new Error('SUPABASE_ANON_KEY is required to subscribe');
   const apiBase = args.api ?? config.api.baseUrl;
@@ -68,6 +74,48 @@ async function main() {
     });
   } else {
     await client.realtime.setAuth(config.supabase.anonKey);
+  }
+
+  if (args.league) {
+    // Scoreboard channel: print every tick; no snapshot or catch-up (list screens re-fetch v_schedule).
+    const channelName = leagueScoresChannel(args.league);
+    let ticks = 0;
+    let deltas = 0;
+    const ch = client.channel(channelName, { config: { private: true } });
+    ch.on('broadcast', { event: 'scores' }, (msg) => {
+      const parsed = ScoreboardSchema.safeParse(msg.payload);
+      if (!parsed.success) {
+        log('undecodable scores message', { issues: parsed.error.issues.length });
+        return;
+      }
+      ticks++;
+      deltas += parsed.data.deltas.length;
+      const receivedAt = new Date().toISOString();
+      if (args.record)
+        appendFileSync(args.record, `${JSON.stringify({ receivedAt, scores: parsed.data })}\n`);
+      for (const d of parsed.data.deltas) {
+        log('scores', {
+          gameId: d.gameId,
+          status: d.status,
+          score: `${d.score.away}-${d.score.home}`,
+          period: d.period?.number ?? null,
+          clock: d.clock,
+          latestSeq: d.latestSeq,
+        });
+      }
+    });
+    ch.subscribe((status, err) =>
+      log('channel', { channel: channelName, status, err: err?.message }),
+    );
+    const stopLeague = async () => {
+      log('summary', { ticks, deltas });
+      await client.removeAllChannels();
+      process.exit(0);
+    };
+    for (const signal of ['SIGINT', 'SIGTERM'] as const)
+      process.on(signal, () => void stopLeague());
+    await new Promise(() => undefined);
+    return;
   }
 
   let done: (() => void) | null = null;

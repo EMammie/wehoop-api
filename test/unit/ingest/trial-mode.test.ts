@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../../src/config.js';
 import { seasonFor } from '../../../src/ingest/season.js';
-import { assertSpeedAllowed, lagFromRecord } from '../../../src/ingest/trial-mode.js';
+import {
+  assertSpeedAllowed,
+  backfillNeeded,
+  lagFromRecord,
+} from '../../../src/ingest/trial-mode.js';
 
 const base = {
   DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:54322/postgres',
@@ -191,5 +195,26 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
       excluded: 1,
       notBroadcast: 0,
     });
+  });
+});
+
+describe('backfillNeeded (push reconnect -> REST pbp backfill?)', () => {
+  const reconnectedAt = new Date('2026-10-18T20:00:00Z');
+  const at = (secBefore: number) => new Date(reconnectedAt.getTime() - secBefore * 1000);
+  it('no pbp of this generation yet: backfill', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: null, reconnectedAt })).toBe(true);
+  });
+  it('a pbp requested before the reconnect misses the tail of the outage: backfill, even one fetched during the outage', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: at(45), reconnectedAt })).toBe(true); // 45 s before a 30 s outage ended
+    expect(backfillNeeded({ lastPbpCalledAt: at(4.8), reconnectedAt })).toBe(true); // the validator's gap: 4.8 s before reconnect
+    expect(backfillNeeded({ lastPbpCalledAt: at(0.001), reconnectedAt })).toBe(true);
+  });
+  it('a pbp requested at or after the reconnect covers everything the stream will not replay: skip', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: reconnectedAt, reconnectedAt })).toBe(false);
+    expect(backfillNeeded({ lastPbpCalledAt: at(-2), reconnectedAt })).toBe(false);
+  });
+  it('a reconnect moment that could not be read on the database clock: always backfill', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: at(-2), reconnectedAt: null })).toBe(true);
+    expect(backfillNeeded({ lastPbpCalledAt: null, reconnectedAt: null })).toBe(true);
   });
 });

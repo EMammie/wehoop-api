@@ -14,11 +14,13 @@ import {
 import { QuotaGuard, QuotaRefusedError } from '../ingest/quota-guard.js';
 import { ReferenceIngester } from '../ingest/reference.js';
 import { endRun, startRun } from '../ingest/runs.js';
+import { Scheduler } from '../ingest/scheduler.js';
 import { assertSpeedAllowed, resolveGame, runTrialWatch } from '../ingest/trial-mode.js';
 import { LeagueCodeSchema } from '../leagues/codes.js';
 import { adapterFor } from '../leagues/registry.js';
 import { OutboxPublisher } from '../live/outbox-publisher.js';
 import { PulseSender } from '../live/pulse.js';
+import { DbScoreboardSource, ScoreboardSender } from '../live/scoreboard.js';
 import { SupabaseBroadcastTransport } from '../live/supabase-broadcast.js';
 import { type LiveTransport, MemoryTransport } from '../live/transport.js';
 import { createLogger } from '../logger.js';
@@ -33,9 +35,17 @@ import { SimulationUrlResolver } from '../providers/sportradar/urls.js';
  *     [--max-polls N] [--record-to <file.jsonl>]
  *   pnpm dev:worker --mode sim --league wnba --replay-file <file.jsonl> [--pace 0]
  *   pnpm dev:worker --mode trial --league ncaawb --game <uuid|providerId> --profile full|extended|lean-full
- *     [--speed N] [--note "..."]            (what `pnpm trial watch` runs: budget reservation + cadence loop)
+ *     [--speed N] [--note "..."] [--push]   (what `pnpm trial watch` runs: budget reservation + cadence loop;
+ *                                            --push (M4, opt-in) opens the push streams and reconciles by REST
+ *                                            every 5 min; needs a production-shaped host, never the simulation service)
  *   pnpm dev:worker --mode sim --league ncaawb --game <id> --profile full --recording <id>
  *                                           (the same trial flow against the simulation host; never counted)
+ *   pnpm dev:worker --mode production          (no --game: the production scheduler, src/ingest/scheduler.ts:
+ *                                            idle holding the lock, drain the outbox, poll the daily schedule
+ *                                            per league with a key, start coverage-aware watches near tip-off)
+ *   pnpm worker:rehearsal --schedule --speed N  (the same scheduler against the fake provider; MODE=trial needs
+ *                                            the explicit flag and a loopback host, never the real one)
+ *   [--scores]        publish league:{code}:scores every 5 s (always on with the scheduler; off for a single watch)
  *   [--lock-wait 60]  seconds to wait for the single-ingester lock (a killed worker's lock lingers briefly)
  *   [--drain-timeout 60]  seconds the final drain may wait for backing-off outbox rows before exiting
  *
@@ -76,6 +86,9 @@ async function main() {
       profile: { type: 'string' },
       speed: { type: 'string' },
       note: { type: 'string' },
+      push: { type: 'boolean', default: false },
+      schedule: { type: 'boolean', default: false },
+      scores: { type: 'boolean', default: false },
     },
     strict: true,
   });
@@ -114,10 +127,33 @@ async function main() {
     process.exit(64);
   }
   const trialWatch = args.game !== undefined;
-  if (config.mode !== 'sim' && !args['replay-file'] && !trialWatch) {
+  if (args.push && (!trialWatch || config.mode === 'sim')) {
     log.error(
       { mode: config.mode },
-      `MODE=${config.mode} watches one planned game: --game <id> --profile <p> (pnpm trial watch); no automatic discovery`,
+      '--push needs a planned game (--game) against a production-shaped host (MODE=trial|production, or a rehearsal host); the simulation service has no push streams',
+    );
+    process.exit(64);
+  }
+  // The scheduler (plan §4) is the production default; in trial mode it exists only for a
+  // rehearsal against a loopback host (`--schedule`), never against api.sportradar.com: a trial
+  // key watches exactly the one game the operator planned.
+  const scheduler =
+    !trialWatch &&
+    !args['replay-file'] &&
+    !args.recording &&
+    (config.mode === 'production' ||
+      (args.schedule && config.mode === 'trial' && config.rehearsal));
+  if (args.schedule && !scheduler) {
+    log.error(
+      { mode: config.mode, rehearsal: config.rehearsal },
+      '--schedule runs the production scheduler: MODE=production, or MODE=trial against a loopback rehearsal host; not with --game / --replay-file / --recording',
+    );
+    process.exit(64);
+  }
+  if (config.mode !== 'sim' && !args['replay-file'] && !trialWatch && !scheduler) {
+    log.error(
+      { mode: config.mode },
+      `MODE=${config.mode} watches one planned game: --game <id> --profile <p> (pnpm trial watch); no automatic discovery (the scheduler runs in MODE=production, or with --schedule on a rehearsal host)`,
     );
     process.exit(64);
   }
@@ -182,6 +218,11 @@ async function main() {
   await publisher.start(session);
   log.info('outbox drained on startup');
   const pulse = new PulseSender({ db, transport, log });
+  // league:{code}:scores (plan §5): 5 s-coalesced scoreboard deltas, straight to the transport.
+  // Only with the scheduler (production) or `--scores`: a single-game trial watch keeps its
+  // behaviour and does not query public.games every 5 s.
+  const scoreboard = new ScoreboardSender({ transport, log, source: new DbScoreboardSource(db) });
+  if (scheduler || args.scores) scoreboard.start();
 
   // This process holds the single-ingester lock, so any root run still marked running belongs
   // to a worker that died (kill -9 never reaches endRun). Close them before opening ours.
@@ -190,6 +231,15 @@ async function main() {
       error = coalesce(error, 'worker died; marked aborted by the next lock holder')
     where status = 'running' and kind in ('replay', 'watch_game') returning id::text`;
   const orphanedIds = orphaned.map((r) => Number(r.id));
+  // Their push_stream / backfill sub-runs died with them (and any sub-run whose parent is no longer running).
+  const orphanedSubRuns = await db<{ id: string }[]>`
+    update ingest.ingestion_runs s set status = 'aborted', ended_at = now(),
+      error = coalesce(s.error, 'parent watch run is not running; marked aborted by the next lock holder')
+    where s.status = 'running' and s.parent_run_id is not null
+      and not exists (select 1 from ingest.ingestion_runs p where p.id = s.parent_run_id and p.status = 'running')
+    returning s.id::text`;
+  if (orphanedSubRuns.length > 0)
+    log.warn({ runs: orphanedSubRuns.map((r) => Number(r.id)) }, 'aborted orphaned sub-runs');
   if (orphanedIds.length > 0) {
     log.warn({ runs: orphanedIds }, 'aborted orphaned runs');
     // Their budget reservations never reached runTrialWatch's release (kill -9, host restart).
@@ -278,6 +328,48 @@ async function main() {
     process.exit(0);
   };
 
+  if (scheduler) {
+    const leagues = (['wnba', 'ncaawb', 'unrivaled'] as const).filter(
+      (l) => config.sportradar.keys[l] !== undefined,
+    );
+    const guard = new QuotaGuard({ db, log, overrides: config.quotaOverrides });
+    const sched = new Scheduler({
+      db,
+      log,
+      config,
+      guard,
+      pulse,
+      fault,
+      leagues,
+      isStopped: () => stopRequested,
+      // A signal interrupts the between-tick sleep so shutdown does not wait for the next tick.
+      sleep: (ms) =>
+        new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, ms);
+          wakeIdle = () => {
+            clearTimeout(t);
+            resolve();
+          };
+        }),
+      // A rehearsal ticks faster so the fake provider's compressed game is noticed in time.
+      ...(config.rehearsal ? { tickMs: Math.max(1000, Math.round(60_000 / speed)) } : {}),
+    });
+    log.info({ leagues, mode: config.mode, rehearsal: config.rehearsal }, 'scheduler mode');
+    try {
+      await sched.run();
+    } catch (err) {
+      log.error({ err }, 'scheduler failed');
+      process.exit(1);
+    }
+    pulse.stop();
+    const left = await finalDrain();
+    publisher.stop();
+    scoreboard.stop();
+    log.info({ stats: sched.stats, unpublished: left, stoppedBy }, 'scheduler finished');
+    await exitAfterTail(left);
+    return;
+  }
+
   if (trialWatch) {
     // Trial / production watch of ONE planned game (plan §4 "Trial mode"): the game row comes
     // from `pnpm trial plan`; the budget is reserved before the first call; calls are
@@ -314,12 +406,15 @@ async function main() {
           speed,
           note: args.note ?? null,
           untilClosed,
+          push: args.push,
         },
       );
       pulse.stop();
       const left = await finalDrain();
       if (gameIdKnown) await pulse.sendOnce(gameIdKnown);
       publisher.stop();
+      scoreboard.stop();
+      if (scheduler || args.scores) await scoreboard.tick().catch(() => undefined);
       log.info(
         {
           runId: outcome.runId,
@@ -331,6 +426,7 @@ async function main() {
           finalStatus: outcome.status,
           changes: outcome.changes,
           stale: outcome.stale,
+          push: outcome.push ?? null,
           unpublished: left,
           stoppedBy,
         },
@@ -426,6 +522,8 @@ async function main() {
     const left = await finalDrain();
     if (watcher.gameId) await pulse.sendOnce(watcher.gameId);
     publisher.stop();
+    scoreboard.stop();
+    if (scheduler || args.scores) await scoreboard.tick().catch(() => undefined);
     await endRun(db, run.id, stoppedBy ? 'aborted' : 'ok', stoppedBy ?? undefined);
     log.info(
       {
@@ -449,6 +547,7 @@ async function main() {
     });
     const rest = await finalDrain();
     publisher.stop();
+    scoreboard.stop();
     shuttingDown = true;
     await session.end({ timeout: 2 });
     await db.end({ timeout: 2 });

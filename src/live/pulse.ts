@@ -43,7 +43,8 @@ export async function buildPulse(
  * to the transport. Loss is harmless; the next pulse supersedes.
  */
 export class PulseSender {
-  private timer: NodeJS.Timeout | null = null;
+  /** One timer per live game (the production scheduler watches several at once). */
+  private readonly timers = new Map<string, NodeJS.Timeout>();
   constructor(
     private readonly deps: { db: Db; transport: LiveTransport; log: Logger; intervalMs?: number },
   ) {}
@@ -60,12 +61,27 @@ export class PulseSender {
   }
 
   start(gameId: string): void {
-    this.stop();
-    this.timer = setInterval(() => void this.sendOnce(gameId), this.deps.intervalMs ?? 10_000);
+    this.stop(gameId);
+    this.timers.set(
+      gameId,
+      setInterval(() => void this.sendOnce(gameId), this.deps.intervalMs ?? 10_000),
+    );
   }
 
-  stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+  /** Stop one game's pulses, or every game's when no id is given. */
+  stop(gameId?: string): void {
+    if (gameId === undefined) {
+      for (const t of this.timers.values()) clearInterval(t);
+      this.timers.clear();
+      return;
+    }
+    const t = this.timers.get(gameId);
+    if (t) clearInterval(t);
+    this.timers.delete(gameId);
+  }
+
+  /** Games currently pulsing. */
+  get active(): string[] {
+    return [...this.timers.keys()];
   }
 }
