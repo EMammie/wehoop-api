@@ -8,6 +8,7 @@ import { applyChanges } from '../ingest/apply-changes.js';
 import {
   appendRecordedDocument,
   compactRecording,
+  relabelRecording,
   toRecordedDocument,
 } from '../ingest/recording.js';
 import { endRun, startRun } from '../ingest/runs.js';
@@ -17,6 +18,7 @@ import { adapterFor } from '../leagues/registry.js';
 import { normalizeEvent } from '../leagues/sportradar-basketball/normalize.js';
 import { createLogger, type Logger } from '../logger.js';
 import type { PeriodType } from '../model/live-event.js';
+import { startFakeProvider } from '../providers/sportradar/fake-provider.js';
 import { SportradarHttp } from '../providers/sportradar/http.js';
 import { BoxscoreDocumentSchema } from '../providers/sportradar/schemas/boxscore.js';
 import { PbpDocumentSchema, PbpEventSchema } from '../providers/sportradar/schemas/pbp.js';
@@ -52,7 +54,23 @@ import { type Feed, SimulationUrlResolver } from '../providers/sportradar/urls.j
  *   whose status or period changed, plus the final one, is kept. Kept lines are
  *   written byte-identical, gzip level 9. Exits 3 if the output exceeds
  *   `--target-mb`. The rule lives in `selectCompact` (src/ingest/recording.ts).
+ * pnpm sim relabel --in <file.jsonl[.gz]> --out <file.jsonl.gz> --coverage extended_boxscore
+ *     [--game-id <from>:<to>]
+ *   Rewrite `coverage` on every document (and optionally the provider game id)
+ *   so the score-only watcher path can be replayed from a committed fixture
+ *   (`relabelRecording`). Documented in fixtures/ncaawb/README.md.
+ * pnpm sim serve --replay-file <file.jsonl[.gz]> [--port 8787] [--speed 30]
+ *   Local stand-in for api.sportradar.com (src/providers/sportradar/fake-provider.ts):
+ *   serves the recording time-scaled over the production URL shape, 401 without
+ *   x-api-key, 429 under 1 s spacing. For `MODE=trial SPORTRADAR_BASE_URL=http://127.0.0.1:8787`
+ *   rehearsals of `pnpm trial plan|watch` with a made-up key; never counts real quota.
  */
+async function readFileBytes(path: string): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of createReadStream(path)) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks);
+}
+
 async function main() {
   const { values: args, positionals } = parseArgs({
     options: {
@@ -70,6 +88,11 @@ async function main() {
       'every-pbp': { type: 'string', default: '50' },
       'every-summary': { type: 'string', default: '10' },
       'target-mb': { type: 'string', default: '4' },
+      coverage: { type: 'string' },
+      'game-id': { type: 'string' },
+      'replay-file': { type: 'string' },
+      port: { type: 'string', default: '8787' },
+      speed: { type: 'string', default: '30' },
     },
     allowPositionals: true,
     strict: true,
@@ -129,6 +152,49 @@ async function main() {
       maxPolls,
     });
     console.log(`RECORDED ${docs} documents -> ${args.out}`);
+    return;
+  }
+  if (cmd === 'relabel') {
+    if (!args.in) throw new Error('--in <file.jsonl[.gz]> is required');
+    if (!args.out) throw new Error('--out <file.jsonl.gz> is required');
+    if (!args.coverage) throw new Error('--coverage <level> is required');
+    let gameId: { from: string; to: string } | undefined;
+    if (args['game-id']) {
+      const [from, to] = args['game-id'].split(':');
+      if (!from || !to) throw new Error('--game-id must be <from>:<to>');
+      gameId = { from, to };
+    }
+    const out = await relabelRecording(args.in, args.out, {
+      coverage: args.coverage,
+      ...(gameId ? { gameId } : {}),
+    });
+    const hash = createHash('sha256')
+      .update(await readFileBytes(args.out))
+      .digest('hex');
+    console.log(
+      `RELABELLED ${out.relabelled}/${out.docs} documents coverage=${args.coverage}${gameId ? ` game ${gameId.from} -> ${gameId.to}` : ''} -> ${args.out} (${statSync(args.out).size} bytes, sha256 ${hash})`,
+    );
+    return;
+  }
+  if (cmd === 'serve') {
+    if (!args['replay-file']) throw new Error('--replay-file <file> is required');
+    const log = createLogger({ level: config.logLevel });
+    const server = await startFakeProvider({
+      replayFile: args['replay-file'],
+      speed: intArg('speed', args.speed, 30) ?? 30,
+      port: intArg('port', args.port, 8787) ?? 8787,
+      log,
+    });
+    console.log(
+      `FAKE_PROVIDER_URL=${server.url} game=${server.providerGameId} documents=${server.documents} speed=${args.speed}x`,
+    );
+    const stop = async () => {
+      console.log(`FAKE_PROVIDER_STATS=${JSON.stringify(server.stats)}`);
+      await server.close();
+      process.exit(0);
+    };
+    for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => void stop());
+    await new Promise(() => undefined);
     return;
   }
   if (cmd === 'compact') {

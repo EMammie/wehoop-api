@@ -9,12 +9,14 @@ import { canonicalState, stateFromSnapshot } from '../model/game-state.js';
 import { ChangesPageSchema, SnapshotSchema } from '../model/snapshot.js';
 
 /**
- * pnpm subscribe --game <uuid> [--record <path.jsonl>] [--auth anon|guest] [--until closed]
+ * pnpm subscribe --game <uuid> [--record <path.jsonl>] [--auth anon|guest] [--until closed] [--settle-ms 20000]
  * Reference client: subscribes to the private channel game:{id} with the anon
  * key (or an anonymous-sign-in guest JWT, the real iOS session), then runs
  * the reconnect contract (src/live/subscriber.ts) against the Hono API.
  * Logs `catch-up` whenever it pages /changes. `--record` appends every
- * applied GameChange as JSONL with how it arrived (broadcast | catch-up | buffer).
+ * applied GameChange as JSONL with how it arrived (broadcast | catch-up | buffer)
+ * and `receivedAt` (our clock), which `pnpm trial lag --record` turns into the
+ * median subscriber lag from `wall_clock` and from the change's own `ts`.
  */
 async function main() {
   const { values: args } = parseArgs({
@@ -23,11 +25,16 @@ async function main() {
       record: { type: 'string' },
       auth: { type: 'string', default: 'anon' },
       until: { type: 'string', default: 'closed' },
+      'settle-ms': { type: 'string', default: '20000' },
       api: { type: 'string' },
     },
     strict: true,
   });
   if (!args.game) throw new Error('--game <uuid> is required');
+  const settleMs = Number(args['settle-ms']);
+  if (!Number.isInteger(settleMs) || settleMs < 0) {
+    throw new Error('--settle-ms must be an integer >= 0');
+  }
   const gameId = args.game;
   const config = loadConfig();
   if (!config.supabase.anonKey) throw new Error('SUPABASE_ANON_KEY is required to subscribe');
@@ -70,12 +77,44 @@ async function main() {
   const subscriber = new GameSubscriber(gameId, api, {
     log,
     onChange: (c, via) => {
-      if (args.record) appendFileSync(args.record, `${JSON.stringify({ via, change: c })}\n`);
+      if (args.record) {
+        appendFileSync(
+          args.record,
+          `${JSON.stringify({ via, receivedAt: new Date().toISOString(), change: c })}\n`,
+        );
+      }
     },
     onSnapshot: (snap, reason) => {
       if (reason === 'closed') {
         log('closed', { seq: snap.seq, score: snap.game.score });
-        if (args.until === 'closed') done?.();
+        // The watcher fetches the closing summary + boxscore AFTER the pbp that reported `closed`
+        // (their stats changes follow the status change; live run 2026-10-19 stopped at 1305 of
+        // 1306). Keep listening for --settle-ms, then catch up from /changes and re-snapshot.
+        if (args.until === 'closed') {
+          log('settling after closed', { settleMs });
+          setTimeout(() => {
+            void (async () => {
+              // The snapshot is read outside the subscriber's queue: if it is ahead of what was
+              // applied (a change committed meanwhile), catch up again and re-read, so the
+              // derived-state comparison in summary() compares equal seqs.
+              await subscriber.reconnect();
+              let snap = await api.snapshot(gameId);
+              for (let i = 0; i < 3 && snap.seq > subscriber.lastSeq; i++) {
+                await subscriber.reconnect();
+                snap = await api.snapshot(gameId);
+              }
+              subscriber.finalSnapshot = snap;
+              log('final catch-up', {
+                lastSeq: subscriber.lastSeq,
+                snapshotSeq: subscriber.finalSnapshot.seq,
+              });
+              done?.();
+            })().catch((e) => {
+              log('final catch-up failed', { err: String(e) });
+              done?.();
+            });
+          }, settleMs);
+        }
       }
     },
   });
@@ -111,8 +150,14 @@ async function main() {
       contiguous,
       duplicates: subscriber.duplicates,
       catchUps: subscriber.catchUps,
+      snapshotSeq: subscriber.finalSnapshot?.seq ?? null,
+      // null = not comparable (the final snapshot and the applied stream end at different seqs).
       derivedStateEqualsFinalSnapshot:
-        derived !== null && fromSnapshot !== null ? derived === fromSnapshot : null,
+        derived !== null &&
+        fromSnapshot !== null &&
+        subscriber.finalSnapshot?.seq === subscriber.lastSeq
+          ? derived === fromSnapshot
+          : null,
     };
   };
   /** Equal shapes: every change received via Broadcast must decode-equal the same seq from /changes. */

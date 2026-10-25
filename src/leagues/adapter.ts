@@ -13,7 +13,7 @@ import type { LeagueCode } from './codes.js';
 export interface CoverageProfile {
   /** Play events are ingested and emitted as event_* changes. */
   events: boolean;
-  /** 'live': stats on every document; 'final': only once the game is complete/closed; 'none'. */
+  /** 'live': stats on every document; 'final': only from a `closed` document (stats_final_at); 'none'. */
   stats: 'live' | 'final' | 'none';
 }
 
@@ -72,7 +72,10 @@ export function effectiveCoverage(
 /**
  * Apply a coverage profile to a normalized game document: a score-only game
  * never emits play events (the document is then not a complete pbp either),
- * and emits stats only once the game is complete or closed.
+ * and emits stats only from a `closed` document, the one that stamps
+ * `games.stats_final_at` (plan §2: "stats at stats_final_at"). A `complete`
+ * document is still provisional (the live rehearsal showed its team totals
+ * changing before `closed`), so emitting there would cost two stats sets.
  */
 export function applyCoverage(
   nd: NormalizedDocument,
@@ -80,7 +83,7 @@ export function applyCoverage(
 ): NormalizedDocument {
   if (profile.events && profile.stats === 'live') return nd;
   const status = nd.gameView?.status ?? null;
-  const finalPhase = status === 'complete' || status === 'closed';
+  const finalPhase = status === 'closed';
   const keepStats = profile.stats === 'live' || (profile.stats === 'final' && finalPhase);
   return {
     ...nd,
