@@ -59,10 +59,13 @@ export async function loadChanges(
         seq: string;
         changeType: string;
         providerEventId: string | null;
+        providerSequence: string | null;
+        providerNumber: number | null;
         body: unknown;
         createdAt: Date;
       }[]
-    >`select id, seq::text as seq, change_type::text as "changeType", provider_event_id as "providerEventId", body,
+    >`select id, seq::text as seq, change_type::text as "changeType", provider_event_id as "providerEventId",
+             provider_sequence::text as "providerSequence", provider_number as "providerNumber", body,
              created_at as "createdAt"
       from public.game_changes c where c.game_id = ${gameId} and c.seq > ${after}
       order by c.seq limit ${limit + 1}`;

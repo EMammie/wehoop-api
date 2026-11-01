@@ -77,12 +77,24 @@ export function diffEvents(
       case 'reinstate':
         counts.inserted++;
         writes.push({ action, event: ev, hash });
-        changes.push({ type: 'event_insert', providerEventId: ev.providerEventId, body: ev.body });
+        changes.push({
+          type: 'event_insert',
+          providerEventId: ev.providerEventId,
+          providerSequence: ev.providerSequence,
+          providerNumber: ev.providerNumber,
+          body: ev.body,
+        });
         break;
       case 'update':
         counts.updated++;
         writes.push({ action, event: ev, hash });
-        changes.push({ type: 'event_update', providerEventId: ev.providerEventId, body: ev.body });
+        changes.push({
+          type: 'event_update',
+          providerEventId: ev.providerEventId,
+          providerSequence: ev.providerSequence,
+          providerNumber: ev.providerNumber,
+          body: ev.body,
+        });
         break;
       case 'touch':
         counts.touched++;

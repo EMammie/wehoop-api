@@ -332,20 +332,38 @@ public struct GameChange: Codable, Hashable, Sendable {
 
     public struct EventInsert: Codable, Hashable, Sendable {
         public let providerEventId: String
+        public let providerSequence: Int?
+        public let providerNumber: Int?
         public let body: LiveEvent
 
-        public init(providerEventId: String, body: LiveEvent) {
+        public init(
+            providerEventId: String,
+            providerSequence: Int?,
+            providerNumber: Int?,
+            body: LiveEvent
+        ) {
             self.providerEventId = providerEventId
+            self.providerSequence = providerSequence
+            self.providerNumber = providerNumber
             self.body = body
         }
     }
 
     public struct EventUpdate: Codable, Hashable, Sendable {
         public let providerEventId: String
+        public let providerSequence: Int?
+        public let providerNumber: Int?
         public let body: LiveEvent
 
-        public init(providerEventId: String, body: LiveEvent) {
+        public init(
+            providerEventId: String,
+            providerSequence: Int?,
+            providerNumber: Int?,
+            body: LiveEvent
+        ) {
             self.providerEventId = providerEventId
+            self.providerSequence = providerSequence
+            self.providerNumber = providerNumber
             self.body = body
         }
     }

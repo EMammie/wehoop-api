@@ -117,8 +117,16 @@ export async function loadSnapshot(
       join public.teams t on t.id = ps.team_id
       where ps.game_id = ${gameId}
       order by (ps.team_id = g.home_team_id) desc, ps.starter desc nulls last, ps.full_name, ps.provider_player_id`;
-    const events = await tx<{ providerEventId: string; body: unknown }[]>`
-      select provider_event_id as "providerEventId", payload as body
+    const events = await tx<
+      {
+        providerEventId: string;
+        providerSequence: string | null;
+        providerNumber: number | null;
+        body: unknown;
+      }[]
+    >`
+      select provider_event_id as "providerEventId", provider_sequence::text as "providerSequence",
+             provider_number as "providerNumber", payload as body
       from public.play_events where game_id = ${gameId} and deleted_at is null
       order by period_sequence nulls first, provider_sequence nulls first, provider_number nulls first, wall_clock nulls first, provider_event_id`;
     return SnapshotSchema.parse({
@@ -159,7 +167,12 @@ export async function loadSnapshot(
         stats: { ...t.stats, extra: t.extra ?? {} },
       })),
       playerStats,
-      events,
+      events: events.map((e) => ({
+        providerEventId: e.providerEventId,
+        providerSequence: e.providerSequence === null ? null : Number(e.providerSequence),
+        providerNumber: e.providerNumber,
+        body: e.body,
+      })),
       seq: Number(g.lastSeq),
       retainedFrom: Number(g.retainedFromSeq),
       coverage: g.coverage,

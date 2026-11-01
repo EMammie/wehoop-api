@@ -837,10 +837,14 @@ export async function applyChanges(
       let seq = firstSeq;
       for (const c of changes) {
         const providerEventId = 'providerEventId' in c ? c.providerEventId : null;
+        const providerSequence = 'providerSequence' in c ? c.providerSequence : null;
+        const providerNumber = 'providerNumber' in c ? c.providerNumber : null;
         const playEventId = providerEventId ? (playEventIds.get(providerEventId) ?? null) : null;
         const [row] = await tx<{ id: string; createdAt: Date }[]>`
-          insert into public.game_changes (game_id, seq, change_type, play_event_id, provider_event_id, body, content_hash)
-          values (${gameId}, ${seq}, ${c.type}, ${playEventId}, ${providerEventId}, ${tx.json(c.body as never)}, ${contentHash(c.body)})
+          insert into public.game_changes (game_id, seq, change_type, play_event_id, provider_event_id,
+            provider_sequence, provider_number, body, content_hash)
+          values (${gameId}, ${seq}, ${c.type}, ${playEventId}, ${providerEventId},
+            ${providerSequence}, ${providerNumber}, ${tx.json(c.body as never)}, ${contentHash(c.body)})
           returning id, created_at as "createdAt"`;
         if (!row) throw new Error('game_changes insert returned no row');
         await tx`insert into ingest.broadcast_outbox (change_id, game_id, seq) values (${row.id}, ${gameId}, ${seq})`;
@@ -851,6 +855,8 @@ export async function applyChanges(
             seq,
             changeType: c.type,
             providerEventId,
+            providerSequence,
+            providerNumber,
             body: c.body,
             createdAt: row.createdAt,
           }),

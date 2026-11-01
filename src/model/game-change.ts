@@ -25,6 +25,18 @@ const envelope = {
   ts: z.iso.datetime({ offset: true }),
 };
 
+/**
+ * The provider's ordering key of the play an event_insert / event_update carries
+ * (migration 0013, M5 S2). A client orders events by (body.period.sequence,
+ * providerSequence, providerNumber, body.wallClock, providerEventId), nulls first,
+ * which is the snapshot's order. Kept outside the body so the body and its content
+ * hash are unchanged; optional because changes written before 0013 carry none.
+ */
+const eventPosition = {
+  providerSequence: z.int().nullable().optional(),
+  providerNumber: z.int().nullable().optional(),
+};
+
 export const EventDeleteBodySchema = z.object({ providerEventId: z.string() });
 
 /**
@@ -131,12 +143,14 @@ export const GameChangeSchema = z.discriminatedUnion('type', [
     ...envelope,
     type: z.literal('event_insert'),
     providerEventId: z.string(),
+    ...eventPosition,
     body: LiveEventSchema,
   }),
   z.object({
     ...envelope,
     type: z.literal('event_update'),
     providerEventId: z.string(),
+    ...eventPosition,
     body: LiveEventSchema,
   }),
   z.object({
@@ -155,8 +169,20 @@ export type GameChangeBody = GameChange['body'];
 
 /** A change before it has a seq/id/ts: what the differ produces and applyChanges numbers. */
 export type PendingChange =
-  | { type: 'event_insert'; providerEventId: string; body: z.infer<typeof LiveEventSchema> }
-  | { type: 'event_update'; providerEventId: string; body: z.infer<typeof LiveEventSchema> }
+  | {
+      type: 'event_insert';
+      providerEventId: string;
+      providerSequence: number | null;
+      providerNumber: number | null;
+      body: z.infer<typeof LiveEventSchema>;
+    }
+  | {
+      type: 'event_update';
+      providerEventId: string;
+      providerSequence: number | null;
+      providerNumber: number | null;
+      body: z.infer<typeof LiveEventSchema>;
+    }
   | { type: 'event_delete'; providerEventId: string; body: z.infer<typeof EventDeleteBodySchema> }
   | { type: 'status'; body: z.infer<typeof StatusBodySchema> }
   | { type: 'period'; body: z.infer<typeof PeriodBodySchema> }
@@ -173,6 +199,9 @@ export interface GameChangeRow {
   seq: number | string | bigint;
   changeType: string;
   providerEventId: string | null;
+  /** game_changes.provider_sequence / provider_number (0013); absent or null when not stored. */
+  providerSequence?: number | string | bigint | null;
+  providerNumber?: number | null;
   body: unknown;
   createdAt: Date | string;
 }
@@ -190,6 +219,15 @@ export function gameChangeFromRow(row: GameChangeRow): GameChange {
     ts,
     type: row.changeType,
     ...(row.providerEventId ? { providerEventId: row.providerEventId } : {}),
+    ...(row.changeType === 'event_insert' || row.changeType === 'event_update'
+      ? {
+          providerSequence:
+            row.providerSequence === null || row.providerSequence === undefined
+              ? null
+              : Number(row.providerSequence),
+          providerNumber: row.providerNumber ?? null,
+        }
+      : {}),
     body: row.body,
   });
 }

@@ -90,7 +90,12 @@ class FakeServer implements ChangesApi {
       periods: s.periods,
       teamStats: [],
       playerStats: [],
-      events: [...s.events.entries()].map(([providerEventId, body]) => ({ providerEventId, body })),
+      events: [...s.events.entries()].map(([providerEventId, body]) => ({
+        providerEventId,
+        providerSequence: null,
+        providerNumber: null,
+        body,
+      })),
       seq: this.stream.length,
       retainedFrom: this.retainedFrom,
       coverage: 'full',
