@@ -29,6 +29,7 @@
     "release:tag": "tsx src/bin/release-tag.ts",
     "supabase": "supabase",
     "dump-game": "tsx src/bin/dump-game.ts",
+    "gen:swift": "tsx src/bin/gen-swift.ts",
     "outbox": "tsx src/bin/outbox.ts",
     "retention": "tsx src/bin/retention.ts",
     "health": "tsx src/bin/health.ts"

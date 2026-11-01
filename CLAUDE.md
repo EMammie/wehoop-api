@@ -37,6 +37,7 @@ pnpm subscribe --league wnba  # receive league:wnba:scores scoreboard deltas
 pnpm outbox status | requeue --channel game:<uuid> | --all | lag [--since 24h]   # dead-letter recovery, outbox lag p50/p95
 pnpm retention run --closed-before <ISO|30d> [--dry-run] [--game <uuid>]   # the only code that deletes game_changes (moves retained_from_seq)
 pnpm health check [--url http://127.0.0.1:3000]   # external monitor probe of /health: exit 0 healthy, 1 degraded/down
+pnpm gen:swift [--out <dir>] [--check]   # emit the iOS Contracts module from the Zod schemas (src/contracts/registry.ts) into generated/swift (committed); --check exits 1 on drift (CI)
 ```
 
 `tsx` loads no `.env`: the plain `pnpm trial` / `dev:worker` / `dev:api` / `sim` / `invariants` / `outbox` / `retention` scripts read only exported shell variables (`pnpm health` reads only `API_BASE_URL`/`PORT`). The `*:live` / `*:rehearsal` scripts are `node --env-file=.env --env-file=.env.<name> --import tsx src/bin/<x>.ts`.
@@ -76,6 +77,8 @@ src/leagues    LeagueAdapter interface + wnba / ncaawb / unrivaled adapters
 src/ingest     freshness, apply-changes, scheduler, trial-mode, game-watcher, push-ingest, backfill, retention, identity
 src/live       LiveTransport interface, Supabase Broadcast transport, outbox publisher + admin, pulse, scoreboard
 src/api        Hono routes: snapshot, changes, players, health (alerts)
+src/contracts  the client contract: registry of the Zod schemas the app decodes + the Swift emitter (`pnpm gen:swift`)
+generated/     Swift output of gen:swift, committed; synced into the Wehoop repo (WehoopKit/Sources/Contracts/Generated)
 src/bin        worker, api, sim, subscribe, trial, outbox, retention, health CLIs
 supabase/      config + SQL migrations (the only schema source of truth)
 fixtures/      recorded provider payloads, committed
