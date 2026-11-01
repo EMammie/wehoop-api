@@ -30,6 +30,7 @@
     "supabase": "supabase",
     "dump-game": "tsx src/bin/dump-game.ts",
     "gen:swift": "tsx src/bin/gen-swift.ts",
+    "seed:dev": "tsx src/bin/seed-dev.ts",
     "outbox": "tsx src/bin/outbox.ts",
     "retention": "tsx src/bin/retention.ts",
     "health": "tsx src/bin/health.ts"

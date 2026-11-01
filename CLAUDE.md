@@ -38,6 +38,7 @@ pnpm outbox status | requeue --channel game:<uuid> | --all | lag [--since 24h]  
 pnpm retention run --closed-before <ISO|30d> [--dry-run] [--game <uuid>]   # the only code that deletes game_changes (moves retained_from_seq)
 pnpm health check [--url http://127.0.0.1:3000]   # external monitor probe of /health: exit 0 healthy, 1 degraded/down
 pnpm gen:swift [--out <dir>] [--check]   # emit the iOS Contracts module from the Zod schemas (src/contracts/registry.ts) into generated/swift (committed); --check exits 1 on drift (CI)
+pnpm seed:dev [--league <code>]... [--force] [--dry-run]   # load every committed fixture of the three leagues into the DEV stack through the normal ingest paths (M5 B2; src/ingest/seed-manifest.ts); a reseed changes nothing; refuses any other database
 ```
 
 `tsx` loads no `.env`: the plain `pnpm trial` / `dev:worker` / `dev:api` / `sim` / `invariants` / `outbox` / `retention` scripts read only exported shell variables (`pnpm health` reads only `API_BASE_URL`/`PORT`). The `*:live` / `*:rehearsal` scripts are `node --env-file=.env --env-file=.env.<name> --import tsx src/bin/<x>.ts`.
@@ -46,7 +47,7 @@ pnpm gen:swift [--out <dir>] [--check]   # emit the iOS Contracts module from th
 
 | File | Contents | Database | Loaded by |
 |---|---|---|---|
-| `.env` | `MODE=sim`, no Sportradar key, dev stack URLs | dev/integration stack (`pnpm supabase start`, db 54322; `db reset` and `pnpm test:int` destroy it) | every script, first |
+| `.env` | `MODE=sim`, no Sportradar key, dev stack URLs | dev/integration stack (`pnpm supabase start`, db 54322; `db reset` and `pnpm test:int` destroy it; `pnpm seed:dev` refills it from the fixtures) | every script, first |
 | `.env.trial` (git-ignored, chmod 600) | real trial keys, `MODE=trial`, `SPORTRADAR_BASE_URL` unset, `QUOTA_*` blank | **persistent trial stack** (`pnpm trial:db start`, db 55322, API 55321; its `ingest` schema is the quota ledger) | only `pnpm trial:live`, `worker:live`, `api:live`, `preflight:live`, second |
 | `.env.rehearsal` (git-ignored; copy `.env.rehearsal.example`) | fake keys, `MODE=trial`, `SPORTRADAR_BASE_URL=http://127.0.0.1:8787` (`pnpm sim serve`) | dev stack (from `.env`) | only the `*:rehearsal` scripts, second |
 
@@ -74,7 +75,7 @@ Rules: the later file overrides the earlier; **exported shell variables override
 src/model      LiveEvent union, GameChange schema, game-state reducer, content hash
 src/providers  Sportradar HTTP, URL resolvers (prod | simulation), Zod schemas, push client (push-client.ts), fake provider + push mock
 src/leagues    LeagueAdapter interface + wnba / ncaawb / unrivaled adapters
-src/ingest     freshness, apply-changes, scheduler, trial-mode, game-watcher, push-ingest, backfill, retention, identity
+src/ingest     freshness, apply-changes, scheduler, trial-mode, game-watcher, push-ingest, backfill, retention, identity, reference, seed-manifest
 src/live       LiveTransport interface, Supabase Broadcast transport, outbox publisher + admin, pulse, scoreboard
 src/api        Hono routes: snapshot, changes, players, health (alerts)
 src/contracts  the client contract: registry of the Zod schemas the app decodes + the Swift emitter (`pnpm gen:swift`)

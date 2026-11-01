@@ -3,9 +3,11 @@ import { LeagueCodeSchema } from '../leagues/codes.js';
 import { GameStatusSchema, PeriodTypeSchema } from './live-event.js';
 
 /**
- * Rows of the four PostgREST views (plan §5): what a client receives from
- * `v_schedule`, `v_boxscore`, `v_standings` and `v_player_seasons`. Keys are the
- * SQL column names (snake_case) because PostgREST returns them as such.
+ * Rows of the PostgREST views (plan §5): what a client receives from
+ * `v_schedule`, `v_boxscore`, `v_standings`, `v_player_seasons` and `v_leaders`,
+ * plus the one table the app reads directly, `leagues` (M5 B2: the app's `League`
+ * value is this row). Keys are the SQL column names (snake_case) because
+ * PostgREST returns them as such.
  *
  * These schemas are the Zod side of two drift checks:
  * - `test/integration/views-contract.test.ts` asserts each schema's keys and base
@@ -180,9 +182,61 @@ export const PlayerSeasonRowSchema = z.object({
 export type PlayerSeasonRow = z.infer<typeof PlayerSeasonRowSchema>;
 
 /** View name → row schema, in the order the views were created. */
+/** v_leaders (0012, M5 B2): one row per season line and category; `value` from the typed totals. */
+export const LeaderCategorySchema = z.enum([
+  'points',
+  'rebounds',
+  'assists',
+  'steals',
+  'blocks',
+  'minutes',
+  'turnovers',
+  'fg_pct',
+  'three_pct',
+  'ft_pct',
+]);
+export type LeaderCategory = z.infer<typeof LeaderCategorySchema>;
+
+export const LeadersRowSchema = z.object({
+  league: LeagueCodeSchema,
+  season_id: uuid,
+  season_year: z.int(),
+  season_type: SeasonTypeSchema,
+  category: LeaderCategorySchema,
+  value: z.number(),
+  rank: z.int(),
+  player_id: uuid,
+  full_name: z.string(),
+  team_id: uuid,
+  provider_team_id: z.string(),
+  team_name: z.string(),
+  team_market: z.string().nullable(),
+  team_alias: z.string().nullable(),
+  games_played: z.int(),
+});
+export type LeadersRow = z.infer<typeof LeadersRowSchema>;
+
+/** public.leagues (0001 + 0012): the app lists leagues from these rows and never names one. */
+export const LeagueRowSchema = z.object({
+  code: LeagueCodeSchema,
+  name: z.string(),
+  provider_alias: z.string(),
+  created_at: ts,
+  updated_at: ts,
+  short_name: z.string(),
+  colors: json.nullable(),
+});
+export type LeagueRow = z.infer<typeof LeagueRowSchema>;
+
 export const VIEW_ROW_SCHEMAS = {
   v_schedule: ScheduleRowSchema,
   v_boxscore: BoxscoreRowSchema,
   v_standings: StandingsRowSchema,
   v_player_seasons: PlayerSeasonRowSchema,
+  v_leaders: LeadersRowSchema,
+} as const;
+
+/** Tables the client reads directly (same drift checks as the views). */
+export const TABLE_ROW_SCHEMAS = {
+  leagues: LeagueRowSchema,
 } as const;

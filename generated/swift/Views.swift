@@ -581,3 +581,184 @@ public struct PlayerSeasonRow: Codable, Hashable, Sendable {
         case updatedAt = "updated_at"
     }
 }
+
+/// A category of v_leaders (per-game counting stats, made/attempted percentages).
+public enum LeaderCategory: Codable, Hashable, Sendable {
+    case points
+    case rebounds
+    case assists
+    case steals
+    case blocks
+    case minutes
+    case turnovers
+    case fgPct
+    case threePct
+    case ftPct
+    /// A value this build does not know (plan rev 4.11 (5)): kept and shown as such, never dropped.
+    case unknown(String)
+
+    /// Every value this build knows, in backend order.
+    public static let known: [LeaderCategory] = [
+        .points,
+        .rebounds,
+        .assists,
+        .steals,
+        .blocks,
+        .minutes,
+        .turnovers,
+        .fgPct,
+        .threePct,
+        .ftPct,
+    ]
+
+    public init(rawValue: String) {
+        switch rawValue {
+        case "points": self = .points
+        case "rebounds": self = .rebounds
+        case "assists": self = .assists
+        case "steals": self = .steals
+        case "blocks": self = .blocks
+        case "minutes": self = .minutes
+        case "turnovers": self = .turnovers
+        case "fg_pct": self = .fgPct
+        case "three_pct": self = .threePct
+        case "ft_pct": self = .ftPct
+        default: self = .unknown(rawValue)
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .points: "points"
+        case .rebounds: "rebounds"
+        case .assists: "assists"
+        case .steals: "steals"
+        case .blocks: "blocks"
+        case .minutes: "minutes"
+        case .turnovers: "turnovers"
+        case .fgPct: "fg_pct"
+        case .threePct: "three_pct"
+        case .ftPct: "ft_pct"
+        case .unknown(let raw): raw
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        self.init(rawValue: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+/// A row of v_leaders (one per season line and category, ranked per season and category).
+public struct LeadersRow: Codable, Hashable, Sendable {
+    public let league: LeagueCode
+    public let seasonId: String
+    public let seasonYear: Int
+    public let seasonType: SeasonType
+    public let category: LeaderCategory
+    public let value: Double
+    public let rank: Int
+    public let playerId: String
+    public let fullName: String
+    public let teamId: String
+    public let providerTeamId: String
+    public let teamName: String
+    public let teamMarket: String?
+    public let teamAlias: String?
+    public let gamesPlayed: Int
+
+    public init(
+        league: LeagueCode,
+        seasonId: String,
+        seasonYear: Int,
+        seasonType: SeasonType,
+        category: LeaderCategory,
+        value: Double,
+        rank: Int,
+        playerId: String,
+        fullName: String,
+        teamId: String,
+        providerTeamId: String,
+        teamName: String,
+        teamMarket: String?,
+        teamAlias: String?,
+        gamesPlayed: Int
+    ) {
+        self.league = league
+        self.seasonId = seasonId
+        self.seasonYear = seasonYear
+        self.seasonType = seasonType
+        self.category = category
+        self.value = value
+        self.rank = rank
+        self.playerId = playerId
+        self.fullName = fullName
+        self.teamId = teamId
+        self.providerTeamId = providerTeamId
+        self.teamName = teamName
+        self.teamMarket = teamMarket
+        self.teamAlias = teamAlias
+        self.gamesPlayed = gamesPlayed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case league
+        case seasonId = "season_id"
+        case seasonYear = "season_year"
+        case seasonType = "season_type"
+        case category
+        case value
+        case rank
+        case playerId = "player_id"
+        case fullName = "full_name"
+        case teamId = "team_id"
+        case providerTeamId = "provider_team_id"
+        case teamName = "team_name"
+        case teamMarket = "team_market"
+        case teamAlias = "team_alias"
+        case gamesPlayed = "games_played"
+    }
+}
+
+/// A row of the leagues table: the League value the app lists (M5 B2).
+public struct LeagueRow: Codable, Hashable, Sendable {
+    public let code: LeagueCode
+    public let name: String
+    public let providerAlias: String
+    public let createdAt: String
+    public let updatedAt: String
+    public let shortName: String
+    public let colors: [String: JSONValue]?
+
+    public init(
+        code: LeagueCode,
+        name: String,
+        providerAlias: String,
+        createdAt: String,
+        updatedAt: String,
+        shortName: String,
+        colors: [String: JSONValue]?
+    ) {
+        self.code = code
+        self.name = name
+        self.providerAlias = providerAlias
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.shortName = shortName
+        self.colors = colors
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case code
+        case name
+        case providerAlias = "provider_alias"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case shortName = "short_name"
+        case colors
+    }
+}

@@ -1,11 +1,12 @@
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { z } from 'zod';
-import { VIEW_ROW_SCHEMAS } from '../../src/model/views.js';
+import { TABLE_ROW_SCHEMAS, VIEW_ROW_SCHEMAS } from '../../src/model/views.js';
 
 /**
  * The Zod row schemas in src/model/views.ts (the source of the generated Swift
- * view rows, M5 B1) must match the views in the database: same columns, same
+ * view rows, M5 B1; the leagues table and v_leaders since B2) must match the
+ * views and tables in the database: same columns, same
  * order, and a base type compatible with the column's Postgres type. The SQL
  * is the source of truth; a migration that adds, drops or retypes a view
  * column fails here until the Zod schema follows (and then `pnpm gen:swift`).
@@ -58,7 +59,7 @@ const UDT_KIND: Record<string, Kind> = {
 };
 
 describe('view rows match the Zod contract', () => {
-  for (const [view, schema] of Object.entries(VIEW_ROW_SCHEMAS)) {
+  for (const [view, schema] of Object.entries({ ...VIEW_ROW_SCHEMAS, ...TABLE_ROW_SCHEMAS })) {
     it(`${view}: same columns in the same order, compatible types`, async () => {
       const cols = await sql<{ column_name: string; udt_name: string; data_type: string }[]>`
         select column_name, udt_name, data_type from information_schema.columns
@@ -77,6 +78,17 @@ describe('view rows match the Zod contract', () => {
             where t.typname = ${c.udt_name} order by e.enumsortorder`;
           expect(z.entries, `${view}.${c.column_name} (${c.udt_name})`).toEqual(
             labels.map((r) => r.l),
+          );
+        } else if (z.kind === 'enum' && c.udt_name === 'text') {
+          // A closed set over a text column (v_leaders.category): the labels the view's
+          // definition enumerates and the Zod entries must be the same set.
+          const [def] = await sql<{ d: string }[]>`
+            select pg_get_viewdef(${`public.${view}`}::regclass) as d`;
+          const literals = new Set(
+            [...(def?.d ?? '').matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1] as string),
+          );
+          expect([...literals].sort(), `${view}.${c.column_name} labels`).toEqual(
+            [...(z.entries ?? [])].sort(),
           );
         } else {
           expect(z.kind, `${view}.${c.column_name} (${c.udt_name})`).toBe(UDT_KIND[c.udt_name]);

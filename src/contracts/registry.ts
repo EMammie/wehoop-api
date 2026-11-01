@@ -26,6 +26,9 @@ import { ChangesPageSchema, SnapshotSchema } from '../model/snapshot.js';
 import {
   BoxscoreRowSchema,
   CoverageLevelSchema,
+  LeaderCategorySchema,
+  LeadersRowSchema,
+  LeagueRowSchema,
   PlayerSeasonRowSchema,
   ScheduleRowSchema,
   SeasonTypeSchema,
@@ -177,5 +180,23 @@ export const CONTRACTS: readonly ContractEntry[] = [
     schema: PlayerSeasonRowSchema,
     file: 'Views',
     doc: 'A row of v_player_seasons.',
+  },
+  {
+    name: 'LeaderCategory',
+    schema: LeaderCategorySchema,
+    file: 'Views',
+    doc: 'A category of v_leaders (per-game counting stats, made/attempted percentages).',
+  },
+  {
+    name: 'LeadersRow',
+    schema: LeadersRowSchema,
+    file: 'Views',
+    doc: 'A row of v_leaders (one per season line and category, ranked per season and category).',
+  },
+  {
+    name: 'LeagueRow',
+    schema: LeagueRowSchema,
+    file: 'Views',
+    doc: 'A row of the leagues table: the League value the app lists (M5 B2).',
   },
 ];
