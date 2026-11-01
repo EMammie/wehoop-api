@@ -38,6 +38,8 @@ function zodKind(schema: z.ZodType): { kind: Kind; entries?: string[] } {
     case 'boolean':
       return { kind: 'boolean' };
     case 'record':
+    case 'array':
+    case 'unknown':
       return { kind: 'json' };
     case 'enum':
       return { kind: 'enum', entries: Object.values(d.entries) as string[] };

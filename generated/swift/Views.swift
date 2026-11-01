@@ -36,7 +36,7 @@ public struct ScheduleRow: Codable, Hashable, Sendable {
     public let clockRunning: Bool?
     public let clockAsOf: String?
     public let venue: [String: JSONValue]?
-    public let broadcasts: [String: JSONValue]?
+    public let broadcasts: [[String: JSONValue]]?
     public let lastSeq: Int
     public let retainedFromSeq: Int
     public let statsFinalAt: String?
@@ -76,7 +76,7 @@ public struct ScheduleRow: Codable, Hashable, Sendable {
         clockRunning: Bool?,
         clockAsOf: String?,
         venue: [String: JSONValue]?,
-        broadcasts: [String: JSONValue]?,
+        broadcasts: [[String: JSONValue]]?,
         lastSeq: Int,
         retainedFromSeq: Int,
         statsFinalAt: String?,
@@ -351,7 +351,7 @@ public struct StandingsRow: Codable, Hashable, Sendable {
     public let pointsAgainst: Double?
     public let streak: String?
     public let rank: Int?
-    public let records: [String: JSONValue]?
+    public let records: [[String: JSONValue]]?
     public let extra: [String: JSONValue]?
     public let asOf: String?
     public let updatedAt: String
@@ -378,7 +378,7 @@ public struct StandingsRow: Codable, Hashable, Sendable {
         pointsAgainst: Double?,
         streak: String?,
         rank: Int?,
-        records: [String: JSONValue]?,
+        records: [[String: JSONValue]]?,
         extra: [String: JSONValue]?,
         asOf: String?,
         updatedAt: String

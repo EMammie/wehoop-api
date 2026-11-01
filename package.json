@@ -31,6 +31,7 @@
     "dump-game": "tsx src/bin/dump-game.ts",
     "gen:swift": "tsx src/bin/gen-swift.ts",
     "seed:dev": "tsx src/bin/seed-dev.ts",
+    "golden": "tsx src/bin/golden.ts",
     "outbox": "tsx src/bin/outbox.ts",
     "retention": "tsx src/bin/retention.ts",
     "health": "tsx src/bin/health.ts"

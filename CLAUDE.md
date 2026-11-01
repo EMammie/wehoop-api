@@ -39,6 +39,7 @@ pnpm retention run --closed-before <ISO|30d> [--dry-run] [--game <uuid>]   # the
 pnpm health check [--url http://127.0.0.1:3000]   # external monitor probe of /health: exit 0 healthy, 1 degraded/down
 pnpm gen:swift [--out <dir>] [--check]   # emit the iOS Contracts module from the Zod schemas (src/contracts/registry.ts) into generated/swift (committed); --check exits 1 on drift (CI)
 pnpm seed:dev [--league <code>]... [--force] [--dry-run]   # load every committed fixture of the three leagues into the DEV stack through the normal ingest paths (M5 B2; src/ingest/seed-manifest.ts); a reseed changes nothing; refuses any other database
+pnpm golden --out <dir>      # capture the golden JSON the app's TestSupport decodes (snapshots, /changes pages, pulses, view rows, players) from the seeded DEV stack; every body is Zod-parsed first (M5 S1; the app runs it via scripts/sync-goldens.sh)
 ```
 
 `tsx` loads no `.env`: the plain `pnpm trial` / `dev:worker` / `dev:api` / `sim` / `invariants` / `outbox` / `retention` scripts read only exported shell variables (`pnpm health` reads only `API_BASE_URL`/`PORT`). The `*:live` / `*:rehearsal` scripts are `node --env-file=.env --env-file=.env.<name> --import tsx src/bin/<x>.ts`.
@@ -80,7 +81,7 @@ src/live       LiveTransport interface, Supabase Broadcast transport, outbox pub
 src/api        Hono routes: snapshot, changes, players, health (alerts)
 src/contracts  the client contract: registry of the Zod schemas the app decodes + the Swift emitter (`pnpm gen:swift`)
 generated/     Swift output of gen:swift, committed; synced into the Wehoop repo (WehoopKit/Sources/Contracts/Generated)
-src/bin        worker, api, sim, subscribe, trial, outbox, retention, health CLIs
+src/bin        worker, api, sim, subscribe, trial, outbox, retention, health, gen-swift, seed-dev, golden CLIs
 supabase/      config + SQL migrations (the only schema source of truth)
 fixtures/      recorded provider payloads, committed
 test/          unit (vitest) and integration (needs supabase start) + invariants.sql

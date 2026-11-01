@@ -26,6 +26,8 @@ export type CoverageLevel = z.infer<typeof CoverageLevelSchema>;
 const uuid = z.uuid();
 const ts = z.iso.datetime({ offset: true });
 const json = z.record(z.string(), z.unknown());
+/** A jsonb column that holds a provider array (`broadcasts[]`, standings `records[]`). */
+const jsonArray = z.array(json);
 
 export const ScheduleRowSchema = z.object({
   id: uuid,
@@ -61,7 +63,7 @@ export const ScheduleRowSchema = z.object({
   clock_running: z.boolean().nullable(),
   clock_as_of: ts.nullable(),
   venue: json.nullable(),
-  broadcasts: json.nullable(),
+  broadcasts: jsonArray.nullable(),
   last_seq: z.int(),
   retained_from_seq: z.int(),
   stats_final_at: ts.nullable(),
@@ -137,7 +139,7 @@ export const StandingsRowSchema = z.object({
   points_against: z.number().nullable(),
   streak: z.string().nullable(),
   rank: z.int().nullable(),
-  records: json.nullable(),
+  records: jsonArray.nullable(),
   extra: json.nullable(),
   as_of: ts.nullable(),
   updated_at: ts,
