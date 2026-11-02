@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ZodType } from 'zod';
-import { budgetFor } from '../../../src/ingest/cadence.js';
+import { budgetFor, PROFILE_CADENCE } from '../../../src/ingest/cadence.js';
 import {
   cadenceLoop,
   type DocumentSource,
@@ -106,7 +106,7 @@ describe('cadenceLoop and the quota guard', () => {
 
 describe('cadenceLoop pacing (rev 4.9)', () => {
   /** A fake clock: sleep advances it; the provider status follows the clock. */
-  function clocked(statusAt: (t: number) => string) {
+  function clocked(statusAt: (t: number, feed: string) => string) {
     let t = 0;
     const calls: Array<{ feed: string; at: number }> = [];
     const src: DocumentSource = {
@@ -118,7 +118,11 @@ describe('cadenceLoop pacing (rev 4.9)', () => {
       },
     };
     const w = {
-      process: async () => ({ gameId: 'g', status: statusAt(t), result: { outcome: 'applied' } }),
+      process: async (feed: string) => ({
+        gameId: 'g',
+        status: statusAt(t, feed),
+        result: { outcome: 'applied' },
+      }),
     } as unknown as GameWatcher;
     const opts = {
       untilClosed: true,
@@ -183,15 +187,16 @@ describe('cadenceLoop pacing (rev 4.9)', () => {
     expect(pbpAt.every((t) => t % 30_000 === 0)).toBe(true); // still on the pbp grid
   });
 
-  it('a 150-min game with a 30-min complete -> closed wait makes exactly the budgeted calls', async () => {
+  it('a 150-min game with a 30-min complete -> closed wait stays inside the budget', async () => {
     const budgeted = { ...paced, closeWaitMs: 30 * MIN };
     const { src, w, opts, calls } = clocked((t) =>
       t >= 180 * MIN ? 'closed' : t >= 150 * MIN ? 'complete' : 'inprogress',
     );
     await cadenceLoop(w, src, silent, budgeted, opts);
     const b = budgetFor(budgeted);
-    expect(b).toMatchObject({ pbp: 301, summary: 30, afterComplete: 12, closing: 0, retries: 0 });
-    expect(calls.length).toBe(b.total);
+    expect(b).toMatchObject({ pbp: 301, summary: 30, afterComplete: 14, closing: 0, retries: 0 });
+    expect(calls.length).toBeLessThanOrEqual(b.total);
+    expect(calls.length).toBe(b.total - 2); // each feed's inclusive last wait slot falls after closed
   });
 
   it('the closing pair waits the summary offset after the pbp that reported closed', async () => {
@@ -201,5 +206,103 @@ describe('cadenceLoop pacing (rev 4.9)', () => {
     const lastPbp = calls.filter((c) => c.feed === 'pbp').at(-1)?.at ?? 0;
     expect(closing.map((c) => c.feed)).toEqual(['summary', 'boxscore']);
     expect((closing[0]?.at ?? 0) - lastPbp).toBeGreaterThanOrEqual(15_000);
+  });
+});
+
+describe('cadenceLoop slow phases (rev 4.12)', () => {
+  const MIN = 60_000;
+  function clocked(statusAt: (t: number, feed: string) => string) {
+    let t = 0;
+    const calls: Array<{ feed: string; at: number }> = [];
+    const src: DocumentSource = {
+      observationSource: 'rest',
+      async fetch<T>(feed: string, _schema: ZodType<T>): Promise<FetchedDocument<T>> {
+        calls.push({ feed, at: t });
+        const d = new Date(t);
+        return { data: {} as T, requestedAt: d, receivedAt: d, bytes: 2, rawText: '{}' };
+      },
+    };
+    const w = {
+      process: async (feed: string) => ({
+        gameId: 'g',
+        status: statusAt(t, feed),
+        result: { outcome: 'applied' },
+      }),
+    } as unknown as GameWatcher;
+    const opts = {
+      untilClosed: true,
+      isStopped: () => false,
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += Math.max(ms, 1);
+      },
+    };
+    return { src, w, opts, calls };
+  }
+  const at = (calls: Array<{ feed: string; at: number }>, feed: string) =>
+    calls.filter((c) => c.feed === feed).map((c) => c.at);
+  const minGap = (a: number[], b: number[]) =>
+    Math.min(...a.flatMap((x) => b.map((y) => Math.abs(x - y))));
+
+  it('before play only the pbp polls, every 5 min; the first inprogress restores both live grids', async () => {
+    // Tip 27 min late (NCAAWB 2026-11-01): created until 27:00, inprogress until 60 min, closed by the pbp.
+    const { src, w, opts, calls } = clocked((t) =>
+      t >= 60 * MIN ? 'closed' : t >= 27 * MIN ? 'inprogress' : 'created',
+    );
+    await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    const pbp = at(calls, 'pbp');
+    const summary = at(calls, 'summary');
+    // pbp at 0, 5, 10, 15, 20, 25, then 30:00 sees play (the 5-min slot after 25:00).
+    expect(pbp.filter((x) => x < 30 * MIN)).toEqual([0, 5, 10, 15, 20, 25].map((m) => m * MIN));
+    expect(summary.filter((x) => x <= 30 * MIN)).toEqual([]); // the summary sat out the pre-game
+    expect(pbp).toContain(30 * MIN + 30_000); // back on the 30 s grid
+    expect(summary[0]).toBe(30 * MIN + 15_000); // first summary slot of its own grid after play started
+    expect(minGap(pbp, summary)).toBeGreaterThanOrEqual(15_000);
+    expect(pbp.every((x) => x % 30_000 === 0)).toBe(true);
+    expect(calls.filter((c) => c.at < 30 * MIN).length).toBe(6); // the live cadence would make 60
+  });
+
+  it('after complete only the summary polls; when it reports closed the closing set is the pbp and the boxscore', async () => {
+    // inprogress until 20 min; complete; the summary says closed from 60 min, the pbp never does.
+    const { src, w, opts, calls } = clocked((t, feed) =>
+      t >= 20 * MIN ? (feed === 'summary' && t >= 60 * MIN ? 'closed' : 'complete') : 'inprogress',
+    );
+    await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    const pbp = at(calls, 'pbp');
+    const summary = at(calls, 'summary');
+    const closedAt = summary.find((x) => x >= 60 * MIN) ?? 0;
+    expect(closedAt).toBe(60 * MIN + 15_000);
+    // While complete: no pbp until the closing one; summaries 5 min apart.
+    expect(pbp.filter((x) => x > 20 * MIN && x <= closedAt)).toEqual([]);
+    const waiting = summary.filter((x) => x > 20 * MIN);
+    for (let i = 1; i < waiting.length; i++)
+      expect((waiting[i] ?? 0) - (waiting[i - 1] ?? 0)).toBe(5 * MIN);
+    // Closing: the pbp 15 s after the summary that said closed, then the boxscore; no second summary.
+    expect(calls.slice(-2)).toEqual([
+      { feed: 'pbp', at: closedAt + 15_000 },
+      { feed: 'boxscore', at: closedAt + 15_000 },
+    ]);
+    expect(summary.at(-1)).toBe(closedAt);
+  });
+
+  it('when the pbp reports closed the closing set is the summary and the boxscore, as before', async () => {
+    const { src, w, opts, calls } = clocked((t) => (t >= 10 * MIN ? 'closed' : 'inprogress'));
+    await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    expect(calls.slice(-2).map((c) => c.feed)).toEqual(['summary', 'boxscore']);
+    expect(at(calls, 'pbp').at(-1)).toBe(10 * MIN);
+  });
+
+  it('a 150-min game with a 120-min complete -> closed wait stays inside the full budget', async () => {
+    const { src, w, opts, calls } = clocked((t, feed) =>
+      t >= 150 * MIN
+        ? feed === 'summary' && t >= 270 * MIN
+          ? 'closed'
+          : 'complete'
+        : 'inprogress',
+    );
+    await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    const b = budgetFor(PROFILE_CADENCE.full);
+    expect(calls.length).toBeLessThanOrEqual(b.total - b.retries);
+    expect(calls.filter((c) => c.at > 150 * MIN && c.feed === 'pbp').length).toBe(1); // the closing pbp
   });
 });

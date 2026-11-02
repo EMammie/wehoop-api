@@ -3,6 +3,7 @@ import type { Db } from '../db/client.js';
 import type { LeagueAdapter, NormalizeContext } from '../leagues/adapter.js';
 import type { PulseSender } from '../live/pulse.js';
 import type { Logger } from '../logger.js';
+import { GameStatusSchema } from '../model/live-event.js';
 import {
   type FetchedDocument,
   ProviderHttpError,
@@ -14,6 +15,7 @@ import { SummaryDocumentSchema } from '../providers/sportradar/schemas/summary.j
 import { type Feed, type FeedParams, isGameFeed } from '../providers/sportradar/urls.js';
 import { type ApplyDeps, type ApplyResult, applyChanges, ensureGame } from './apply-changes.js';
 import type { Cadence } from './cadence.js';
+import { phaseOf } from './freshness.js';
 import { ensurePlayers, ensureSeason, ensureTeams } from './identity.js';
 import { QuotaRefusedError } from './quota-guard.js';
 import {
@@ -352,6 +354,8 @@ export async function cadenceLoop(
   let failed = 0;
   let retried429 = 0;
   let horizonWarned = false;
+  /** The feed whose document first reported `closed`; the closing set skips it (rev 4.12). */
+  let closedBy: GameFeedName | null = null;
   const fetchOne = async (feed: GameFeedName, retriesOn429 = 1): Promise<void> => {
     for (let attempt = 0; ; attempt++) {
       try {
@@ -364,6 +368,7 @@ export async function cadenceLoop(
           doc.requestedAt,
           source.observationSource,
         );
+        if (out?.status === 'closed' && status !== 'closed') closedBy = feed;
         status = out?.status ?? status;
         return;
       } catch (err) {
@@ -399,11 +404,21 @@ export async function cadenceLoop(
   addPeriodic('pbp', cadence.pbpMs);
   addPeriodic('summary', cadence.summaryMs, cadence.summaryOffsetMs ?? 0);
   addPeriodic('boxscore', cadence.boxscoreMs);
-  // While the game waits for `closed` after `complete` (or idles on `closed` without
-  // `--until closed`), poll at most every `afterCompleteMs` (rev 4.9).
-  const slowed = () =>
-    cadence.afterCompleteMs != null &&
-    (status === 'complete' || (status === 'closed' && !opts.untilClosed));
+  // Slow phases: while the game waits for `closed` after `complete` (or idles on `closed`
+  // without `--until closed`), poll at most every `afterCompleteMs` (rev 4.9); before play
+  // starts, at most every `preGameMs` (rev 4.12). A phase may poll only some feeds; the others
+  // stay on their own grids without fetching.
+  const slowPhase = (): { ms: number; feeds: readonly GameFeedName[] | undefined } | null => {
+    if (
+      cadence.afterCompleteMs != null &&
+      (status === 'complete' || (status === 'closed' && !opts.untilClosed))
+    )
+      return { ms: cadence.afterCompleteMs, feeds: cadence.afterCompleteFeeds };
+    if (cadence.preGameMs != null && status !== null && isPreGame(status))
+      return { ms: cadence.preGameMs, feeds: cadence.preGameFeeds };
+    return null;
+  };
+  const slowed = () => slowPhase() !== null;
   const oneOffs = [...cadence.boxscoreAtMs].sort((a, b) => a - b).map((ms) => startedAt + ms);
   while (!opts.isStopped()) {
     const t = now();
@@ -414,12 +429,16 @@ export async function cadenceLoop(
         p.nextAt = p.base + Math.ceil((t - p.base) / p.everyMs) * p.everyMs;
       }
       if (t >= p.nextAt) {
+        const phase = slowPhase();
+        if (phase?.feeds && !phase.feeds.includes(p.feed)) {
+          // Paused in this phase: stay on the feed's own grid without fetching.
+          while (p.nextAt <= t) p.nextAt += p.everyMs;
+          continue;
+        }
         await fetchOne(p.feed);
         // Keep the grid anchored to the start, skipping slots a slow fetch already passed.
-        const everyMs =
-          slowed() && cadence.afterCompleteMs != null
-            ? Math.max(p.everyMs, cadence.afterCompleteMs)
-            : p.everyMs;
+        const after = slowPhase();
+        const everyMs = after ? Math.max(p.everyMs, after.ms) : p.everyMs;
         while (p.nextAt <= now()) p.nextAt += everyMs;
       }
     }
@@ -428,11 +447,12 @@ export async function cadenceLoop(
       await fetchOne('boxscore');
     }
     if (status === 'closed' && opts.untilClosed) {
-      // The pbp usually reports `closed`: keep the summary's offset from it before the closing
-      // pair (rev 4.9 (2)), so no pbp -> summary pair leaves at the minimum spacing.
-      if (cadence.summaryOffsetMs && cadence.closing.length > 0)
-        await sleep(cadence.summaryOffsetMs);
-      for (const feed of cadence.closing) await fetchOne(feed, 2);
+      // Keep the summary's offset from the document that reported `closed` before the closing
+      // set (rev 4.9 (2)), so no pbp <-> summary pair leaves at the minimum spacing; skip the
+      // feed that reported it, which was just fetched (rev 4.12 (2)).
+      const closing = cadence.closing.filter((feed) => feed !== closedBy);
+      if (cadence.summaryOffsetMs && closing.length > 0) await sleep(cadence.summaryOffsetMs);
+      for (const feed of closing) await fetchOne(feed, 2);
       log.info({ calls, failed, retried429, elapsedMs: now() - startedAt }, 'game closed');
       return { status, calls, failed, retried429, elapsedMs: now() - startedAt };
     }
@@ -458,6 +478,12 @@ export async function cadenceLoop(
 }
 
 type GameFeedName = 'pbp' | 'summary' | 'boxscore';
+
+/** True for a known pre-game status (`scheduled`, `created`, `time_tbd`, `if_necessary`). */
+function isPreGame(status: string): boolean {
+  const known = GameStatusSchema.safeParse(status);
+  return known.success && phaseOf(known.data) === 'pre';
+}
 
 export interface ReplayOutcome {
   status: string | null;

@@ -6,7 +6,7 @@ import type { RunSource } from './runs.js';
  * How often a watcher polls each game feed (plan §4 "Production/simulation
  * scheduler", "Trial mode"). A cadence is the unit the call budget is derived
  * from: `budgetFor` counts the calls a cadence makes over its horizon, so the
- * profile totals in the plan (347 / 162 / 179 since rev 4.9) are computed, never typed.
+ * profile totals in the plan (360 / 180 / 183 since rev 4.12) are computed, never typed.
  */
 export interface Cadence {
   /** Poll interval per feed; null = the feed is not polled. */
@@ -17,7 +17,11 @@ export interface Cadence {
   boxscoreAtMs: number[];
   /** Planning horizon (the ≈2.5 h a game takes); the loop itself stops on `closed`. */
   horizonMs: number;
-  /** Fetched once the game closes: one summary and one boxscore. */
+  /**
+   * Fetched once the game closes, except the feed whose document reported `closed`
+   * (rev 4.12 (2): it was just fetched). A profile lists every feed it polls here, so the
+   * closing set is the other feeds plus the boxscore.
+   */
   closing: GameFeed[];
   /**
    * First summary poll at this offset from the watch start (rev 4.9 (2)): half the pbp
@@ -32,6 +36,20 @@ export interface Cadence {
    * Null = no change.
    */
   afterCompleteMs?: number | null;
+  /**
+   * The feeds polled while waiting for `closed`; the others pause on their grids (rev 4.12 (2):
+   * on NCAAWB the summary reported `closed` 75 s before the pbp; the pbp's corrections land
+   * with the closing pbp). Default: every periodic feed.
+   */
+  afterCompleteFeeds?: GameFeed[];
+  /**
+   * While the stored status is pre-game (`scheduled`, `created`, `time_tbd`, `if_necessary`),
+   * only `preGameFeeds` poll, at most this often, until a document reports play (rev 4.12 (1):
+   * an NCAAWB tip 27 min late cost 59 calls at the live cadence). Null = no change.
+   */
+  preGameMs?: number | null;
+  /** The feeds polled before play starts (default: every periodic feed). */
+  preGameFeeds?: GameFeed[];
   /** Budgeted complete -> closed wait, polled at the `afterCompleteMs` cadence. Default 0. */
   closeWaitMs?: number;
   /** Budgeted HTTP 429 retries (each is a counted call). Default 0. */
@@ -44,8 +62,21 @@ export type TrialProfile = (typeof TRIAL_PROFILES)[number];
 const MIN = 60_000;
 const GAME_HORIZON_MS = 150 * MIN;
 const CLOSING: GameFeed[] = ['summary', 'boxscore'];
-/** Trial/production pacing after `complete`, the budgeted wait for `closed`, and 429 retries (rev 4.9). */
-const AFTER_COMPLETE = { afterCompleteMs: 5 * MIN, closeWaitMs: 30 * MIN, retryAllowance: 2 };
+/** Closing set of a pbp profile: the feed that did not report `closed`, then the boxscore (rev 4.12). */
+const PBP_CLOSING: GameFeed[] = ['pbp', 'summary', 'boxscore'];
+/**
+ * Trial/production pacing after `complete`: the summary alone every 5 min, the budgeted wait for
+ * `closed` (rev 4.12: 120 min, Sportradar's NCAAWB figure; the first NCAAWB game waited 71 min,
+ * the 30 min of rev 4.9 covered the WNBA's 13 and 25), and 429 retries (rev 4.9).
+ */
+const AFTER_COMPLETE = {
+  afterCompleteMs: 5 * MIN,
+  afterCompleteFeeds: ['summary'] as GameFeed[],
+  closeWaitMs: 120 * MIN,
+  retryAllowance: 2,
+};
+/** Before play starts, one feed every 5 min (rev 4.12 (1)). */
+const PRE_GAME_MS = 5 * MIN;
 
 /**
  * Plan §4: full = pbp/30 s + box-score statistics/5 min; extended = summary/60 s
@@ -62,8 +93,10 @@ export const PROFILE_CADENCE: Record<TrialProfile, Cadence> = {
     boxscoreMs: null,
     boxscoreAtMs: [],
     horizonMs: GAME_HORIZON_MS,
-    closing: CLOSING,
+    closing: PBP_CLOSING,
     summaryOffsetMs: 15_000,
+    preGameMs: PRE_GAME_MS,
+    preGameFeeds: ['pbp'],
     ...AFTER_COMPLETE,
   },
   extended: {
@@ -73,6 +106,8 @@ export const PROFILE_CADENCE: Record<TrialProfile, Cadence> = {
     boxscoreAtMs: [120 * MIN],
     horizonMs: GAME_HORIZON_MS,
     closing: CLOSING,
+    preGameMs: PRE_GAME_MS,
+    preGameFeeds: ['summary'],
     ...AFTER_COMPLETE,
   },
   'lean-full': {
@@ -81,8 +116,10 @@ export const PROFILE_CADENCE: Record<TrialProfile, Cadence> = {
     boxscoreMs: null,
     boxscoreAtMs: [],
     horizonMs: GAME_HORIZON_MS,
-    closing: CLOSING,
+    closing: PBP_CLOSING,
     summaryOffsetMs: 30_000,
+    preGameMs: PRE_GAME_MS,
+    preGameFeeds: ['pbp'],
     ...AFTER_COMPLETE,
   },
 };
@@ -122,8 +159,12 @@ export interface Budget {
 /**
  * Calls a cadence makes: every periodic feed from its first poll (t=0, the summary at its
  * offset) through the horizon inclusive, one-offs, the complete -> closed wait at the slower
- * cadence, the closing pair and the 429 allowance. Rev 4.9: the horizon end is inclusive (the
- * G3 run made 301 pbp calls in 2.5 h at 30 s, the old formula counted 300).
+ * cadence (only the `afterCompleteFeeds`), the closing set and the 429 allowance. Rev 4.9: the
+ * horizon end is inclusive (the G3 run made 301 pbp calls in 2.5 h at 30 s, the old formula
+ * counted 300); rev 4.12 counts the wait's end the same way (a summary polled at the horizon's
+ * end and 120 min later is 25 polls). The horizon is counted at the live cadence, so the slower pre-game polling of
+ * rev 4.12 (1) only spends less. The closing set loses the feed that reported `closed` when
+ * every polled feed is in it (rev 4.12 (2)).
  */
 export function budgetFor(c: Cadence): Budget {
   const periodic = (ms: number | null, offsetMs = 0) =>
@@ -132,12 +173,22 @@ export function budgetFor(c: Cadence): Budget {
   const summary = periodic(c.summaryMs, c.summaryOffsetMs ?? 0);
   const boxscore = periodic(c.boxscoreMs) + c.boxscoreAtMs.length;
   const wait = c.closeWaitMs ?? 0;
-  const slow = (ms: number | null) =>
-    ms === null || c.afterCompleteMs == null || wait === 0
+  const slow = (feed: GameFeed, ms: number | null) =>
+    ms === null ||
+    c.afterCompleteMs == null ||
+    wait === 0 ||
+    (c.afterCompleteFeeds !== undefined && !c.afterCompleteFeeds.includes(feed))
       ? 0
-      : Math.floor(wait / Math.max(ms, c.afterCompleteMs));
-  const afterComplete = slow(c.pbpMs) + slow(c.summaryMs) + slow(c.boxscoreMs);
-  const closing = c.closing.length;
+      : Math.floor(wait / Math.max(ms, c.afterCompleteMs)) + 1;
+  const afterComplete =
+    slow('pbp', c.pbpMs) + slow('summary', c.summaryMs) + slow('boxscore', c.boxscoreMs);
+  const polled: GameFeed[] = [
+    ...(c.pbpMs !== null ? (['pbp'] as const) : []),
+    ...(c.summaryMs !== null ? (['summary'] as const) : []),
+    ...(c.boxscoreMs !== null || c.boxscoreAtMs.length > 0 ? (['boxscore'] as const) : []),
+  ];
+  const reporterSkipped = polled.length > 0 && polled.every((f) => c.closing.includes(f));
+  const closing = c.closing.length - (reporterSkipped ? 1 : 0);
   const retries = c.retryAllowance ?? 0;
   return {
     pbp,
@@ -208,6 +259,9 @@ export function scaleCadence(c: Cadence, speed: number): Cadence {
   if (c.summaryOffsetMs !== undefined)
     scaled.summaryOffsetMs = Math.round(c.summaryOffsetMs / speed);
   if (c.afterCompleteMs !== undefined) scaled.afterCompleteMs = s(c.afterCompleteMs);
+  if (c.afterCompleteFeeds !== undefined) scaled.afterCompleteFeeds = c.afterCompleteFeeds;
+  if (c.preGameMs !== undefined) scaled.preGameMs = s(c.preGameMs);
+  if (c.preGameFeeds !== undefined) scaled.preGameFeeds = c.preGameFeeds;
   if (c.closeWaitMs !== undefined) scaled.closeWaitMs = Math.round(c.closeWaitMs / speed);
   if (c.retryAllowance !== undefined) scaled.retryAllowance = c.retryAllowance;
   return scaled;
