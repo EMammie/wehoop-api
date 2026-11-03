@@ -355,10 +355,10 @@ export async function runTrialWatch(
   }
   if (NOT_PLAYED.has(opts.game.status)) {
     throw new Error(
-      `game ${opts.game.id} is ${opts.game.status}; nothing to watch. A made-up game is usually ` +
-        'listed under a new id (run `pnpm trial plan --date <makeup date>` and watch that one); ' +
-        'if the provider reuses this id, the same plan command refreshes it back to `scheduled` ' +
-        '(freshness allows post -> pre while last_seq = 0)',
+      `game ${opts.game.id} is ${opts.game.status}; nothing to watch. Sportradar lists a made-up ` +
+        'game under a new id, which is planned and watched as a new game. A game resumed under ' +
+        'this same id cannot be followed automatically; recovering it is an operator step ' +
+        '(`pnpm game rebuild`, planned, not built yet)',
     );
   }
   const plan = planWatch(adapter, source, opts.game.coverage, opts.profile);

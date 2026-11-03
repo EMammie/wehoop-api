@@ -375,7 +375,7 @@ describe('cadenceLoop slow phases (rev 4.12)', () => {
   });
 });
 
-describe('cadenceLoop non-played statuses (postponed, cancelled, unnecessary)', () => {
+describe('cadenceLoop terminal non-played statuses (postponed, cancelled, unnecessary)', () => {
   const MIN = 60_000;
   function clocked(statusAt: (t: number, feed: string) => string, untilClosed = true) {
     let t = 0;
@@ -408,51 +408,34 @@ describe('cadenceLoop non-played statuses (postponed, cancelled, unnecessary)', 
   const at = (calls: Array<{ feed: string; at: number }>, feed: string) =>
     calls.filter((c) => c.feed === feed).map((c) => c.at);
 
-  it('postponed: only the summary polls, every 5 min, and the watch stops at the horizon', async () => {
-    // Live until 10 min; the pbp at 10:00 reports postponed and nothing changes after.
-    const { src, w, opts, calls } = clocked((t) => (t >= 10 * MIN ? 'postponed' : 'inprogress'));
-    const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
-    expect(out.status).toBe('postponed');
-    expect(out.elapsedMs).toBeGreaterThanOrEqual(150 * MIN);
-    expect(out.elapsedMs).toBeLessThan(150 * MIN + 15_000); // stopped at the horizon, no extra slot
-    expect(at(calls, 'pbp').at(-1)).toBe(10 * MIN); // the pbp that reported it was the last one
-    const waiting = at(calls, 'summary').filter((x) => x > 10 * MIN);
-    expect(waiting[0]).toBe(10 * MIN + 15_000);
-    for (let i = 1; i < waiting.length; i++)
-      expect((waiting[i] ?? 0) - (waiting[i - 1] ?? 0)).toBe(5 * MIN);
-    expect(waiting.at(-1)).toBe(145 * MIN + 15_000);
-    expect(calls.some((c) => c.feed === 'boxscore')).toBe(false); // no closing set
-  });
-
-  it("postponed stays inside every profile's reservation (postponed before play and mid-game)", async () => {
-    for (const profile of ['full', 'extended', 'lean-full'] as const) {
-      for (const from of [0, 60 * MIN]) {
-        const { src, w, opts, calls } = clocked((t) => (t >= from ? 'postponed' : 'inprogress'));
-        const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE[profile], opts);
-        expect(out.status).toBe('postponed');
-        const b = budgetFor(PROFILE_CADENCE[profile]);
-        expect(calls.length).toBeLessThanOrEqual(b.total - b.retries - b.closing - b.afterComplete);
-      }
-    }
-  });
-
-  it('postponed -> inprogress again restores the live cadence by the existing rules', async () => {
-    // Postponed (reported by the pbp at 10:00) until the summary at 40:15 sees play again;
-    // closed by the pbp at 60 min.
-    const { src, w, opts, calls } = clocked((t) =>
-      t >= 60 * MIN
-        ? 'closed'
-        : t >= 10 * MIN && t < 40 * MIN + 10_000
+  it('postponed is terminal: the closing set (minus the reporter) runs, then the watch returns', async () => {
+    // Live until 10 min; the summary at 10:15 reports postponed (the pbp before it did not).
+    const { src, w, opts, calls } = clocked((t, feed) =>
+      t >= 10 * MIN && feed === 'summary'
+        ? 'postponed'
+        : t > 10 * MIN + 15_000
           ? 'postponed'
           : 'inprogress',
     );
     const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
-    const pbp = at(calls, 'pbp');
-    expect(pbp.filter((x) => x > 10 * MIN && x <= 40 * MIN + 15_000)).toEqual([]);
-    expect(pbp).toContain(40 * MIN + 30_000); // back on the 30 s grid
-    expect(pbp.filter((x) => x > 40 * MIN && x <= 60 * MIN).length).toBe(40);
-    expect(out.status).toBe('closed');
-    expect(calls.slice(-2).map((c) => c.feed)).toEqual(['summary', 'boxscore']);
+    expect(out.status).toBe('postponed');
+    expect(at(calls, 'summary').at(-1)).toBe(10 * MIN + 15_000);
+    expect(calls.slice(-2)).toEqual([
+      { feed: 'pbp', at: 10 * MIN + 30_000 },
+      { feed: 'boxscore', at: 10 * MIN + 30_000 },
+    ]);
+    expect(calls.filter((c) => c.at > 10 * MIN + 30_000)).toEqual([]); // nothing polls after it
+  });
+
+  it('postponed before play ends the watch without --until closed, after the closing set', async () => {
+    const { src, w, opts, calls } = clocked(() => 'postponed', false);
+    const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    expect(out.status).toBe('postponed');
+    expect(calls).toEqual([
+      { feed: 'pbp', at: 0 },
+      { feed: 'summary', at: 15_000 },
+      { feed: 'boxscore', at: 15_000 },
+    ]);
   });
 
   it('cancelled: the closing set (minus the feed that reported it) runs, then the watch returns', async () => {

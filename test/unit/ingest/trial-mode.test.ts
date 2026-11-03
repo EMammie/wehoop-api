@@ -68,7 +68,7 @@ describe('runTrialWatch refuses games that will not be played under their id', (
       };
       await expect(runTrialWatch(deps, { game })).rejects.toThrow(
         new RegExp(
-          `is ${status}; nothing to watch.*new id.*pnpm trial plan --date <makeup date>.*scheduled.*last_seq = 0`,
+          `is ${status}; nothing to watch.*new id, which is planned and watched as a new game.*cannot be followed automatically.*pnpm game rebuild.*not built yet`,
         ),
       );
     }
