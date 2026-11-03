@@ -138,6 +138,58 @@ describe('cadenceLoop and the quota guard', () => {
     expect(src.feeds).toEqual(['pbp', 'pbp']); // the second pbp is the next due time, not a retry
   });
 
+  it('a retry the quota guard refuses was never sent: it is not reported as a retry', async () => {
+    const closed = {
+      process: async () => ({ gameId: 'g', status: 'closed', result: { outcome: 'applied' } }),
+    } as unknown as GameWatcher;
+    // pbp says closed | closing summary: 503, retry 503 (sent: reported), retry refused (not sent).
+    const src = source(['ok', 'transient', 'transient', 'refused']);
+    const retries: string[] = [];
+    await expect(
+      cadenceLoop(
+        closed,
+        src,
+        silent,
+        { ...cadence, closing: ['summary', 'boxscore'] },
+        {
+          untilClosed: true,
+          isStopped: () => false,
+          onRetry: (kind, feed) => retries.push(`${kind}:${feed}`),
+        },
+      ),
+    ).rejects.toBeInstanceOf(QuotaRefusedError);
+    expect(retries).toEqual(['closing:summary']);
+    // The same for a cadence 429 whose retry is refused.
+    const cadenceRetries: string[] = [];
+    await expect(
+      cadenceLoop(watcher, source(['429', 'refused']), silent, cadence, {
+        untilClosed: false,
+        isStopped: () => false,
+        onRetry: (kind) => cadenceRetries.push(kind),
+      }),
+    ).rejects.toBeInstanceOf(QuotaRefusedError);
+    expect(cadenceRetries).toEqual([]);
+  });
+
+  it('a closing document that fails to apply is not refetched (only the fetch is retried)', async () => {
+    const failingSummary = {
+      process: async (feed: string) => {
+        if (feed === 'summary') throw new Error('connection terminated while applying');
+        return { gameId: 'g', status: 'closed', result: { outcome: 'applied' } };
+      },
+    } as unknown as GameWatcher;
+    const src = source([]);
+    const out = await cadenceLoop(
+      failingSummary,
+      src,
+      silent,
+      { ...cadence, closing: ['summary', 'boxscore'] },
+      { untilClosed: true, isStopped: () => false },
+    );
+    expect(src.feeds).toEqual(['pbp', 'summary', 'boxscore']);
+    expect(out).toMatchObject({ okFetches: 3, failed: 1, retriedClosing: 0, retried429: 0 });
+  });
+
   it('a 429 while the watch is stopping is not retried', async () => {
     let stopped = false;
     const src = source(['429']);
@@ -463,5 +515,52 @@ describe('cadenceLoop terminal non-played statuses (postponed, cancelled, unnece
       { feed: 'summary', at: 0 },
       { feed: 'boxscore', at: 0 },
     ]);
+  });
+
+  it('closed without --until closed does not return: it idles at the slow pace until stopped', async () => {
+    const { src, w, opts, calls } = clocked(
+      (t) => (t >= 10 * MIN ? 'closed' : 'inprogress'),
+      false,
+    );
+    let t = 0;
+    const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, {
+      ...opts,
+      now: () => (t = opts.now()),
+      isStopped: () => t >= 60 * MIN, // the operator stops it after 50 min idling on closed
+    });
+    expect(out.status).toBe('closed');
+    expect(out.elapsedMs).toBeGreaterThanOrEqual(60 * MIN);
+    expect(calls.some((c) => c.feed === 'boxscore')).toBe(false); // no closing set
+    const after = calls.filter((c) => c.at > 10 * MIN);
+    expect(after.every((c) => c.feed === 'summary')).toBe(true);
+    expect(after.length).toBeGreaterThan(0);
+  });
+
+  it('a seeded postponed status with every fetch failing runs no closing set and does not return', async () => {
+    let t = 0;
+    const feeds: string[] = [];
+    const failing: DocumentSource = {
+      observationSource: 'rest',
+      async fetch<T>(feed: string, _schema: ZodType<T>): Promise<FetchedDocument<T>> {
+        feeds.push(feed);
+        throw new Error('HTTP 503');
+      },
+    };
+    const w = {
+      lastStatus: 'postponed',
+      process: async () => ({ gameId: 'g', status: 'postponed', result: { outcome: 'applied' } }),
+    } as unknown as GameWatcher;
+    const out = await cadenceLoop(w, failing, silent, PROFILE_CADENCE.full, {
+      untilClosed: true,
+      isStopped: () => t >= 10 * MIN,
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += Math.max(ms, 1);
+      },
+    });
+    expect(out).toMatchObject({ status: 'postponed', okFetches: 0, retriedClosing: 0 });
+    expect(out.elapsedMs).toBeGreaterThanOrEqual(10 * MIN); // ended by the stop, not by itself
+    expect(out.failed).toBe(feeds.length);
+    expect(feeds.includes('boxscore')).toBe(false);
   });
 });

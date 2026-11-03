@@ -310,9 +310,11 @@ export interface CadenceLoopOptions {
   /** Called after every fetch (budget accounting / evidence). */
   onCall?: (feed: Feed) => void;
   /**
-   * Called before every retry (a counted call against the reservation's retry allowance): a
-   * cadence HTTP 429, or any failure of a closing fetch. Lets a caller that loses the outcome
-   * (the loop throws on a quota refusal) still report the retries spent.
+   * Called for every retry that was sent (a counted call against the reservation's retry
+   * allowance): after a cadence HTTP 429, or after any fetch failure of a closing feed. A retry is
+   * reported once its request got past the quota guard, so a retry the guard refuses is neither
+   * sent, counted, nor reported. Lets a caller that loses the outcome (the loop throws on a quota
+   * refusal) still report the retries spent.
    */
   onRetry?: (kind: RetryKind, feed: Feed) => void;
   now?: () => number;
@@ -374,34 +376,32 @@ export async function cadenceLoop(
   let horizonWarned = false;
   /**
    * The feed whose document first reported a terminal status (`closed`, `cancelled`,
-   * `unnecessary`, `postponed`) in this watch; the closing set skips it (rev 4.12). Null until a document
-   * of this watch says so, so a seeded stored status never triggers the closing set alone.
+   * `unnecessary`, `postponed`) in this watch; the closing set skips it (rev 4.12). Null until a
+   * document of this watch is processed while the stored or written status is terminal, so a
+   * seeded stored status never triggers the closing set without a fetch.
    */
   let terminalBy: GameFeedName | null = null;
+  const countRetry = (kind: RetryKind, feed: GameFeedName) => {
+    if (kind === 'http429') retried429++;
+    else retriedClosing++;
+    opts.onRetry?.(kind, feed);
+  };
   const fetchOne = async (feed: GameFeedName, closing = false): Promise<void> => {
-    for (let attempt = 0; ; attempt++) {
+    let doc: FetchedDocument<unknown> | null = null;
+    /** The retry in flight; reported once its request is past the quota guard. */
+    let retrying: RetryKind | null = null;
+    for (let attempt = 0; doc === null; attempt++) {
       try {
-        const doc = await source.fetch(feed, schemaFor(feed));
-        okFetches++;
-        opts.onCall?.(feed);
-        const out = await watcher.process(
-          feed,
-          JSON.parse(doc.rawText),
-          doc.requestedAt,
-          source.observationSource,
-        );
-        if (terminalBy === null && out && isTerminal(out.status)) terminalBy = feed;
-        status = out?.status ?? status;
-        return;
+        doc = await source.fetch(feed, schemaFor(feed));
       } catch (err) {
         // No budget: stop the watch (the run ends as error, the reservation is released) instead
-        // of issuing a guard query per tick forever.
+        // of issuing a guard query per tick forever. A refused retry was never sent.
         if (err instanceof QuotaRefusedError) throw err;
+        if (retrying) countRetry(retrying, feed);
         const is429 = err instanceof ProviderHttpError && err.status === 429;
+        // Only the fetch is retried: an error applying a document (below) costs no refetch.
         if (!opts.isStopped() && (closing ? attempt < 2 : is429 && attempt < 1)) {
-          if (is429) retried429++;
-          else retriedClosing++;
-          opts.onRetry?.(is429 ? 'http429' : 'closing', feed);
+          retrying = is429 ? 'http429' : 'closing';
           log.warn(
             { err: is429 ? undefined : err, feed, attempt: attempt + 1, okFetches, closing },
             is429 ? 'HTTP 429; retrying at the next rate slot' : 'closing fetch failed; retrying',
@@ -417,6 +417,22 @@ export async function cadenceLoop(
         );
         return;
       }
+      if (retrying) countRetry(retrying, feed);
+    }
+    okFetches++;
+    opts.onCall?.(feed);
+    try {
+      const out = await watcher.process(
+        feed,
+        JSON.parse(doc.rawText),
+        doc.requestedAt,
+        source.observationSource,
+      );
+      if (terminalBy === null && out && isTerminal(out.status)) terminalBy = feed;
+      status = out?.status ?? status;
+    } catch (err) {
+      failed++;
+      log.error({ err, feed, okFetches, closing }, 'document failed to apply; not refetched');
     }
   };
   // Periodic feeds: next due time per feed. One-offs: a sorted queue of offsets.
