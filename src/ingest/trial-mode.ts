@@ -295,6 +295,9 @@ export function planWatch(
   return { profile: chosen, cadence, budget: budgetFor(cadence) };
 }
 
+/** Stored statuses of a game that will not be played under this id; `trial watch` refuses them. */
+const NOT_PLAYED: ReadonlySet<string> = new Set(['postponed', 'cancelled', 'unnecessary']);
+
 export interface TrialWatchDeps {
   db: Db;
   log: Logger;
@@ -349,6 +352,14 @@ export async function runTrialWatch(
   const observationSource: ObservationSource = source === 'simulation' ? 'simulation' : 'rest';
   if (opts.game.status === 'closed') {
     throw new Error(`game ${opts.game.id} is already closed; nothing to watch`);
+  }
+  if (NOT_PLAYED.has(opts.game.status)) {
+    throw new Error(
+      `game ${opts.game.id} is ${opts.game.status}; nothing to watch. A made-up game is usually ` +
+        'listed under a new id (run `pnpm trial plan --date <makeup date>` and watch that one); ' +
+        'if the provider reuses this id, the same plan command refreshes it back to `scheduled` ' +
+        '(freshness allows post -> pre while last_seq = 0)',
+    );
   }
   const plan = planWatch(adapter, source, opts.game.coverage, opts.profile);
   const speed = opts.speed ?? 1;

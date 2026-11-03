@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../../src/config.js';
+import type { Db } from '../../../src/db/client.js';
+import type { QuotaGuard } from '../../../src/ingest/quota-guard.js';
 import { seasonFor } from '../../../src/ingest/season.js';
-import { assertSpeedAllowed, lagFromRecord } from '../../../src/ingest/trial-mode.js';
+import {
+  assertSpeedAllowed,
+  lagFromRecord,
+  runTrialWatch,
+} from '../../../src/ingest/trial-mode.js';
+import { ncaawbAdapter } from '../../../src/leagues/ncaawb/adapter.js';
+import { createLogger } from '../../../src/logger.js';
 
 const base = {
   DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:54322/postgres',
@@ -27,6 +35,43 @@ describe('assertSpeedAllowed (--speed only against a rehearsal host)', () => {
     expect(() => assertSpeedAllowed(trial, 30)).toThrow(/only allowed against a rehearsal host/);
     expect(() => assertSpeedAllowed(sim, 30)).toThrow(/simulation service/);
     expect(() => assertSpeedAllowed(rehearsal, 0)).toThrow(/integer/);
+  });
+});
+
+describe('runTrialWatch refuses games that will not be played under their id', () => {
+  it('postponed, cancelled and unnecessary are refused before any reservation or call', async () => {
+    // Nothing may be touched: a database or guard access would throw on these empty stand-ins.
+    const untouchable = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('touched');
+        },
+      },
+    );
+    const deps = {
+      db: untouchable as unknown as Db,
+      log: createLogger({ level: 'silent', pretty: false }),
+      config: loadConfig({ ...base, MODE: 'trial' }),
+      adapter: ncaawbAdapter,
+      guard: untouchable as unknown as QuotaGuard,
+      pulse: null,
+      isStopped: () => false,
+    };
+    for (const status of ['postponed', 'cancelled', 'unnecessary']) {
+      const game = {
+        id: '00000000-0000-4000-8000-000000000001',
+        providerGameId: 'p1',
+        status,
+        coverage: 'full',
+        scheduledAt: new Date('2026-11-08T17:00:00Z'),
+      };
+      await expect(runTrialWatch(deps, { game })).rejects.toThrow(
+        new RegExp(
+          `is ${status}; nothing to watch.*new id.*pnpm trial plan --date <makeup date>.*scheduled.*last_seq = 0`,
+        ),
+      );
+    }
   });
 });
 
