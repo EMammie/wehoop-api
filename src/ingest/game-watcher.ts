@@ -315,10 +315,13 @@ export interface CadenceLoopOptions {
 
 export interface CadenceOutcome {
   status: string | null;
-  calls: number;
+  /** Fetches that returned a document and were processed (failed attempts are not counted here). */
+  okFetches: number;
   failed: number;
   /** HTTP 429s retried at once through the next rate slot (each retry is a logged call). */
   retried429: number;
+  /** Closing-set fetches retried after any other failure (timeout, 5xx, parse; each a logged call). */
+  retriedClosing: number;
   elapsedMs: number;
 }
 
@@ -326,12 +329,18 @@ export interface CadenceOutcome {
  * Cadence-driven loop (trial / production REST, plan §4): each feed is fetched
  * at its own interval from the watch start (first poll at t=0), one-off
  * boxscores at their offsets, and the closing summary + boxscore once the
- * game is `closed`. The horizon is a planning number: a game that runs long
- * (overtime) keeps being watched; the quota guard, not the horizon, is what
- * refuses calls. A fetch that fails is logged and retried at its next due time.
- * An HTTP 429 is retried at once through the next rate slot (once for a cadence
- * feed, twice for a closing feed, which has no next due time), because the
- * provider's spacing rule is not known exactly (live run 2026-10-19).
+ * game is `closed`, `cancelled` or `unnecessary` (the latter two end the watch
+ * even without `--until closed`: nothing more will be played). The horizon is a
+ * planning number: a game that runs long (overtime) keeps being watched; the
+ * quota guard, not the horizon, is what refuses calls. The one exception is a
+ * `postponed` game, which polls at the after-complete pace and stops at the
+ * horizon. A cadence fetch that fails is logged and retried at its next due
+ * time; an HTTP 429 is retried once at once through the next rate slot, because
+ * the provider's spacing rule is not known exactly (live run 2026-10-19). A
+ * closing fetch has no next due time, so any failure but a quota refusal
+ * (timeout, 5xx, 429, schema) is retried twice through the next rate slots.
+ * The status starts from the stored one (`watcher.lastStatus`), so a watch
+ * attached to a `complete` game starts in the slow phase.
  */
 export async function cadenceLoop(
   watcher: GameWatcher,
@@ -349,18 +358,23 @@ export async function cadenceLoop(
       : feed === 'summary'
         ? SummaryDocumentSchema
         : BoxscoreDocumentSchema;
-  let status: string | null = null;
-  let calls = 0;
+  let status: string | null = watcher.lastStatus ?? null;
+  let okFetches = 0;
   let failed = 0;
   let retried429 = 0;
+  let retriedClosing = 0;
   let horizonWarned = false;
-  /** The feed whose document first reported `closed`; the closing set skips it (rev 4.12). */
-  let closedBy: GameFeedName | null = null;
-  const fetchOne = async (feed: GameFeedName, retriesOn429 = 1): Promise<void> => {
+  /**
+   * The feed whose document first reported a terminal status (`closed`, `cancelled`,
+   * `unnecessary`) in this watch; the closing set skips it (rev 4.12). Null until a document
+   * of this watch says so, so a seeded stored status never triggers the closing set alone.
+   */
+  let terminalBy: GameFeedName | null = null;
+  const fetchOne = async (feed: GameFeedName, closing = false): Promise<void> => {
     for (let attempt = 0; ; attempt++) {
       try {
         const doc = await source.fetch(feed, schemaFor(feed));
-        calls++;
+        okFetches++;
         opts.onCall?.(feed);
         const out = await watcher.process(
           feed,
@@ -368,28 +382,30 @@ export async function cadenceLoop(
           doc.requestedAt,
           source.observationSource,
         );
-        if (out?.status === 'closed' && status !== 'closed') closedBy = feed;
+        if (terminalBy === null && out && isTerminal(out.status)) terminalBy = feed;
         status = out?.status ?? status;
         return;
       } catch (err) {
         // No budget: stop the watch (the run ends as error, the reservation is released) instead
         // of issuing a guard query per tick forever.
         if (err instanceof QuotaRefusedError) throw err;
-        if (
-          err instanceof ProviderHttpError &&
-          err.status === 429 &&
-          attempt < retriesOn429 &&
-          !opts.isStopped()
-        ) {
-          retried429++;
+        const is429 = err instanceof ProviderHttpError && err.status === 429;
+        if (!opts.isStopped() && (closing ? attempt < 2 : is429 && attempt < 1)) {
+          if (is429) retried429++;
+          else retriedClosing++;
           log.warn(
-            { feed, attempt: attempt + 1, calls },
-            'HTTP 429; retrying at the next rate slot',
+            { err: is429 ? undefined : err, feed, attempt: attempt + 1, okFetches, closing },
+            is429 ? 'HTTP 429; retrying at the next rate slot' : 'closing fetch failed; retrying',
           );
           continue;
         }
         failed++;
-        log.error({ err, feed, calls }, 'fetch failed; retrying at the next due time');
+        log.error(
+          { err, feed, okFetches, closing },
+          closing
+            ? 'closing fetch failed; giving up'
+            : 'fetch failed; retrying at the next due time',
+        );
         return;
       }
     }
@@ -405,13 +421,15 @@ export async function cadenceLoop(
   addPeriodic('summary', cadence.summaryMs, cadence.summaryOffsetMs ?? 0);
   addPeriodic('boxscore', cadence.boxscoreMs);
   // Slow phases: while the game waits for `closed` after `complete` (or idles on `closed`
-  // without `--until closed`), poll at most every `afterCompleteMs` (rev 4.9); before play
-  // starts, at most every `preGameMs` (rev 4.12). A phase may poll only some feeds; the others
-  // stay on their own grids without fetching.
+  // without `--until closed`, or sits `postponed`), poll at most every `afterCompleteMs`
+  // (rev 4.9); before play starts, at most every `preGameMs` (rev 4.12). A phase may poll only
+  // some feeds; the others stay on their own grids without fetching.
   const slowPhase = (): { ms: number; feeds: readonly GameFeedName[] | undefined } | null => {
     if (
       cadence.afterCompleteMs != null &&
-      (status === 'complete' || (status === 'closed' && !opts.untilClosed))
+      (status === 'complete' ||
+        status === 'postponed' ||
+        (status === 'closed' && !opts.untilClosed))
     )
       return { ms: cadence.afterCompleteMs, feeds: cadence.afterCompleteFeeds };
     if (cadence.preGameMs != null && status !== null && isPreGame(status))
@@ -420,6 +438,14 @@ export async function cadenceLoop(
   };
   const slowed = () => slowPhase() !== null;
   const oneOffs = [...cadence.boxscoreAtMs].sort((a, b) => a - b).map((ms) => startedAt + ms);
+  const outcome = (): CadenceOutcome => ({
+    status,
+    okFetches,
+    failed,
+    retried429,
+    retriedClosing,
+    elapsedMs: now() - startedAt,
+  });
   while (!opts.isStopped()) {
     const t = now();
     for (const p of periodic) {
@@ -446,22 +472,45 @@ export async function cadenceLoop(
       oneOffs.shift();
       await fetchOne('boxscore');
     }
-    if (status === 'closed' && opts.untilClosed) {
-      // Keep the summary's offset from the document that reported `closed` before the closing
-      // set (rev 4.9 (2)), so no pbp <-> summary pair leaves at the minimum spacing; skip the
-      // feed that reported it, which was just fetched (rev 4.12 (2)).
-      const closing = cadence.closing.filter((feed) => feed !== closedBy);
+    if (
+      terminalBy !== null &&
+      (status === 'cancelled' ||
+        status === 'unnecessary' ||
+        (status === 'closed' && opts.untilClosed))
+    ) {
+      // Keep the summary's offset from the document that reported the final status before the
+      // closing set (rev 4.9 (2)), so no pbp <-> summary pair leaves at the minimum spacing; skip
+      // the feed that reported it, which was just fetched (rev 4.12 (2)).
+      const closing = cadence.closing.filter((feed) => feed !== terminalBy);
       if (cadence.summaryOffsetMs && closing.length > 0) await sleep(cadence.summaryOffsetMs);
-      for (const feed of closing) await fetchOne(feed, 2);
-      log.info({ calls, failed, retried429, elapsedMs: now() - startedAt }, 'game closed');
-      return { status, calls, failed, retried429, elapsedMs: now() - startedAt };
+      for (const feed of closing) await fetchOne(feed, true);
+      const final = outcome();
+      log.info(final, status === 'closed' ? 'game closed' : `game ${status}; watch ends`);
+      return final;
     }
-    if (!horizonWarned && now() - startedAt >= cadence.horizonMs) {
-      horizonWarned = true;
-      log.warn(
-        { calls, horizonMs: cadence.horizonMs },
-        'watch horizon reached; game not closed, continuing under the quota guard',
-      );
+    if (now() - startedAt >= cadence.horizonMs) {
+      // Postponed is not terminal (a later document may report play again and the live cadence
+      // resumes), but past the planned horizon nothing more is expected today: stop here, the
+      // only case in which the horizon ends a watch. Known gap: a game postponed after plays
+      // were recorded and resumed on another day under the same id is not followed by a new
+      // watch, because rule 2(a) treats the resumed documents as a phase regression (post ->
+      // live); recovery is the operator step `pnpm game rebuild`. Sportradar's docs say a
+      // made-up game gets a new id, and id reuse has not been observed in our data.
+      if (status === 'postponed') {
+        const final = outcome();
+        log.warn(
+          { ...final, horizonMs: cadence.horizonMs },
+          'watch horizon reached with the game postponed; stopping',
+        );
+        return final;
+      }
+      if (!horizonWarned) {
+        horizonWarned = true;
+        log.warn(
+          { okFetches, horizonMs: cadence.horizonMs },
+          'watch horizon reached; game not closed, continuing under the quota guard',
+        );
+      }
     }
     const dueTimes = [
       ...periodic.map((p) => p.nextAt),
@@ -474,10 +523,15 @@ export async function cadenceLoop(
     const waitMs = Math.max(0, Math.min(...dueTimes) - now());
     await sleep(Math.min(waitMs, 1000));
   }
-  return { status, calls, failed, retried429, elapsedMs: now() - startedAt };
+  return outcome();
 }
 
 type GameFeedName = 'pbp' | 'summary' | 'boxscore';
+
+/** Statuses after which nothing more is played or corrected: the closing set runs, then the watch ends. */
+function isTerminal(status: string): boolean {
+  return status === 'closed' || status === 'cancelled' || status === 'unnecessary';
+}
 
 /** True for a known pre-game status (`scheduled`, `created`, `time_tbd`, `if_necessary`). */
 function isPreGame(status: string): boolean {
