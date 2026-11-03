@@ -9,7 +9,13 @@ import { ensureGame } from '../../src/ingest/apply-changes.js';
 import { ensureTeams } from '../../src/ingest/identity.js';
 import { QuotaGuard, QuotaRefusedError } from '../../src/ingest/quota-guard.js';
 import { readRecording, relabelRecording } from '../../src/ingest/recording.js';
-import { gamesOn, planDay, resolveGame, runTrialWatch } from '../../src/ingest/trial-mode.js';
+import {
+  gamesOn,
+  planDay,
+  RetryReportSchema,
+  resolveGame,
+  runTrialWatch,
+} from '../../src/ingest/trial-mode.js';
 import { ncaawbAdapter } from '../../src/leagues/ncaawb/adapter.js';
 import {
   type FakeProvider,
@@ -78,7 +84,7 @@ async function callRows(reservationId: number) {
     from ingest.provider_calls where reservation_id = ${reservationId} order by id`;
 }
 
-async function runRetries(runId: number): Promise<unknown> {
+async function runRetries(runId: number | string): Promise<unknown> {
   const [row] = await db<{ retries: unknown }[]>`
     select meta->'retries' as retries from ingest.ingestion_runs where id = ${runId}`;
   return row?.retries ?? null;
@@ -111,6 +117,37 @@ class RefusingGuard extends QuotaGuard {
       throw new QuotaRefusedError(product, 'below_reserve', null, 'injected: budget exhausted');
     }
     return super.assertCall(product, source, reservationId);
+  }
+}
+
+/**
+ * Lets every call through until `closedSeen`, then `afterClose` more, then refuses: the closing set
+ * runs into a quota refusal. `release` records what the run meta held when it was called.
+ */
+class ClosingRefusalGuard extends QuotaGuard {
+  closedSeen = false;
+  afterClose = 3;
+  atRelease: { retries: unknown; releasedAt: Date | null } | null = null;
+  constructor(db: Db) {
+    super({ db, log });
+  }
+  override async assertCall(
+    product: string,
+    source: Parameters<QuotaGuard['assertCall']>[1],
+    reservationId: number | null = null,
+  ) {
+    if (this.closedSeen && this.afterClose-- <= 0) {
+      throw new QuotaRefusedError(product, 'below_reserve', null, 'injected: closing refused');
+    }
+    return super.assertCall(product, source, reservationId);
+  }
+  override async release(reservationId: number) {
+    const [row] = await db<{ retries: unknown; releasedAt: Date | null }[]>`
+      select r.meta->'retries' as retries, b.released_at as "releasedAt"
+      from ingest.budget_reservations b join ingest.ingestion_runs r on r.id = b.run_id
+      where b.id = ${reservationId}`;
+    this.atRelease = row ?? null;
+    return super.release(reservationId);
   }
 }
 
@@ -325,6 +362,64 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       await db`update public.games set status = 'closed' where provider_game_id = ${fullId}`;
     }
   });
+
+  it('retry report: a cadence 429 and failing closing fetches, then a quota refusal, are stored before the release', async () => {
+    const retryId = `test-${randomUUID()}`;
+    const retryCopy = join(dir, 'retry.jsonl.gz');
+    await relabelRecording(FULL, retryCopy, {
+      coverage: 'full',
+      gameId: { from: REAL_ID, to: retryId },
+    });
+    const server = await startFakeProvider({ replayFile: retryCopy, speed: SPEED });
+    try {
+      const config = configFor(server);
+      const guard = new ClosingRefusalGuard(db);
+      await planDay({ db, log, config, adapter, guard }, { date: DATE });
+      const game = await resolveGame(db, 'ncaawb', retryId);
+      if (!game) throw new Error('plan did not create the game');
+      // The second request gets a 429 (its retry passes); once a document says closed, every
+      // request fails with a 503 until the guard refuses the fourth after it.
+      let requests = 0;
+      const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        requests++;
+        if (requests === 2) return new Response('{"message":"Too Many Requests"}', { status: 429 });
+        if (guard.closedSeen) return new Response('{"message":"upstream down"}', { status: 503 });
+        const res = await fetch(input, init);
+        const text = await res.text();
+        try {
+          if ((JSON.parse(text) as { status?: unknown }).status === 'closed')
+            guard.closedSeen = true;
+        } catch {
+          // not JSON: nothing to look at
+        }
+        return new Response(text, { status: res.status, headers: res.headers });
+      }) as typeof fetch;
+      await expect(
+        runTrialWatch(
+          { db, log, config, adapter, guard, pulse: null, isStopped: () => false, fetchImpl },
+          { game, profile: 'full', speed: SPEED },
+        ),
+      ).rejects.toMatchObject({ reason: 'below_reserve' });
+      const last = (await guard.reservations({ product })).at(-1);
+      if (!last?.runId) throw new Error('no reservation for the watch');
+      const stored = RetryReportSchema.parse(await runRetries(last.runId));
+      expect(server.stats.rejected429).toBe(0); // the only 429 is the injected one
+      expect(stored).toMatchObject({ allowance: 6, retried429: 1 });
+      // Three calls after closed: the first closing attempt plus retries that were sent; the
+      // refused one is not a retry. A cadence fetch may take the first of the three.
+      expect(stored.retriedClosing).toBeGreaterThanOrEqual(1);
+      expect(stored.retriedClosing).toBeLessThanOrEqual(2);
+      expect(stored.used).toBe(stored.retried429 + stored.retriedClosing);
+      const rows = await db<{ status: number }[]>`
+        select status from ingest.provider_calls where reservation_id = ${last.id} and status <> 200`;
+      expect(rows.map((r) => r.status).sort()).toEqual([429, 503, 503, 503]);
+      // Stored before the release: the run meta already held it while released_at was still null.
+      expect(guard.atRelease).toEqual({ retries: stored, releasedAt: null });
+      expect(last.releasedAt).toBeInstanceOf(Date);
+    } finally {
+      await server.close();
+    }
+  }, 120_000);
 
   it('extended_boxscore game: profile defaults to extended (184), emits status/period only while live, stats once closed, no pbp calls', async () => {
     const server = await startFakeProvider({ replayFile: extCopy, speed: SPEED });
