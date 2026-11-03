@@ -1,6 +1,11 @@
 import type { ZodType } from 'zod';
 import type { Db } from '../../db/client.js';
-import { countsTowardQuota, needsRateLimit, type QuotaGuard } from '../../ingest/quota-guard.js';
+import {
+  countsTowardQuota,
+  needsRateLimit,
+  type QuotaGuard,
+  QuotaRefusedError,
+} from '../../ingest/quota-guard.js';
 import type { LeagueCode } from '../../leagues/codes.js';
 import type { Logger } from '../../logger.js';
 import type { RateLimiter } from './rate-limiter.js';
@@ -65,8 +70,12 @@ export interface SportradarHttpDeps {
  */
 export class SportradarHttp {
   readonly product: string;
-  /** Calls refused by the quota guard (never sent). */
+  /**
+   * Calls refused by the quota guard (never sent). A guard that fails for another reason (a
+   * database error) is not a refusal: the error propagates and is not counted here.
+   */
   refused = 0;
+  /** Requests sent (each one is a provider_calls row), whether or not a response arrived. */
   calls = 0;
 
   constructor(private readonly deps: SportradarHttpDeps) {
@@ -106,7 +115,7 @@ export class SportradarHttp {
       try {
         await this.deps.guard.assertCall(this.product, source, reservationId);
       } catch (err) {
-        this.refused++;
+        if (err instanceof QuotaRefusedError) this.refused++;
         throw err;
       }
     }

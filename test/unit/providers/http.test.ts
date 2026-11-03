@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { Db } from '../../../src/db/client.js';
-import type { QuotaGuard } from '../../../src/ingest/quota-guard.js';
+import { type QuotaGuard, QuotaRefusedError } from '../../../src/ingest/quota-guard.js';
 import { createLogger } from '../../../src/logger.js';
 import { SportradarHttp } from '../../../src/providers/sportradar/http.js';
 import { RateLimiter, type SlotStore } from '../../../src/providers/sportradar/rate-limiter.js';
@@ -58,5 +59,37 @@ describe('SportradarHttp construction (plan §4 Rate/quota, rev 4.6)', () => {
     expect(
       () => new SportradarHttp({ db: null, log, league: 'ncaawb', runId: null, resolver }),
     ).toThrow(/only allowed for simulation/);
+  });
+});
+
+describe('SportradarHttp.refused counts quota refusals only', () => {
+  const withGuard = (assertCall: () => Promise<never>) =>
+    new SportradarHttp({
+      db,
+      log,
+      league: 'ncaawb',
+      runId: null,
+      resolver,
+      limiter: new RateLimiter({ product: 'ncaawb', store }),
+      guard: { assertCall } as unknown as QuotaGuard,
+      fetchImpl: (async () => {
+        throw new Error('must not be called');
+      }) as typeof fetch,
+    });
+  const schema = z.object({});
+
+  it('a QuotaRefusedError is a refusal; a guard failing on its database is not', async () => {
+    const refusing = withGuard(async () => {
+      throw new QuotaRefusedError('ncaawb', 'below_reserve', null, 'spendable 0 < 1');
+    });
+    await expect(refusing.getJson('pbp', schema, { gameId: 'g1' })).rejects.toBeInstanceOf(
+      QuotaRefusedError,
+    );
+    expect({ refused: refusing.refused, calls: refusing.calls }).toEqual({ refused: 1, calls: 0 });
+    const broken = withGuard(async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:54322');
+    });
+    await expect(broken.getJson('pbp', schema, { gameId: 'g1' })).rejects.toThrow(/ECONNREFUSED/);
+    expect({ refused: broken.refused, calls: broken.calls }).toEqual({ refused: 0, calls: 0 });
   });
 });
