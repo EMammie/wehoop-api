@@ -331,6 +331,7 @@ async function main() {
           finalStatus: outcome.status,
           changes: outcome.changes,
           stale: outcome.stale,
+          retries: outcome.retries,
           unpublished: left,
           stoppedBy,
         },

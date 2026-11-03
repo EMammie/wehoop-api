@@ -78,6 +78,12 @@ async function callRows(reservationId: number) {
     from ingest.provider_calls where reservation_id = ${reservationId} order by id`;
 }
 
+async function runRetries(runId: number): Promise<unknown> {
+  const [row] = await db<{ retries: unknown }[]>`
+    select meta->'retries' as retries from ingest.ingestion_runs where id = ${runId}`;
+  return row?.retries ?? null;
+}
+
 async function minGapMs(): Promise<number | null> {
   const [row] = await db<{ ms: number | null }[]>`
     select (extract(epoch from min(gap)) * 1000)::int as ms from (
@@ -205,6 +211,10 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
         status: 'ok',
         gameId: game.id,
       });
+      // The retries spent against the allowance land in the run meta, readable with a SELECT.
+      const noRetries = { used: 0, allowance: 6, retried429: 0, retriedClosing: 0 };
+      expect(out.retries).toEqual(noRetries);
+      expect(await runRetries(out.runId)).toEqual(noRetries);
       // A rehearsal spends no quota: the product's used_30d and reserved stay at zero.
       const [q] = await db<{ used: number; reserved: number }[]>`
         select used_30d as used, reserved from ingest.v_quota where product = ${product}`;
@@ -303,6 +313,13 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
         select status, error from ingest.ingestion_runs where id = ${last?.runId ?? 0}`;
       expect(run?.status).toBe('error');
       expect(run?.error).toMatch(/quota refused/);
+      // The refusal throws out of the loop; the retry report is still stored.
+      expect(await runRetries(Number(last?.runId ?? 0))).toEqual({
+        used: 0,
+        allowance: 6,
+        retried429: 0,
+        retriedClosing: 0,
+      });
     } finally {
       await server.close();
       await db`update public.games set status = 'closed' where provider_game_id = ${fullId}`;

@@ -309,9 +309,18 @@ export interface CadenceLoopOptions {
   isStopped: () => boolean;
   /** Called after every fetch (budget accounting / evidence). */
   onCall?: (feed: Feed) => void;
+  /**
+   * Called before every retry (a counted call against the reservation's retry allowance): a
+   * cadence HTTP 429, or any failure of a closing fetch. Lets a caller that loses the outcome
+   * (the loop throws on a quota refusal) still report the retries spent.
+   */
+  onRetry?: (kind: RetryKind, feed: Feed) => void;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
+
+/** Why a fetch was retried at once: a cadence or closing HTTP 429, or another closing failure. */
+export type RetryKind = 'http429' | 'closing';
 
 export interface CadenceOutcome {
   status: string | null;
@@ -392,6 +401,7 @@ export async function cadenceLoop(
         if (!opts.isStopped() && (closing ? attempt < 2 : is429 && attempt < 1)) {
           if (is429) retried429++;
           else retriedClosing++;
+          opts.onRetry?.(is429 ? 'http429' : 'closing', feed);
           log.warn(
             { err: is429 ? undefined : err, feed, attempt: attempt + 1, okFetches, closing },
             is429 ? 'HTTP 429; retrying at the next rate slot' : 'closing fetch failed; retrying',

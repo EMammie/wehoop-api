@@ -90,13 +90,19 @@ describe('cadenceLoop and the quota guard', () => {
     } as unknown as GameWatcher;
     // pbp says closed | summary: 503, 503, 503 (gives up after 2 retries) | boxscore: 503, ok.
     const src = source(['ok', 'transient', 'transient', 'transient', 'transient', 'ok']);
+    const retries: string[] = [];
     const out = await cadenceLoop(
       closed,
       src,
       silent,
       { ...cadence, closing: ['summary', 'boxscore'] },
-      { untilClosed: true, isStopped: () => false },
+      {
+        untilClosed: true,
+        isStopped: () => false,
+        onRetry: (kind, feed) => retries.push(`${kind}:${feed}`),
+      },
     );
+    expect(retries).toEqual(['closing:summary', 'closing:summary', 'closing:boxscore']);
     expect(src.feeds).toEqual(['pbp', 'summary', 'summary', 'summary', 'boxscore', 'boxscore']);
     expect(out).toMatchObject({
       status: 'closed',

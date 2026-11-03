@@ -17,6 +17,8 @@ import {
   planDay,
   planWatch,
   providerRevisions,
+  type RetryReport,
+  RetryReportSchema,
   resolveGame,
 } from '../ingest/trial-mode.js';
 import { LeagueCodeSchema } from '../leagues/codes.js';
@@ -241,7 +243,25 @@ async function main() {
                  count(*) filter (where quota_counted)::int as counted
           from ingest.provider_calls group by reservation_id`;
         const byRes = new Map(calls.map((c) => [c.reservationId, c]));
-        if (args.json) console.log(JSON.stringify({ quota, reservations, calls }));
+        // Retries each watch spent against its allowance (`ingestion_runs.meta->'retries'`).
+        const runIds = reservations.flatMap((r) => (r.runId === null ? [] : [r.runId]));
+        const retryRows = await db<{ runId: string; retries: unknown }[]>`
+          select id::text as "runId", meta->'retries' as retries from ingest.ingestion_runs
+          where id = any(${runIds}) and meta ? 'retries'`;
+        const retriesByRun = new Map<string, RetryReport>();
+        for (const row of retryRows) {
+          const parsed = RetryReportSchema.safeParse(row.retries);
+          if (parsed.success) retriesByRun.set(row.runId, parsed.data);
+        }
+        if (args.json)
+          console.log(
+            JSON.stringify({
+              quota,
+              reservations,
+              calls,
+              retries: Object.fromEntries(retriesByRun),
+            }),
+          );
         else {
           console.log('product    limit  used  remaining  reserved  reserve  spendable  verified');
           for (const q of quota) {
@@ -254,8 +274,12 @@ async function main() {
           );
           for (const r of reservations) {
             const c = byRes.get(String(r.id));
+            const rt = r.runId === null ? undefined : retriesByRun.get(String(r.runId));
+            const retries = rt
+              ? ` retries=${rt.used}/${rt.allowance} (429 ${rt.retried429}, closing ${rt.retriedClosing})${rt.used > rt.allowance ? ' OVER' : ''}`
+              : '';
             console.log(
-              `  #${r.id} ${r.product} ${r.profile.padEnd(9)} game=${r.gameId ?? '-'} source=${r.source} run=${r.runId ?? '-'} reserved=${r.reservedCalls} used=${r.usedCalls} provider_calls=${c?.n ?? 0} counted=${c?.counted ?? 0} ${r.releasedAt ? 'released' : 'open'}`,
+              `  #${r.id} ${r.product} ${r.profile.padEnd(9)} game=${r.gameId ?? '-'} source=${r.source} run=${r.runId ?? '-'} reserved=${r.reservedCalls} used=${r.usedCalls} provider_calls=${c?.n ?? 0} counted=${c?.counted ?? 0}${retries} ${r.releasedAt ? 'released' : 'open'}`,
             );
           }
         }

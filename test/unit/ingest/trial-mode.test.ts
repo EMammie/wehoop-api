@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../../src/config.js';
 import type { Db } from '../../../src/db/client.js';
 import type { QuotaGuard } from '../../../src/ingest/quota-guard.js';
@@ -6,10 +6,12 @@ import { seasonFor } from '../../../src/ingest/season.js';
 import {
   assertSpeedAllowed,
   lagFromRecord,
+  logRetryReport,
+  retryReport,
   runTrialWatch,
 } from '../../../src/ingest/trial-mode.js';
 import { ncaawbAdapter } from '../../../src/leagues/ncaawb/adapter.js';
-import { createLogger } from '../../../src/logger.js';
+import { createLogger, type Logger } from '../../../src/logger.js';
 
 const base = {
   DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:54322/postgres',
@@ -72,6 +74,30 @@ describe('runTrialWatch refuses games that will not be played under their id', (
         ),
       );
     }
+  });
+});
+
+describe('retry report (is the allowance of 6 enough?)', () => {
+  const spy = () => {
+    const info = vi.fn();
+    const warn = vi.fn();
+    return { log: { info, warn } as unknown as Logger, info, warn };
+  };
+  it('sums cadence 429 and closing retries against the allowance; warns only above it', () => {
+    const within = retryReport(6, { retried429: 2, retriedClosing: 4 });
+    expect(within).toEqual({ used: 6, allowance: 6, retried429: 2, retriedClosing: 4 });
+    const a = spy();
+    logRetryReport(a.log, 7, within);
+    expect(a.info).toHaveBeenCalledWith({ runId: 7, retries: within }, 'trial watch retries');
+    expect(a.warn).not.toHaveBeenCalled();
+    const over = retryReport(6, { retried429: 5, retriedClosing: 2 });
+    const b = spy();
+    logRetryReport(b.log, 8, over);
+    expect(b.warn).toHaveBeenCalledWith(
+      { runId: 8, retries: { used: 7, allowance: 6, retried429: 5, retriedClosing: 2 } },
+      'trial watch retries exceeded the budgeted allowance',
+    );
+    expect(b.info).not.toHaveBeenCalled();
   });
 });
 

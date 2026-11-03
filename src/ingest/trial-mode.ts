@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { type Config, SPORTRADAR_DEFAULT_BASE_URL } from '../config.js';
 import type { Db } from '../db/client.js';
 import type { LeagueAdapter } from '../leagues/adapter.js';
@@ -25,7 +26,7 @@ import type { FaultInjector } from './fault.js';
 import { cadenceLoop, GameWatcher, HttpDocumentSource } from './game-watcher.js';
 import { needsRateLimit, type QuotaGuard, type Reservation } from './quota-guard.js';
 import { ReferenceIngester } from './reference.js';
-import { endRun, type RunSource, startRun } from './runs.js';
+import { endRun, type RunSource, setRunMeta, startRun } from './runs.js';
 import { seasonFor } from './season.js';
 import type { ObservationSource } from './types.js';
 
@@ -332,6 +333,40 @@ export interface TrialWatchOutcome {
   refused: number;
   changes: number;
   stale: number;
+  retries: RetryReport;
+}
+
+/**
+ * Retries a watch spent against its reservation's allowance (owner decision 2026-11-03: is 6
+ * enough?). Stored as `ingest.ingestion_runs.meta->'retries'` of the watch_game run.
+ */
+export const RetryReportSchema = z.object({
+  used: z.int().nonnegative(),
+  allowance: z.int().nonnegative(),
+  retried429: z.int().nonnegative(),
+  retriedClosing: z.int().nonnegative(),
+});
+export type RetryReport = z.infer<typeof RetryReportSchema>;
+
+export function retryReport(
+  allowance: number,
+  counts: { retried429: number; retriedClosing: number },
+): RetryReport {
+  return {
+    used: counts.retried429 + counts.retriedClosing,
+    allowance,
+    retried429: counts.retried429,
+    retriedClosing: counts.retriedClosing,
+  };
+}
+
+/** One structured line per watch; a warning when the retries outran the allowance. */
+export function logRetryReport(log: Logger, runId: number, retries: RetryReport): void {
+  if (retries.used > retries.allowance) {
+    log.warn({ runId, retries }, 'trial watch retries exceeded the budgeted allowance');
+  } else {
+    log.info({ runId, retries }, 'trial watch retries');
+  }
 }
 
 /**
@@ -429,10 +464,17 @@ export async function runTrialWatch(
   });
   await watcher.attach(opts.game.id);
   let status: string | null = null;
+  // Counted here, not from the loop's outcome: a quota refusal throws and loses it.
+  const spent = { retried429: 0, retriedClosing: 0 };
+  const retries = () => retryReport(plan.budget.retries, spent);
   try {
     const out = await cadenceLoop(watcher, docs, log, cadence, {
       untilClosed: opts.untilClosed ?? true,
       isStopped: deps.isStopped,
+      onRetry: (kind) => {
+        if (kind === 'http429') spent.retried429++;
+        else spent.retriedClosing++;
+      },
     });
     status = out.status;
     await endRun(db, run.id, deps.isStopped() ? 'aborted' : 'ok');
@@ -440,6 +482,13 @@ export async function runTrialWatch(
     await endRun(db, run.id, 'error', (err as Error).message);
     throw err;
   } finally {
+    // Before the release, and never masking the watch's own error.
+    try {
+      await setRunMeta(db, run.id, { retries: retries() });
+    } catch (err) {
+      log.error({ err, runId: run.id }, 'could not store the retry report in the run meta');
+    }
+    logRetryReport(log, run.id, retries());
     await deps.guard.release(reservation.id);
   }
   const final = (await deps.guard.reservation(reservation.id)) ?? reservation;
@@ -453,6 +502,7 @@ export async function runTrialWatch(
       status,
       changes: watcher.applied,
       stale: watcher.stale,
+      retries: retries(),
     },
     'trial watch finished',
   );
@@ -466,6 +516,7 @@ export async function runTrialWatch(
     refused: http.refused,
     changes: watcher.applied,
     stale: watcher.stale,
+    retries: retries(),
   };
 }
 
