@@ -6,7 +6,7 @@ import type { RunSource } from './runs.js';
  * How often a watcher polls each game feed (plan §4 "Production/simulation
  * scheduler", "Trial mode"). A cadence is the unit the call budget is derived
  * from: `budgetFor` counts the calls a cadence makes over its horizon, so the
- * profile totals in the plan (360 / 180 / 183 since rev 4.12) are computed, never typed.
+ * profile totals (364 / 184 / 187 since the retry allowance became 6) are computed, never typed.
  */
 export interface Cadence {
   /** Poll interval per feed; null = the feed is not polled. */
@@ -52,7 +52,10 @@ export interface Cadence {
   preGameFeeds?: GameFeed[];
   /** Budgeted complete -> closed wait, polled at the `afterCompleteMs` cadence. Default 0. */
   closeWaitMs?: number;
-  /** Budgeted HTTP 429 retries (each is a counted call). Default 0. */
+  /**
+   * Budgeted retries, each a counted call: cadence HTTP 429s (one retry each) and closing-set
+   * failures (up to two retries per closing feed). Default 0.
+   */
   retryAllowance?: number;
 }
 
@@ -67,13 +70,15 @@ const PBP_CLOSING: GameFeed[] = ['pbp', 'summary', 'boxscore'];
 /**
  * Trial/production pacing after `complete`: the summary alone every 5 min, the budgeted wait for
  * `closed` (rev 4.12: 120 min, Sportradar's NCAAWB figure; the first NCAAWB game waited 71 min,
- * the 30 min of rev 4.9 covered the WNBA's 13 and 25), and 429 retries (rev 4.9).
+ * the 30 min of rev 4.9 covered the WNBA's 13 and 25), and retries (rev 4.9: 2 for 429s; owner
+ * decision 2026-11-03: 6, since closing fetches retry any failure twice per feed, so a two-feed
+ * closing set alone can spend 4).
  */
 const AFTER_COMPLETE = {
   afterCompleteMs: 5 * MIN,
   afterCompleteFeeds: ['summary'] as GameFeed[],
   closeWaitMs: 120 * MIN,
-  retryAllowance: 2,
+  retryAllowance: 6,
 };
 /** Before play starts, one feed every 5 min (rev 4.12 (1)). */
 const PRE_GAME_MS = 5 * MIN;
@@ -151,7 +156,7 @@ export interface Budget {
   /** Polls while waiting for `closed` after `complete` (rev 4.9). */
   afterComplete: number;
   closing: number;
-  /** Budgeted 429 retries (rev 4.9). */
+  /** Budgeted retries: cadence 429s and closing-set failures (`retryAllowance`). */
   retries: number;
   total: number;
 }
@@ -159,7 +164,7 @@ export interface Budget {
 /**
  * Calls a cadence makes: every periodic feed from its first poll (t=0, the summary at its
  * offset) through the horizon inclusive, one-offs, the complete -> closed wait at the slower
- * cadence (only the `afterCompleteFeeds`), the closing set and the 429 allowance. Rev 4.9: the
+ * cadence (only the `afterCompleteFeeds`), the closing set and the retry allowance. Rev 4.9: the
  * horizon end is inclusive (the G3 run made 301 pbp calls in 2.5 h at 30 s, the old formula
  * counted 300); rev 4.12 counts the wait's end the same way (a summary polled at the horizon's
  * end and 120 min later is 25 polls). The horizon is counted at the live cadence, so the slower pre-game polling of

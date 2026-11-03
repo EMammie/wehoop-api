@@ -12,37 +12,37 @@ import { ncaawbAdapter } from '../../../src/leagues/ncaawb/adapter.js';
 import { wnbaAdapter } from '../../../src/leagues/wnba/adapter.js';
 
 describe('trial profiles: budgets derived from the cadence constants (plan §4)', () => {
-  it('full 360: pbp every 30 s + statistics (summary) every 5 min over 2.5 h, a 120-min complete -> closed wait on the summary alone, the closing pair and 429 allowance (rev 4.12)', () => {
+  it('full 364: pbp every 30 s + statistics (summary) every 5 min over 2.5 h, a 120-min complete -> closed wait on the summary alone, the closing pair and retry allowance (rev 4.12)', () => {
     expect(budgetFor(PROFILE_CADENCE.full)).toEqual({
       pbp: 301, // t=0 through 2.5 h inclusive (the G3 run made 301)
       summary: 30, // first at +15 s
       boxscore: 0,
       afterComplete: 25, // 120 min at one summary per 5 min, both ends; the pbp pauses
       closing: 2, // the feed that did not report closed, then the boxscore
-      retries: 2,
-      total: 360,
+      retries: 6,
+      total: 364,
     });
   });
-  it('extended 180: summary every 60 s + one boxscore at +120 min, the complete -> closed wait, closing and 429 allowance', () => {
+  it('extended 184: summary every 60 s + one boxscore at +120 min, the complete -> closed wait, closing and retry allowance', () => {
     expect(budgetFor(PROFILE_CADENCE.extended)).toEqual({
       pbp: 0,
       summary: 151,
       boxscore: 1,
       afterComplete: 25,
       closing: 1, // the summary or the boxscore reported closed; the other one
-      retries: 2,
-      total: 180,
+      retries: 6,
+      total: 184,
     });
   });
-  it('lean-full 183: pbp every 60 s + statistics every 10 min, the complete -> closed wait, closing and 429 allowance', () => {
+  it('lean-full 187: pbp every 60 s + statistics every 10 min, the complete -> closed wait, closing and retry allowance', () => {
     expect(budgetFor(PROFILE_CADENCE['lean-full'])).toEqual({
       pbp: 151,
       summary: 15, // first at +30 s
       boxscore: 0,
       afterComplete: 13, // the summary stays at 10 min
       closing: 2,
-      retries: 2,
-      total: 183,
+      retries: 6,
+      total: 187,
     });
   });
   it('the slow phases poll one feed each: the pbp before play, the summary after complete', () => {
@@ -58,11 +58,13 @@ describe('trial profiles: budgets derived from the cadence constants (plan §4)'
       closing: ['summary', 'boxscore'],
     });
   });
-  it('two full games plus one extended fit the 900 spendable calls of a 1,000-call trial', () => {
+  it('two full games plus one extended no longer fit the 900 spendable calls of a 1,000-call trial (12 over)', () => {
+    // They fitted exactly (900) with a retry allowance of 2; the allowance of 6 (owner decision
+    // 2026-11-03) adds 4 calls per reservation.
     const two = 2 * budgetFor(PROFILE_CADENCE.full).total;
     const one = budgetFor(PROFILE_CADENCE.extended).total;
-    expect(two + one).toBe(900);
-    expect(1000 - 100 - (two + one)).toBeGreaterThanOrEqual(0); // 100 = default reserve
+    expect(two + one).toBe(912);
+    expect(1000 - 100 - (two + one)).toBe(-12); // 100 = default reserve
   });
 });
 
