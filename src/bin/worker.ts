@@ -14,7 +14,12 @@ import {
 import { QuotaGuard, QuotaRefusedError } from '../ingest/quota-guard.js';
 import { ReferenceIngester } from '../ingest/reference.js';
 import { endRun, startRun } from '../ingest/runs.js';
-import { assertSpeedAllowed, resolveGame, runTrialWatch } from '../ingest/trial-mode.js';
+import {
+  assertSpeedAllowed,
+  resolveGame,
+  runTrialWatch,
+  type TrialWatchOutcome,
+} from '../ingest/trial-mode.js';
 import { LeagueCodeSchema } from '../leagues/codes.js';
 import { adapterFor } from '../leagues/registry.js';
 import { OutboxPublisher } from '../live/outbox-publisher.js';
@@ -129,6 +134,11 @@ async function main() {
   const db = createDb(config.db.url);
   let shuttingDown = false;
   let stopRequested = false;
+  /**
+   * Set once a trial watch has failed: the exit code the process owes (69 quota refusal, 1
+   * otherwise). A session loss during the error tail exits with it instead of a plain 1.
+   */
+  let watchExitCode: number | null = null;
   const shutdown = async (reason: string, code = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -138,7 +148,7 @@ async function main() {
   const session = createSessionDb(config.db.sessionUrl, () => {
     if (!shuttingDown) {
       log.error('session connection lost; stopping ingestion');
-      void shutdown('session_connection_lost', 1);
+      void shutdown('session_connection_lost', watchExitCode ?? 1);
     }
   });
   // After a kill -9 the previous worker's session lock lingers until Postgres notices the dead
@@ -289,8 +299,11 @@ async function main() {
       process.exit(66);
     }
     let gameIdKnown: string | null = null;
+    let outcome: TrialWatchOutcome | null = null;
+    let failure: unknown = null;
+    // Only runTrialWatch's own errors take the error path; each path runs its tail once.
     try {
-      const outcome = await runTrialWatch(
+      outcome = await runTrialWatch(
         {
           db,
           log,
@@ -316,6 +329,10 @@ async function main() {
           untilClosed,
         },
       );
+    } catch (err) {
+      failure = err;
+    }
+    if (outcome) {
       pulse.stop();
       const left = await finalDrain();
       if (gameIdKnown) await pulse.sendOnce(gameIdKnown);
@@ -338,35 +355,38 @@ async function main() {
         'trial watch finished',
       );
       await exitAfterTail(left);
-    } catch (err) {
-      const code = err instanceof QuotaRefusedError ? 69 : 1;
-      if (err instanceof QuotaRefusedError) {
-        log.error({ product: err.product, reason: err.reason, status: err.status }, err.message);
-      } else {
-        log.error({ err }, 'trial watch failed');
-      }
-      // The changes already committed still reach subscribers: the same tail as a clean end (final
-      // drain, then the closing pulse), best effort, and the exit code stays the watch's own.
-      try {
-        pulse.stop();
-        const left = await finalDrain();
-        if (gameIdKnown) await pulse.sendOnce(gameIdKnown);
-        publisher.stop();
-        if (left.pending > 0) {
-          log.error(
-            { pending: left.pending, dead: left.dead, drainTimeoutMs },
-            'exiting with unpublished outbox rows; a restart publishes them',
-          );
-        }
-      } catch (tailErr) {
-        log.error({ err: tailErr }, 'final drain after a failed watch failed');
-      }
-      shuttingDown = true;
-      await session.end({ timeout: 2 }).catch(() => undefined);
-      await db.end({ timeout: 2 }).catch(() => undefined);
-      process.exit(code);
+      return;
     }
-    return;
+    const code = failure instanceof QuotaRefusedError ? 69 : 1;
+    watchExitCode = code;
+    if (failure instanceof QuotaRefusedError) {
+      log.error(
+        { product: failure.product, reason: failure.reason, status: failure.status },
+        failure.message,
+      );
+    } else {
+      log.error({ err: failure }, 'trial watch failed');
+    }
+    // The changes already committed still reach subscribers: the same tail as a clean end (final
+    // drain, then the closing pulse), best effort, and the exit code stays the watch's own.
+    try {
+      pulse.stop();
+      const left = await finalDrain();
+      if (gameIdKnown) await pulse.sendOnce(gameIdKnown);
+      publisher.stop();
+      if (left.pending > 0) {
+        log.error(
+          { pending: left.pending, dead: left.dead, drainTimeoutMs },
+          'exiting with unpublished outbox rows; a restart publishes them',
+        );
+      }
+    } catch (tailErr) {
+      log.error({ err: tailErr }, 'final drain after a failed watch failed');
+    }
+    shuttingDown = true;
+    await session.end({ timeout: 2 }).catch(() => undefined);
+    await db.end({ timeout: 2 }).catch(() => undefined);
+    process.exit(code);
   }
 
   const run = await startRun(db, {
