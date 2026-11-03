@@ -338,15 +338,32 @@ async function main() {
       );
       await exitAfterTail(left);
     } catch (err) {
+      const code = err instanceof QuotaRefusedError ? 69 : 1;
       if (err instanceof QuotaRefusedError) {
         log.error({ product: err.product, reason: err.reason, status: err.status }, err.message);
-        shuttingDown = true;
-        await session.end({ timeout: 2 });
-        await db.end({ timeout: 2 });
-        process.exit(69);
+      } else {
+        log.error({ err }, 'trial watch failed');
       }
-      log.error({ err }, 'trial watch failed');
-      process.exit(1);
+      // The changes already committed still reach subscribers: the same tail as a clean end (final
+      // drain, then the closing pulse), best effort, and the exit code stays the watch's own.
+      try {
+        pulse.stop();
+        const left = await finalDrain();
+        if (gameIdKnown) await pulse.sendOnce(gameIdKnown);
+        publisher.stop();
+        if (left.pending > 0) {
+          log.error(
+            { pending: left.pending, dead: left.dead, drainTimeoutMs },
+            'exiting with unpublished outbox rows; a restart publishes them',
+          );
+        }
+      } catch (tailErr) {
+        log.error({ err: tailErr }, 'final drain after a failed watch failed');
+      }
+      shuttingDown = true;
+      await session.end({ timeout: 2 }).catch(() => undefined);
+      await db.end({ timeout: 2 }).catch(() => undefined);
+      process.exit(code);
     }
     return;
   }
