@@ -25,6 +25,12 @@ export interface ScriptedProvider {
   openStreams: number;
   /** Called before a game feed is answered (after `docs` is read, so it may switch the phase). */
   onServe: ((feed: GameFeedName, doc: unknown) => void) | null;
+  /** Fault injection: a Response returned here is answered instead of the document (a 429, a 503). */
+  fault: ((feed: GameFeedName) => Response | undefined) | null;
+  /** Awaited before a push stream is answered; `n` counts that feed's connections (1 = first). */
+  onStream: ((feed: 'push_events' | 'push_clock', n: number) => Promise<void> | void) | null;
+  /** Cut every open stream of one feed (the client sees the body error and reconnects). */
+  dropStreams(feed: 'push_events' | 'push_clock'): number;
 }
 
 const enc = new TextEncoder();
@@ -32,7 +38,20 @@ const enc = new TextEncoder();
 export function scriptedProvider(opts: { heartbeatMs?: number } = {}): ScriptedProvider {
   const heartbeatMs = opts.heartbeatMs ?? 200;
   let lastAt: number | null = null;
+  const open = new Map<(err: unknown | null) => void, 'push_events' | 'push_clock'>();
+  const connections = { push_events: 0, push_clock: 0 };
   const p: ScriptedProvider = {
+    onStream: null,
+    fault: null,
+    dropStreams(feed) {
+      let n = 0;
+      for (const [end, f] of [...open]) {
+        if (f !== feed) continue;
+        end(new Error('scripted provider: stream dropped'));
+        n++;
+      }
+      return n;
+    },
     docs: { pbp: null, summary: null, boxscore: null },
     requests: [],
     tooClose: 0,
@@ -50,16 +69,22 @@ export function scriptedProvider(opts: { heartbeatMs?: number } = {}): ScriptedP
       if (stream) {
         const feed = stream[1] === 'events' ? 'push_events' : 'push_clock';
         p.requests.push({ feed, at: now });
+        connections[feed]++;
+        await p.onStream?.(feed, connections[feed]);
         const signal = init?.signal ?? null;
         let timer: ReturnType<typeof setInterval> | undefined;
+        /** Stop heartbeats and forget the stream; error the body unless the client cancelled it. */
+        let finish: (err: unknown | null) => void = () => undefined;
         const body = new ReadableStream<Uint8Array>({
           start(controller) {
             p.openStreams++;
-            const end = (err: unknown) => {
+            finish = (err) => {
               if (timer === undefined) return;
               clearInterval(timer);
               timer = undefined;
+              open.delete(finish);
               p.openStreams--;
+              if (err === null) return;
               try {
                 controller.error(err);
               } catch {
@@ -72,18 +97,15 @@ export function scriptedProvider(opts: { heartbeatMs?: number } = {}): ScriptedP
                   enc.encode(`${JSON.stringify({ heartbeat: { interval: heartbeatMs } })}\n`),
                 );
               } catch {
-                end(new Error('stream closed'));
+                finish(new Error('stream closed'));
               }
             }, heartbeatMs);
-            if (signal?.aborted) end(signal.reason);
-            else signal?.addEventListener('abort', () => end(signal.reason), { once: true });
+            open.set(finish, feed);
+            if (signal?.aborted) finish(signal.reason);
+            else signal?.addEventListener('abort', () => finish(signal.reason), { once: true });
           },
           cancel() {
-            if (timer !== undefined) {
-              clearInterval(timer);
-              timer = undefined;
-              p.openStreams--;
-            }
+            finish(null);
           },
         });
         return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
@@ -97,6 +119,8 @@ export function scriptedProvider(opts: { heartbeatMs?: number } = {}): ScriptedP
       p.requests.push({ feed, at: now });
       const doc = p.docs[feed];
       p.onServe?.(feed, doc);
+      const override = p.fault?.(feed);
+      if (override) return override;
       if (doc === null) return new Response(`{"message":"no ${feed}"}`, { status: 404 });
       return new Response(JSON.stringify(doc), {
         status: 200,
