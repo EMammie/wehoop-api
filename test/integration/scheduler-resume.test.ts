@@ -15,6 +15,7 @@ import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
 import { contentHash } from '../../src/model/content-hash.js';
 import { PbpDocumentSchema } from '../../src/providers/sportradar/schemas/pbp.js';
 import { SummaryDocumentSchema } from '../../src/providers/sportradar/schemas/summary.js';
+import { parkTestGames } from '../helpers/cleanup.js';
 import {
   apply,
   counts,
@@ -55,11 +56,39 @@ type Json = Record<string, unknown> & {
   };
 };
 
+/** Every game this file creates; afterAll parks those not final (parkTestGames). */
+const created: Array<{ gameId: string; providerGameId: string }> = [];
+async function seed() {
+  const g = await seedGame(db, pbpClosed());
+  created.push(g);
+  return g;
+}
+
 beforeAll(async () => {
   await db`select 1`;
 });
 afterAll(async () => {
-  await db.end();
+  try {
+    const ids = created.map((g) => g.gameId);
+    await parkTestGames(db, ids);
+    // Nothing this file made is left for a scheduler (the validator's rehearsal) to pick up:
+    // checked with the scheduler's own loader and decision.
+    const now = new Date();
+    const loaded = (
+      await loadSchedulerGames(db, 'wnba', {
+        from: new Date(now.getTime() - 6 * 3_600_000),
+        to: new Date(now.getTime() + 2 * 86_400_000),
+        completeFrom: new Date(now.getTime() - COMPLETE_REWATCH_CAP_MS),
+      })
+    ).filter((g) => ids.includes(g.id));
+    const left = gamesToWatch(loaded, now, new Set(), {
+      watchLeadMs: 10 * 60_000,
+      maxLateStartMs: 6 * 3_600_000,
+    });
+    if (left.length > 0) throw new Error(`test games left watchable: ${left.map((g) => g.id)}`);
+  } finally {
+    await db.end();
+  }
 });
 
 describe('scheduler resumes a complete game after a worker restart (review should 1)', () => {
@@ -68,7 +97,7 @@ describe('scheduler resumes a complete game after a worker restart (review shoul
     // the scheduled floor (+270 min) has passed, so only the completion anchor (the moment
     // generation 1 records `complete`, + 120 min) keeps it resumable.
     // The documents carry the same tip-off (they write games.scheduled_at).
-    const { gameId, providerGameId } = await seedGame(db, pbpClosed());
+    const { gameId, providerGameId } = await seed();
     const tipOff = new Date(Date.now() - 5 * 3_600_000).toISOString();
     await db`update public.games set scheduled_at = ${tipOff} where id = ${gameId}`;
     const doc = (feed: string) => ({
@@ -277,7 +306,7 @@ describe('scheduler resumes a complete game after a worker restart (review shoul
     const now = new Date();
     /** A game whose tip-off was `hoursAgo` ago, taken to `status` by one applied pbp document. */
     const make = async (hoursAgo: number, status: string) => {
-      const { gameId, providerGameId } = await seedGame(db, pbpClosed());
+      const { gameId, providerGameId } = await seed();
       const doc = {
         ...(relabelDoc(fixture(`${R}-pbp-closed.json`), REAL_ID, providerGameId) as Json),
         scheduled: new Date(now.getTime() - hoursAgo * 3_600_000).toISOString(),
@@ -313,5 +342,79 @@ describe('scheduler resumes a complete game after a worker restart (review shoul
         maxLateStartMs: 6 * 3_600_000,
       }),
     ).toEqual([g]);
+  });
+
+  /** Apply relabelled pbp documents in order, one transaction each, as one replay generation. */
+  async function applyInOrder(
+    gameId: string,
+    providerGameId: string,
+    docs: Array<{ fixture: string; status: string; homeBonus?: number }>,
+  ) {
+    const run = await replayRun(db, gameId);
+    for (const d of docs) {
+      const doc = relabelDoc(
+        fixture(`${R}-pbp-${d.fixture}.json`),
+        REAL_ID,
+        providerGameId,
+      ) as Json & {
+        home: { points: number };
+      };
+      doc.status = d.status;
+      doc.scheduled = new Date(Date.now() - 3_600_000).toISOString();
+      doc.home.points += d.homeBonus ?? 0;
+      const nd = wnbaAdapter.normalizePbp(PbpDocumentSchema.parse(doc));
+      const out = await apply({ db, log }, gameId, nd, observation(run, nd, new Date()));
+      expect(out.outcome, `${d.fixture} ${d.status}`).not.toBe('stale');
+    }
+  }
+  const statusRows = async (gameId: string) =>
+    db<{ seq: string; status: string; at: Date }[]>`
+      select seq::text, body->>'status' as status, created_at as at from public.game_changes
+      where game_id = ${gameId} and change_type = 'status' order by seq`;
+  const loadedOne = async (gameId: string) => {
+    const now = Date.now();
+    const rows = await loadSchedulerGames(db, 'wnba', {
+      from: new Date(now - 6 * 3_600_000),
+      to: new Date(now + 2 * 86_400_000),
+      completeFrom: new Date(now - COMPLETE_REWATCH_CAP_MS),
+    });
+    return rows.find((g) => g.id === gameId);
+  };
+
+  it('re-opened play: complete -> inprogress -> complete anchors on the second completion', async () => {
+    const { gameId, providerGameId } = await seed();
+    // halftime events reported complete, then more plays (newer events, so not a lagging view)
+    // re-open it, then the full game is complete again.
+    await applyInOrder(gameId, providerGameId, [
+      { fixture: 'halftime', status: 'complete' },
+      { fixture: 'closed', status: 'inprogress' },
+      { fixture: 'closed', status: 'complete' },
+    ]);
+    const rows = await statusRows(gameId);
+    const seen = rows.map((r) => r.status).filter((st, i, a) => i === 0 || a[i - 1] !== st);
+    expect(seen.slice(-3)).toEqual(['complete', 'inprogress', 'complete']);
+    const lastOther = Math.max(
+      ...rows.filter((r) => r.status !== 'complete').map((r) => Number(r.seq)),
+    );
+    const second = rows.find((r) => r.status === 'complete' && Number(r.seq) > lastOther);
+    const first = rows.find((r) => r.status === 'complete');
+    expect(second && first && second.at.getTime() > first.at.getTime()).toBe(true);
+    const g = await loadedOne(gameId);
+    expect(g?.status).toBe('complete');
+    expect(g?.completedAt?.getTime()).toBe(second?.at.getTime());
+  });
+
+  it('a score correction while complete writes a second complete status row that does not move the anchor', async () => {
+    const { gameId, providerGameId } = await seed();
+    await applyInOrder(gameId, providerGameId, [
+      { fixture: 'closed', status: 'complete' },
+      { fixture: 'closed', status: 'complete', homeBonus: 1 },
+    ]);
+    const complete = (await statusRows(gameId)).filter((r) => r.status === 'complete');
+    expect(complete).toHaveLength(2);
+    const [first, second] = complete;
+    expect(second && first && second.at.getTime() > first.at.getTime()).toBe(true);
+    const g = await loadedOne(gameId);
+    expect(g?.completedAt?.getTime()).toBe(first?.at.getTime());
   });
 });
