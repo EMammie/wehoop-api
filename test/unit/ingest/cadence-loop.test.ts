@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ZodType } from 'zod';
-import { budgetFor } from '../../../src/ingest/cadence.js';
+import { budgetFor, PROFILE_CADENCE } from '../../../src/ingest/cadence.js';
 import {
   cadenceLoop,
   type DocumentSource,
@@ -81,7 +81,113 @@ describe('cadenceLoop and the quota guard', () => {
       { untilClosed: true, isStopped: () => false },
     );
     expect(src.feeds).toEqual(['pbp', 'summary', 'summary', 'summary', 'boxscore', 'boxscore']);
-    expect(out).toMatchObject({ status: 'closed', failed: 0, retried429: 3, calls: 3 });
+    expect(out).toMatchObject({ status: 'closed', failed: 0, retried429: 3, okFetches: 3 });
+  });
+
+  it('a closing fetch retries any other failure twice (timeout, 5xx, parse), each through the next slot', async () => {
+    const closed = {
+      process: async () => ({ gameId: 'g', status: 'closed', result: { outcome: 'applied' } }),
+    } as unknown as GameWatcher;
+    // pbp says closed | summary: 503, 503, 503 (gives up after 2 retries) | boxscore: 503, ok.
+    const src = source(['ok', 'transient', 'transient', 'transient', 'transient', 'ok']);
+    const retries: string[] = [];
+    const out = await cadenceLoop(
+      closed,
+      src,
+      silent,
+      { ...cadence, closing: ['summary', 'boxscore'] },
+      {
+        untilClosed: true,
+        isStopped: () => false,
+        onRetry: (kind, feed) => retries.push(`${kind}:${feed}`),
+      },
+    );
+    expect(retries).toEqual(['closing:summary', 'closing:summary', 'closing:boxscore']);
+    expect(src.feeds).toEqual(['pbp', 'summary', 'summary', 'summary', 'boxscore', 'boxscore']);
+    expect(out).toMatchObject({
+      status: 'closed',
+      okFetches: 2,
+      failed: 1,
+      retried429: 0,
+      retriedClosing: 3,
+    });
+  });
+
+  it('a quota refusal during the closing set is not retried; it ends the watch', async () => {
+    const closed = {
+      process: async () => ({ gameId: 'g', status: 'closed', result: { outcome: 'applied' } }),
+    } as unknown as GameWatcher;
+    const src = source(['ok', 'refused', 'ok']);
+    await expect(
+      cadenceLoop(
+        closed,
+        src,
+        silent,
+        { ...cadence, closing: ['summary', 'boxscore'] },
+        { untilClosed: true, isStopped: () => false },
+      ),
+    ).rejects.toBeInstanceOf(QuotaRefusedError);
+    expect(src.feeds).toEqual(['pbp', 'summary']);
+  });
+
+  it("a cadence fetch keeps today's rule: a non-429 failure waits for its next due time", async () => {
+    const src = source(['transient', 'refused']);
+    await expect(
+      cadenceLoop(watcher, src, silent, cadence, { untilClosed: false, isStopped: () => false }),
+    ).rejects.toBeInstanceOf(QuotaRefusedError);
+    expect(src.feeds).toEqual(['pbp', 'pbp']); // the second pbp is the next due time, not a retry
+  });
+
+  it('a retry the quota guard refuses was never sent: it is not reported as a retry', async () => {
+    const closed = {
+      process: async () => ({ gameId: 'g', status: 'closed', result: { outcome: 'applied' } }),
+    } as unknown as GameWatcher;
+    // pbp says closed | closing summary: 503, retry 503 (sent: reported), retry refused (not sent).
+    const src = source(['ok', 'transient', 'transient', 'refused']);
+    const retries: string[] = [];
+    await expect(
+      cadenceLoop(
+        closed,
+        src,
+        silent,
+        { ...cadence, closing: ['summary', 'boxscore'] },
+        {
+          untilClosed: true,
+          isStopped: () => false,
+          onRetry: (kind, feed) => retries.push(`${kind}:${feed}`),
+        },
+      ),
+    ).rejects.toBeInstanceOf(QuotaRefusedError);
+    expect(retries).toEqual(['closing:summary']);
+    // The same for a cadence 429 whose retry is refused.
+    const cadenceRetries: string[] = [];
+    await expect(
+      cadenceLoop(watcher, source(['429', 'refused']), silent, cadence, {
+        untilClosed: false,
+        isStopped: () => false,
+        onRetry: (kind) => cadenceRetries.push(kind),
+      }),
+    ).rejects.toBeInstanceOf(QuotaRefusedError);
+    expect(cadenceRetries).toEqual([]);
+  });
+
+  it('a closing document that fails to apply is not refetched (only the fetch is retried)', async () => {
+    const failingSummary = {
+      process: async (feed: string) => {
+        if (feed === 'summary') throw new Error('connection terminated while applying');
+        return { gameId: 'g', status: 'closed', result: { outcome: 'applied' } };
+      },
+    } as unknown as GameWatcher;
+    const src = source([]);
+    const out = await cadenceLoop(
+      failingSummary,
+      src,
+      silent,
+      { ...cadence, closing: ['summary', 'boxscore'] },
+      { untilClosed: true, isStopped: () => false },
+    );
+    expect(src.feeds).toEqual(['pbp', 'summary', 'boxscore']);
+    expect(out).toMatchObject({ okFetches: 3, failed: 1, retriedClosing: 0, retried429: 0 });
   });
 
   it('a 429 while the watch is stopping is not retried', async () => {
@@ -100,13 +206,13 @@ describe('cadenceLoop and the quota guard', () => {
       isStopped: () => stopped,
     });
     expect(src.calls).toBe(1);
-    expect(out).toMatchObject({ calls: 0, failed: 1, retried429: 0 });
+    expect(out).toMatchObject({ okFetches: 0, failed: 1, retried429: 0 });
   });
 });
 
 describe('cadenceLoop pacing (rev 4.9)', () => {
   /** A fake clock: sleep advances it; the provider status follows the clock. */
-  function clocked(statusAt: (t: number) => string) {
+  function clocked(statusAt: (t: number, feed: string) => string) {
     let t = 0;
     const calls: Array<{ feed: string; at: number }> = [];
     const src: DocumentSource = {
@@ -118,7 +224,11 @@ describe('cadenceLoop pacing (rev 4.9)', () => {
       },
     };
     const w = {
-      process: async () => ({ gameId: 'g', status: statusAt(t), result: { outcome: 'applied' } }),
+      process: async (feed: string) => ({
+        gameId: 'g',
+        status: statusAt(t, feed),
+        result: { outcome: 'applied' },
+      }),
     } as unknown as GameWatcher;
     const opts = {
       untilClosed: true,
@@ -183,15 +293,16 @@ describe('cadenceLoop pacing (rev 4.9)', () => {
     expect(pbpAt.every((t) => t % 30_000 === 0)).toBe(true); // still on the pbp grid
   });
 
-  it('a 150-min game with a 30-min complete -> closed wait makes exactly the budgeted calls', async () => {
+  it('a 150-min game with a 30-min complete -> closed wait stays inside the budget', async () => {
     const budgeted = { ...paced, closeWaitMs: 30 * MIN };
     const { src, w, opts, calls } = clocked((t) =>
       t >= 180 * MIN ? 'closed' : t >= 150 * MIN ? 'complete' : 'inprogress',
     );
     await cadenceLoop(w, src, silent, budgeted, opts);
     const b = budgetFor(budgeted);
-    expect(b).toMatchObject({ pbp: 301, summary: 30, afterComplete: 12, closing: 0, retries: 0 });
-    expect(calls.length).toBe(b.total);
+    expect(b).toMatchObject({ pbp: 301, summary: 30, afterComplete: 14, closing: 0, retries: 0 });
+    expect(calls.length).toBeLessThanOrEqual(b.total);
+    expect(calls.length).toBe(b.total - 2); // each feed's inclusive last wait slot falls after closed
   });
 
   it('the closing pair waits the summary offset after the pbp that reported closed', async () => {
@@ -201,5 +312,293 @@ describe('cadenceLoop pacing (rev 4.9)', () => {
     const lastPbp = calls.filter((c) => c.feed === 'pbp').at(-1)?.at ?? 0;
     expect(closing.map((c) => c.feed)).toEqual(['summary', 'boxscore']);
     expect((closing[0]?.at ?? 0) - lastPbp).toBeGreaterThanOrEqual(15_000);
+  });
+});
+
+describe('cadenceLoop slow phases (rev 4.12)', () => {
+  const MIN = 60_000;
+  function clocked(
+    statusAt: (t: number, feed: string) => string,
+    lastStatus: string | null = null,
+  ) {
+    let t = 0;
+    const calls: Array<{ feed: string; at: number }> = [];
+    const src: DocumentSource = {
+      observationSource: 'rest',
+      async fetch<T>(feed: string, _schema: ZodType<T>): Promise<FetchedDocument<T>> {
+        calls.push({ feed, at: t });
+        const d = new Date(t);
+        return { data: {} as T, requestedAt: d, receivedAt: d, bytes: 2, rawText: '{}' };
+      },
+    };
+    const w = {
+      lastStatus,
+      process: async (feed: string) => ({
+        gameId: 'g',
+        status: statusAt(t, feed),
+        result: { outcome: 'applied' },
+      }),
+    } as unknown as GameWatcher;
+    const opts = {
+      untilClosed: true,
+      isStopped: () => false,
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += Math.max(ms, 1);
+      },
+    };
+    return { src, w, opts, calls };
+  }
+  const at = (calls: Array<{ feed: string; at: number }>, feed: string) =>
+    calls.filter((c) => c.feed === feed).map((c) => c.at);
+  const minGap = (a: number[], b: number[]) =>
+    Math.min(...a.flatMap((x) => b.map((y) => Math.abs(x - y))));
+
+  it('before play only the pbp polls, every 5 min; the first inprogress restores both live grids', async () => {
+    // Tip 27 min late (NCAAWB 2026-11-01): created until 27:00, inprogress until 60 min, closed by the pbp.
+    const { src, w, opts, calls } = clocked((t) =>
+      t >= 60 * MIN ? 'closed' : t >= 27 * MIN ? 'inprogress' : 'created',
+    );
+    await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    const pbp = at(calls, 'pbp');
+    const summary = at(calls, 'summary');
+    // pbp at 0, 5, 10, 15, 20, 25, then 30:00 sees play (the 5-min slot after 25:00).
+    expect(pbp.filter((x) => x < 30 * MIN)).toEqual([0, 5, 10, 15, 20, 25].map((m) => m * MIN));
+    expect(summary.filter((x) => x <= 30 * MIN)).toEqual([]); // the summary sat out the pre-game
+    expect(pbp).toContain(30 * MIN + 30_000); // back on the 30 s grid
+    expect(summary[0]).toBe(30 * MIN + 15_000); // first summary slot of its own grid after play started
+    expect(minGap(pbp, summary)).toBeGreaterThanOrEqual(15_000);
+    expect(pbp.every((x) => x % 30_000 === 0)).toBe(true);
+    expect(calls.filter((c) => c.at < 30 * MIN).length).toBe(6); // the live cadence would make 60
+  });
+
+  it('after complete only the summary polls; when it reports closed the closing set is the pbp and the boxscore', async () => {
+    // inprogress until 20 min; complete; the summary says closed from 60 min, the pbp never does.
+    const { src, w, opts, calls } = clocked((t, feed) =>
+      t >= 20 * MIN ? (feed === 'summary' && t >= 60 * MIN ? 'closed' : 'complete') : 'inprogress',
+    );
+    await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    const pbp = at(calls, 'pbp');
+    const summary = at(calls, 'summary');
+    const closedAt = summary.find((x) => x >= 60 * MIN) ?? 0;
+    expect(closedAt).toBe(60 * MIN + 15_000);
+    // While complete: no pbp until the closing one; summaries 5 min apart.
+    expect(pbp.filter((x) => x > 20 * MIN && x <= closedAt)).toEqual([]);
+    const waiting = summary.filter((x) => x > 20 * MIN);
+    for (let i = 1; i < waiting.length; i++)
+      expect((waiting[i] ?? 0) - (waiting[i - 1] ?? 0)).toBe(5 * MIN);
+    // Closing: the pbp 15 s after the summary that said closed, then the boxscore; no second summary.
+    expect(calls.slice(-2)).toEqual([
+      { feed: 'pbp', at: closedAt + 15_000 },
+      { feed: 'boxscore', at: closedAt + 15_000 },
+    ]);
+    expect(summary.at(-1)).toBe(closedAt);
+  });
+
+  it('when the pbp reports closed the closing set is the summary and the boxscore, as before', async () => {
+    const { src, w, opts, calls } = clocked((t) => (t >= 10 * MIN ? 'closed' : 'inprogress'));
+    await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    expect(calls.slice(-2).map((c) => c.feed)).toEqual(['summary', 'boxscore']);
+    expect(at(calls, 'pbp').at(-1)).toBe(10 * MIN);
+  });
+
+  it('a 150-min game with a 120-min complete -> closed wait stays inside the full budget', async () => {
+    const { src, w, opts, calls } = clocked((t, feed) =>
+      t >= 150 * MIN
+        ? feed === 'summary' && t >= 270 * MIN
+          ? 'closed'
+          : 'complete'
+        : 'inprogress',
+    );
+    await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    const b = budgetFor(PROFILE_CADENCE.full);
+    expect(calls.length).toBeLessThanOrEqual(b.total - b.retries);
+    expect(calls.filter((c) => c.at > 150 * MIN && c.feed === 'pbp').length).toBe(1); // the closing pbp
+  });
+
+  it('a watch attached to a game stored as complete starts in the slow phase: no pbp before closed', async () => {
+    // Stored complete; the summary reports closed from 30 min (the real watcher then reports the
+    // stored closed for every later document, the closing pbp included).
+    const { src, w, opts, calls } = clocked(
+      (t, feed) =>
+        t >= 30 * MIN && (feed === 'summary' || t > 30 * MIN + 15_000) ? 'closed' : 'complete',
+      'complete',
+    );
+    const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    expect(calls[0]).toEqual({ feed: 'summary', at: 15_000 });
+    const closedAt = 30 * MIN + 15_000;
+    expect(at(calls, 'pbp')).toEqual([closedAt + 15_000]); // only the closing pbp
+    expect(at(calls, 'summary')).toEqual([0, 5, 10, 15, 20, 25, 30].map((m) => m * MIN + 15_000));
+    expect(out.status).toBe('closed');
+  });
+});
+
+describe('cadenceLoop terminal non-played statuses (postponed, cancelled, unnecessary)', () => {
+  const MIN = 60_000;
+  function clocked(statusAt: (t: number, feed: string) => string, untilClosed = true) {
+    let t = 0;
+    const calls: Array<{ feed: string; at: number }> = [];
+    const src: DocumentSource = {
+      observationSource: 'rest',
+      async fetch<T>(feed: string, _schema: ZodType<T>): Promise<FetchedDocument<T>> {
+        calls.push({ feed, at: t });
+        const d = new Date(t);
+        return { data: {} as T, requestedAt: d, receivedAt: d, bytes: 2, rawText: '{}' };
+      },
+    };
+    const w = {
+      process: async (feed: string) => ({
+        gameId: 'g',
+        status: statusAt(t, feed),
+        result: { outcome: 'applied' },
+      }),
+    } as unknown as GameWatcher;
+    const opts = {
+      untilClosed,
+      isStopped: () => false,
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += Math.max(ms, 1);
+      },
+    };
+    return { src, w, opts, calls };
+  }
+  const at = (calls: Array<{ feed: string; at: number }>, feed: string) =>
+    calls.filter((c) => c.feed === feed).map((c) => c.at);
+
+  it('postponed is terminal: the closing set (minus the reporter) runs, then the watch returns', async () => {
+    // Live until 10 min; the summary at 10:15 reports postponed (the pbp before it did not).
+    const { src, w, opts, calls } = clocked((t, feed) =>
+      t >= 10 * MIN && feed === 'summary'
+        ? 'postponed'
+        : t > 10 * MIN + 15_000
+          ? 'postponed'
+          : 'inprogress',
+    );
+    const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    expect(out.status).toBe('postponed');
+    expect(at(calls, 'summary').at(-1)).toBe(10 * MIN + 15_000);
+    expect(calls.slice(-2)).toEqual([
+      { feed: 'pbp', at: 10 * MIN + 30_000 },
+      { feed: 'boxscore', at: 10 * MIN + 30_000 },
+    ]);
+    expect(calls.filter((c) => c.at > 10 * MIN + 30_000)).toEqual([]); // nothing polls after it
+  });
+
+  it('postponed before play ends the watch without --until closed, after the closing set', async () => {
+    const { src, w, opts, calls } = clocked(() => 'postponed', false);
+    const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    expect(out.status).toBe('postponed');
+    expect(calls).toEqual([
+      { feed: 'pbp', at: 0 },
+      { feed: 'summary', at: 15_000 },
+      { feed: 'boxscore', at: 15_000 },
+    ]);
+  });
+
+  it('cancelled: the closing set (minus the feed that reported it) runs, then the watch returns', async () => {
+    const { src, w, opts, calls } = clocked((t) => (t >= 10 * MIN ? 'cancelled' : 'inprogress'));
+    const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, opts);
+    expect(out.status).toBe('cancelled');
+    expect(at(calls, 'pbp').at(-1)).toBe(10 * MIN);
+    expect(calls.slice(-2)).toEqual([
+      { feed: 'summary', at: 10 * MIN + 15_000 },
+      { feed: 'boxscore', at: 10 * MIN + 15_000 },
+    ]);
+  });
+
+  it('unnecessary reported by the summary of an extended watch: the boxscore closes it, even without --until closed', async () => {
+    const { src, w, opts, calls } = clocked(() => 'unnecessary', false);
+    const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE.extended, opts);
+    expect(out.status).toBe('unnecessary');
+    expect(calls).toEqual([
+      { feed: 'summary', at: 0 },
+      { feed: 'boxscore', at: 0 },
+    ]);
+  });
+
+  // pbp and summary on the same grid, so both are due in every tick (CI race, 2026-11-03).
+  const sameTick = {
+    pbpMs: 30_000,
+    summaryMs: 30_000,
+    boxscoreMs: null,
+    boxscoreAtMs: [5 * MIN],
+    horizonMs: 150 * MIN,
+    closing: ['pbp', 'summary', 'boxscore'] as Array<'pbp' | 'summary' | 'boxscore'>,
+  };
+
+  it('the pbp reports closed with the summary due in the same tick: no cadence summary before the closing set', async () => {
+    const { src, w, opts, calls } = clocked((t) => (t >= 60_000 ? 'closed' : 'inprogress'));
+    const out = await cadenceLoop(w, src, silent, sameTick, opts);
+    expect(out.status).toBe('closed');
+    expect(calls.filter((c) => c.at === 30_000).map((c) => c.feed)).toEqual(['pbp', 'summary']);
+    // The reporter, then the closing summary and boxscore; nothing else in that tick.
+    expect(calls.filter((c) => c.at >= 60_000)).toEqual([
+      { feed: 'pbp', at: 60_000 },
+      { feed: 'summary', at: 60_000 },
+      { feed: 'boxscore', at: 60_000 },
+    ]);
+  });
+
+  it('a terminal non-closed status (cancelled) in the same tick: no cadence fetch or due one-off before the closing set', async () => {
+    // The pbp at 5:00 says cancelled while the summary and the one-off boxscore at +5 min are due.
+    const { src, w, opts, calls } = clocked(
+      (t) => (t >= 5 * MIN ? 'cancelled' : 'inprogress'),
+      false,
+    );
+    const out = await cadenceLoop(w, src, silent, sameTick, opts);
+    expect(out.status).toBe('cancelled');
+    expect(calls.filter((c) => c.at >= 5 * MIN)).toEqual([
+      { feed: 'pbp', at: 5 * MIN },
+      { feed: 'summary', at: 5 * MIN },
+      { feed: 'boxscore', at: 5 * MIN },
+    ]);
+  });
+
+  it('closed without --until closed does not return: it idles at the slow pace until stopped', async () => {
+    const { src, w, opts, calls } = clocked(
+      (t) => (t >= 10 * MIN ? 'closed' : 'inprogress'),
+      false,
+    );
+    let t = 0;
+    const out = await cadenceLoop(w, src, silent, PROFILE_CADENCE.full, {
+      ...opts,
+      now: () => (t = opts.now()),
+      isStopped: () => t >= 60 * MIN, // the operator stops it after 50 min idling on closed
+    });
+    expect(out.status).toBe('closed');
+    expect(out.elapsedMs).toBeGreaterThanOrEqual(60 * MIN);
+    expect(calls.some((c) => c.feed === 'boxscore')).toBe(false); // no closing set
+    const after = calls.filter((c) => c.at > 10 * MIN);
+    expect(after.every((c) => c.feed === 'summary')).toBe(true);
+    expect(after.length).toBeGreaterThan(0);
+  });
+
+  it('a seeded postponed status with every fetch failing runs no closing set and does not return', async () => {
+    let t = 0;
+    const feeds: string[] = [];
+    const failing: DocumentSource = {
+      observationSource: 'rest',
+      async fetch<T>(feed: string, _schema: ZodType<T>): Promise<FetchedDocument<T>> {
+        feeds.push(feed);
+        throw new Error('HTTP 503');
+      },
+    };
+    const w = {
+      lastStatus: 'postponed',
+      process: async () => ({ gameId: 'g', status: 'postponed', result: { outcome: 'applied' } }),
+    } as unknown as GameWatcher;
+    const out = await cadenceLoop(w, failing, silent, PROFILE_CADENCE.full, {
+      untilClosed: true,
+      isStopped: () => t >= 10 * MIN,
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += Math.max(ms, 1);
+      },
+    });
+    expect(out).toMatchObject({ status: 'postponed', okFetches: 0, retriedClosing: 0 });
+    expect(out.elapsedMs).toBeGreaterThanOrEqual(10 * MIN); // ended by the stop, not by itself
+    expect(out.failed).toBe(feeds.length);
+    expect(feeds.includes('boxscore')).toBe(false);
   });
 });
