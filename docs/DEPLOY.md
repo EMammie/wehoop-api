@@ -107,7 +107,9 @@ curl -s https://wehoop-api.fly.dev/health | jq '.worker.lockHeld'   # true
 A restart during a game's complete -> closed wait resumes that game: the scheduler watches a game
 stored as `complete` again, as a new generation starting in the slow after-complete phase, until
 the later of (a) 120 min after the game became complete (`COMPLETE_CLOSE_WAIT_MS`, the budgeted
-wait; the moment is the `created_at` of its first `status` change to `complete` in `game_changes`)
+wait; the moment is the `created_at` of the first `status` change to `complete` in `game_changes`
+after the game's last `status` change to any other status, so play re-opened after `complete`
+restarts it and a score correction while complete does not move it)
 and (b) 270 min after its scheduled tip-off (`COMPLETE_REWATCH_MS`: 150 min horizon + 120 min
 wait, the floor when that moment is unknown), never later than 24 h after the scheduled tip-off
 (`COMPLETE_REWATCH_CAP_MS`). A late tip-off or overtime therefore keeps the whole wait. Expect

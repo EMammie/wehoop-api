@@ -232,9 +232,15 @@ export interface GameRange {
 
 /**
  * The scheduler's games for one league, with `completedAt` for complete games: the `created_at`
- * (database commit time) of the first `status` change to `complete` after the last `status`
- * change to anything else. game_changes is append-only and retention only removes rows of closed
- * games, so the marker survives restarts; play re-opened after `complete` restarts it.
+ * (`now()`, the start of the applyChanges transaction that wrote it, on the database clock) of
+ * the first `status` change to `complete` after the last `status` change to any other status.
+ * game_changes is append-only and retention only removes rows of closed games, so the marker
+ * survives restarts; play re-opened after `complete` restarts it, and a later `complete` row (a
+ * score correction during the wait) does not move it.
+ *
+ * Known, left to the owner: a generation-less schedule poll may write the status too, so a game
+ * no watch ever saw, first reported `complete` by a poll, gets its marker at that poll and is
+ * watched (for its final) like a resumed one.
  */
 export async function loadSchedulerGames(
   db: Db,
