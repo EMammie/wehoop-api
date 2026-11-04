@@ -404,12 +404,10 @@ describe('trial flow against the fake provider (MODE=trial, made-up key, local h
       if (!last?.runId) throw new Error('no reservation for the watch');
       const stored = RetryReportSchema.parse(await runRetries(last.runId));
       expect(server.stats.rejected429).toBe(0); // the only 429 is the injected one
-      expect(stored).toMatchObject({ allowance: 6, retried429: 1 });
-      // Three calls after closed: the first closing attempt plus retries that were sent; the
-      // refused one is not a retry. A cadence fetch may take the first of the three.
-      expect(stored.retriedClosing).toBeGreaterThanOrEqual(1);
-      expect(stored.retriedClosing).toBeLessThanOrEqual(2);
-      expect(stored.used).toBe(stored.retried429 + stored.retriedClosing);
+      // Nothing runs between the reporter and the closing set, so the three calls after closed are
+      // the first closing feed's attempt and its two retries (both sent); the next closing feed is
+      // refused before it is sent and is no retry.
+      expect(stored).toEqual({ used: 3, allowance: 6, retried429: 1, retriedClosing: 2 });
       const rows = await db<{ status: number }[]>`
         select status from ingest.provider_calls where reservation_id = ${last.id} and status <> 200`;
       expect(rows.map((r) => r.status).sort()).toEqual([429, 503, 503, 503]);

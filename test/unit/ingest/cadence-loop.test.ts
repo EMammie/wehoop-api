@@ -517,6 +517,44 @@ describe('cadenceLoop terminal non-played statuses (postponed, cancelled, unnece
     ]);
   });
 
+  // pbp and summary on the same grid, so both are due in every tick (CI race, 2026-11-03).
+  const sameTick = {
+    pbpMs: 30_000,
+    summaryMs: 30_000,
+    boxscoreMs: null,
+    boxscoreAtMs: [5 * MIN],
+    horizonMs: 150 * MIN,
+    closing: ['pbp', 'summary', 'boxscore'] as Array<'pbp' | 'summary' | 'boxscore'>,
+  };
+
+  it('the pbp reports closed with the summary due in the same tick: no cadence summary before the closing set', async () => {
+    const { src, w, opts, calls } = clocked((t) => (t >= 60_000 ? 'closed' : 'inprogress'));
+    const out = await cadenceLoop(w, src, silent, sameTick, opts);
+    expect(out.status).toBe('closed');
+    expect(calls.filter((c) => c.at === 30_000).map((c) => c.feed)).toEqual(['pbp', 'summary']);
+    // The reporter, then the closing summary and boxscore; nothing else in that tick.
+    expect(calls.filter((c) => c.at >= 60_000)).toEqual([
+      { feed: 'pbp', at: 60_000 },
+      { feed: 'summary', at: 60_000 },
+      { feed: 'boxscore', at: 60_000 },
+    ]);
+  });
+
+  it('a terminal non-closed status (cancelled) in the same tick: no cadence fetch or due one-off before the closing set', async () => {
+    // The pbp at 5:00 says cancelled while the summary and the one-off boxscore at +5 min are due.
+    const { src, w, opts, calls } = clocked(
+      (t) => (t >= 5 * MIN ? 'cancelled' : 'inprogress'),
+      false,
+    );
+    const out = await cadenceLoop(w, src, silent, sameTick, opts);
+    expect(out.status).toBe('cancelled');
+    expect(calls.filter((c) => c.at >= 5 * MIN)).toEqual([
+      { feed: 'pbp', at: 5 * MIN },
+      { feed: 'summary', at: 5 * MIN },
+      { feed: 'boxscore', at: 5 * MIN },
+    ]);
+  });
+
   it('closed without --until closed does not return: it idles at the slow pace until stopped', async () => {
     const { src, w, opts, calls } = clocked(
       (t) => (t >= 10 * MIN ? 'closed' : 'inprogress'),

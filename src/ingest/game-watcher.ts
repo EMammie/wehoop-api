@@ -460,6 +460,13 @@ export async function cadenceLoop(
     return null;
   };
   const slowed = () => slowPhase() !== null;
+  /**
+   * A document of this watch ended it: nothing but the closing set runs after that, not even a
+   * feed due in the same tick (a cadence summary there would repeat the closing summary). `closed`
+   * without `--until closed` keeps polling.
+   */
+  const ending = () =>
+    terminalBy !== null && isTerminal(status) && (status !== 'closed' || opts.untilClosed);
   const oneOffs = [...cadence.boxscoreAtMs].sort((a, b) => a - b).map((ms) => startedAt + ms);
   const outcome = (): CadenceOutcome => ({
     status,
@@ -472,6 +479,7 @@ export async function cadenceLoop(
   while (!opts.isStopped()) {
     const t = now();
     for (const p of periodic) {
+      if (ending()) break;
       // Leaving `complete` (a newer event re-opened play): pull a slot booked at the slow pace
       // back to the next slot of the feed's own grid.
       if (!slowed() && p.nextAt - t > p.everyMs) {
@@ -491,7 +499,7 @@ export async function cadenceLoop(
         while (p.nextAt <= now()) p.nextAt += everyMs;
       }
     }
-    while (oneOffs.length > 0 && t >= (oneOffs[0] ?? Number.POSITIVE_INFINITY)) {
+    while (!ending() && oneOffs.length > 0 && t >= (oneOffs[0] ?? Number.POSITIVE_INFINITY)) {
       oneOffs.shift();
       await fetchOne('boxscore');
     }
@@ -502,7 +510,7 @@ export async function cadenceLoop(
     // is not followed automatically; recovery is an operator step (`pnpm game rebuild`, planned,
     // not built yet). Sportradar lists a made-up game under a new id, which is planned and
     // watched as a new game; id reuse has not been observed in our data.
-    if (terminalBy !== null && isTerminal(status) && (status !== 'closed' || opts.untilClosed)) {
+    if (ending()) {
       // Keep the summary's offset from the document that reported the final status before the
       // closing set (rev 4.9 (2)), so no pbp <-> summary pair leaves at the minimum spacing; skip
       // the feed that reported it, which was just fetched (rev 4.12 (2)).
