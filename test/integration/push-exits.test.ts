@@ -5,6 +5,7 @@ import type { Db } from '../../src/db/client.js';
 import { QuotaGuard, QuotaRefusedError } from '../../src/ingest/quota-guard.js';
 import { RetryReportSchema, resolveGame, runTrialWatch } from '../../src/ingest/trial-mode.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
+import { parkTestGames } from '../helpers/cleanup.js';
 import { pbpQ1, R, seedGame, silentLog, testDb } from '../helpers/db.js';
 import { fixture } from '../helpers/fixtures.js';
 import { relabelDoc, scriptedProvider } from '../helpers/scripted-provider.js';
@@ -58,6 +59,7 @@ const config: Config = loadConfig({
 /** A seeded live game and its documents (the recording's Q1, relabelled; one tip-off everywhere). */
 async function liveGame(status = 'inprogress') {
   const { gameId, providerGameId } = await seedGame(db, pbpQ1());
+  created.push({ gameId, providerGameId });
   const tipOff = new Date(Date.now() - 30 * 60_000).toISOString();
   await db`update public.games set scheduled_at = ${tipOff} where id = ${gameId}`;
   const doc = (feed: string, s = status) => ({
@@ -97,7 +99,14 @@ beforeAll(async () => {
   await db`insert into ingest.product_quotas (product, limit_30d, qps, reserve, note, verified_at)
            values (${product}, 1000, 1, 100, 'push exit integration', now())`;
 });
+/** Games this file seeds (tip-off 30 min ago, live): parked in afterAll so no scheduler picks them up. */
+const created: Array<{ gameId: string; providerGameId: string }> = [];
+
 afterAll(async () => {
+  await parkTestGames(
+    db,
+    created.map((g) => g.gameId),
+  );
   await db`update ingest.budget_reservations set product = 'wnba', released_at = coalesce(released_at, now()),
              note = coalesce(note, '') || ' [integration product row removed]' where product = ${product}`;
   await db`delete from ingest.product_quotas where product = ${product}`;
