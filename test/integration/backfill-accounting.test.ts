@@ -254,10 +254,12 @@ describe('a reconnect backfill is rate-limited on the shared ledger, guarded, lo
     provider.docs = docs;
     dropEventsAfterFirstPbp(provider);
     // The reconnect itself passes the guard; before it answers, the reservation is spent and the
-    // product sits at its reserve, so the backfill that follows is refused.
+    // product sits at its reserve, so the backfill that follows is refused. "Spent" is reached by
+    // shrinking the reservation to what it has used, never by raising `used_calls`: the ledger
+    // invariant `reservation_used_calls_match_provider_calls` must hold after the test.
     provider.onStream = async (feed, n) => {
       if (feed !== 'push_events' || n !== 2) return;
-      await db`update ingest.budget_reservations set used_calls = reserved_calls
+      await db`update ingest.budget_reservations set reserved_calls = used_calls
                where game_id = ${gameId} and released_at is null`;
       await db`update ingest.product_quotas q set limit_30d = q.reserve +
                  (select count(*)::int from ingest.provider_calls c where c.product = q.product and c.quota_counted)
@@ -278,6 +280,12 @@ describe('a reconnect backfill is rate-limited on the shared ledger, guarded, lo
     expect(logged?.n).toBe(0);
     // Only the cadence's t=0 pbp reached the provider.
     expect(provider.requests.filter((r) => r.feed === 'pbp')).toHaveLength(1);
+    // The ledger stays consistent: used_calls is exactly the calls logged under the reservation.
+    const [ledger] = await db<{ used: number; logged: number }[]>`
+      select b.used_calls as used,
+             (select count(*)::int from ingest.provider_calls c where c.reservation_id = b.id) as logged
+      from ingest.budget_reservations b where b.id = ${out.reservation.id}`;
+    expect(ledger?.used).toBe(ledger?.logged);
     await db`update ingest.product_quotas set limit_30d = 1000 where product = ${product}`;
   }, 90_000);
 });
