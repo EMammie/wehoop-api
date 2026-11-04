@@ -42,7 +42,7 @@ describe('assertSpeedAllowed (--speed only against a rehearsal host)', () => {
 });
 
 describe('runTrialWatch refuses games that will not be played under their id', () => {
-  it('postponed, cancelled and unnecessary are refused before any reservation or call', async () => {
+  it('postponed, cancelled and unnecessary are refused before any reservation or call, with and without push', async () => {
     // Nothing may be touched: a database or guard access would throw on these empty stand-ins.
     const untouchable = new Proxy(
       {},
@@ -69,11 +69,13 @@ describe('runTrialWatch refuses games that will not be played under their id', (
         coverage: 'full',
         scheduledAt: new Date('2026-11-08T17:00:00Z'),
       };
-      await expect(runTrialWatch(deps, { game })).rejects.toThrow(
-        new RegExp(
-          `is ${status}; nothing to watch.*new id, which is planned and watched as a new game.*cannot be followed automatically.*pnpm game rebuild.*not built yet`,
-        ),
-      );
+      for (const push of [false, true]) {
+        await expect(runTrialWatch(deps, { game, push })).rejects.toThrow(
+          new RegExp(
+            `is ${status}; nothing to watch.*new id, which is planned and watched as a new game.*cannot be followed automatically.*pnpm game rebuild.*not built yet`,
+          ),
+        );
+      }
     }
   });
 });
