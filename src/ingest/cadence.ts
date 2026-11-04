@@ -168,6 +168,15 @@ export const SIM_CADENCE: { full: Cadence; scoreOnly: Cadence } = {
  * a counted call on top of it, allowed for by PUSH_CONNECTION_ALLOWANCE. The
  * rev 4.12 pre-game and after-complete rules and the rev 4.13 retry allowance
  * apply as for the polling profiles.
+ *
+ * Backfills are not budgeted here. During the post-`complete` wait the pbp is paused, so no
+ * applied pbp of the generation is ever newer than a reconnect (`backfillNeeded`): every
+ * reconnect of the events stream (not the clock stream) triggers a backfill, one REST pbp plus at
+ * most one 429 retry. Those calls go through the shared rate slot and the quota guard, are logged
+ * in `ingest.provider_calls` and counted in the watch reservation's `used_calls`, but neither
+ * `budgetFor` nor PUSH_CONNECTION_ALLOWANCE sizes the reservation for them; they are bounded only
+ * by the connection allowance (each reconnect spends one of its attempts) and, once the
+ * reservation is spent, by the guard's reserve. They are not counted in `meta.retries` either.
  */
 export const PUSH_RECONCILE_CADENCE: Cadence = {
   pbpMs: 5 * MIN,
