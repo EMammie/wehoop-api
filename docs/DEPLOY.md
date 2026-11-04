@@ -1,10 +1,13 @@
 # Deploying wehoop-api (M4)
 
-Status (2026-10-18): **built, rehearsed locally, NOT deployed.** The owner decision of
-2026-10-18 keeps the live WNBA Finals run on the fixed M3 commit and the polling path; the
-Fly deploy and the switch of live ingestion to push wait until the M3 live rows pass. Every
-step below that needs a Fly account is written as the exact command and marked NOT RUN; the
-restart check has a local rehearsal the validator can run against the dev stack today.
+Status (2026-11-04): **built, rehearsed locally, NOT deployed.** The owner decision of
+2026-10-18 kept the live runs on the M3 commit and the polling path until M3 was validated. M3
+is done: merged in PR #5 (`c48edec`), final evidence summary in PR #7, tag `m3` on `0e9be72`
+(2026-11-04). The Fly deploy and the switch of live ingestion to push now wait on the remaining
+prerequisites of the runbook below, among them the `ANTHROPIC_API_KEY` secret for the hosted
+review row and the owner's go; the deploy itself has NOT been run. Every step below that needs a
+Fly account is written as the exact command and marked NOT RUN; the restart check has a local
+rehearsal the validator can run against the dev stack today.
 
 ## What runs where
 
@@ -49,13 +52,14 @@ Supabase cloud rules (from `.env.example`): pooled `DATABASE_URL` may be any mod
 `DATABASE_SESSION_URL` must be session mode; `prepare: false` is already set for poolers; migrations
 are applied with `supabase db push` against the linked project, never by the app.
 
-## Runbook (NOT RUN; waits for the M3 polling validation)
+## Runbook (NOT RUN; waits on the prerequisites below and the owner's go)
 
 Fly account and app exist since 2026-10-21: org `personal` ("WBB", dedicated to this project), app
 `wehoop-api` created empty with `fly apps create wehoop-api --org personal` (no machines, no IPs).
 A payment card must be on the account before `fly deploy` can start machines.
 
-**Prerequisites before the first `fly deploy`** (all after the M3 polling validation passes):
+**Prerequisites before the first `fly deploy`** (the M3 polling validation they waited on is done:
+tag `m3`, 2026-11-04):
 1. ~~The `RateLimiter.waitForSlot()` concurrency defect is fixed~~ **Done** (M3 `d34931a`, plan rev 4.8
    (3), carried into M4 by the rebase onto `m3-ncaawb-live`): one process's store claims are chained in
    call order, with a unit test of concurrent callers whose claims finish out of order. Each claim is
@@ -64,6 +68,7 @@ A payment card must be on the account before `fly deploy` can start machines.
 2. `ingest.product_quotas` verified for every product the deployment has a key for (the guard refuses
    every call otherwise).
 3. The `ANTHROPIC_API_KEY` repository secret for the hosted review row.
+4. The owner's go for the deploy and for switching live ingestion to push.
 
 ```
 fly auth login                    # the project's own Fly account (fly auth whoami)
@@ -98,6 +103,12 @@ fly logs -a wehoop-api --process-group worker       # expect, in order:
 #   "scheduler started"  (production) or "trial watch started" + "push streams opened"
 curl -s https://wehoop-api.fly.dev/health | jq '.worker.lockHeld'   # true
 ```
+
+A restart during a game's complete -> closed wait resumes that game: the scheduler watches a game
+stored as `complete` again, as a new generation starting in the slow after-complete phase, until
+270 min after tip-off (`COMPLETE_REWATCH_MS`: 150 min horizon + 120 min budgeted wait); expect
+"scheduler: resuming the watch of a complete game (waiting for closed)". Covered on the dev stack
+by `test/integration/scheduler-resume.test.ts`.
 
 **Local rehearsal (run this today, dev stack only).** It kills the push-mode worker with
 SIGKILL mid-game and restarts it; the second worker waits for the lingering lock, takes it, aborts the
