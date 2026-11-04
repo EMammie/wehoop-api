@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { QuotaGuard } from '../../src/ingest/quota-guard.js';
@@ -130,6 +131,66 @@ describe('provider_calls accounting (CLAUDE.md non-negotiable 8)', () => {
     await expect(bad.getJson('pbp', z.object({ ok: z.boolean() }))).rejects.toThrow(
       /schema mismatch/,
     );
+  });
+
+  it('a request that never connects is one provider_calls row: null status, counted once, error propagated', async () => {
+    // Live run 2026-11-02, call 1201: a connect timeout before any response. Sportradar's console
+    // did not count it, but the ledger must (it cannot know); the reservation is charged once.
+    const product = `never-${randomUUID().slice(0, 8)}`;
+    await db`insert into ingest.product_quotas (product, limit_30d, qps, reserve, note, verified_at)
+             values (${product}, 1000, 1, 100, 'integration: never-connected call', now())`;
+    try {
+      const guard = new QuotaGuard({ db, log: silentLog });
+      const reservation = await guard.reserve({
+        product,
+        gameId: null,
+        profile: 'full',
+        calls: 5,
+        source: 'trial',
+      });
+      const connectTimeout = new TypeError('fetch failed', {
+        cause: Object.assign(new Error('Connect Timeout Error'), {
+          code: 'UND_ERR_CONNECT_TIMEOUT',
+        }),
+      });
+      const http = new SportradarHttp({
+        db,
+        log: silentLog,
+        league: 'ncaawb',
+        product,
+        runId: null,
+        resolver: new ProdUrlResolver({
+          league: 'ncaawb',
+          accessLevel: 'trial',
+          apiKey: 'not-a-real-key',
+        }),
+        limiter: new RateLimiter({ minIntervalMs: 0, store: new PgSlotStore(db), product }),
+        guard,
+        reservationId: reservation.id,
+        fetchImpl: (async () => {
+          throw connectTimeout;
+        }) as typeof fetch,
+      });
+      await expect(http.getJson('pbp', z.object({}), { gameId: 'g-never' })).rejects.toBe(
+        connectTimeout,
+      );
+      const rows = await db<
+        { status: number | null; quotaCounted: boolean; bytes: number; reservationId: string }[]
+      >`
+        select status, quota_counted as "quotaCounted", bytes, reservation_id::text as "reservationId"
+        from ingest.provider_calls where product = ${product}`;
+      expect(rows).toEqual([
+        { status: null, quotaCounted: true, bytes: 0, reservationId: String(reservation.id) },
+      ]);
+      expect({ calls: http.calls, refused: http.refused }).toEqual({ calls: 1, refused: 0 });
+      expect((await guard.reservation(reservation.id))?.usedCalls).toBe(1);
+      await guard.release(reservation.id);
+    } finally {
+      await db`delete from ingest.provider_calls where product = ${product}`;
+      await db`delete from ingest.budget_reservations where product = ${product}`;
+      await db`delete from ingest.provider_rate_slots where product = ${product}`;
+      await db`delete from ingest.product_quotas where product = ${product}`;
+    }
   });
 
   it('redactUrl strips credential-looking query parameters', () => {

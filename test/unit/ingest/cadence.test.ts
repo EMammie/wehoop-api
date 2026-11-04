@@ -4,6 +4,8 @@ import {
   cadenceFor,
   defaultProfileFor,
   PROFILE_CADENCE,
+  PUSH_CONNECTION_ALLOWANCE,
+  PUSH_RECONCILE_CADENCE,
   profileAllowed,
   SIM_CADENCE,
   scaleCadence,
@@ -12,44 +14,78 @@ import { ncaawbAdapter } from '../../../src/leagues/ncaawb/adapter.js';
 import { wnbaAdapter } from '../../../src/leagues/wnba/adapter.js';
 
 describe('trial profiles: budgets derived from the cadence constants (plan §4)', () => {
-  it('full 347: pbp every 30 s + statistics (summary) every 5 min over 2.5 h, the complete -> closed wait, closing pair and 429 allowance (rev 4.9)', () => {
+  it('full 364: pbp every 30 s + statistics (summary) every 5 min over 2.5 h, a 120-min complete -> closed wait on the summary alone, the closing pair and retry allowance (rev 4.12)', () => {
     expect(budgetFor(PROFILE_CADENCE.full)).toEqual({
       pbp: 301, // t=0 through 2.5 h inclusive (the G3 run made 301)
       summary: 30, // first at +15 s
       boxscore: 0,
-      afterComplete: 12, // 30 min at one pbp + one summary per 5 min
-      closing: 2,
-      retries: 2,
-      total: 347,
+      afterComplete: 25, // 120 min at one summary per 5 min, both ends; the pbp pauses
+      closing: 2, // the feed that did not report closed, then the boxscore
+      retries: 6,
+      total: 364,
     });
   });
-  it('extended 162: summary every 60 s + one boxscore at +120 min, the complete -> closed wait, closing and 429 allowance', () => {
+  it('extended 184: summary every 60 s + one boxscore at +120 min, the complete -> closed wait, closing and retry allowance', () => {
     expect(budgetFor(PROFILE_CADENCE.extended)).toEqual({
       pbp: 0,
       summary: 151,
       boxscore: 1,
-      afterComplete: 6,
-      closing: 2,
-      retries: 2,
-      total: 162,
+      afterComplete: 25,
+      closing: 1, // the summary or the boxscore reported closed; the other one
+      retries: 6,
+      total: 184,
     });
   });
-  it('lean-full 179: pbp every 60 s + statistics every 10 min, the complete -> closed wait, closing and 429 allowance', () => {
+  it('lean-full 187: pbp every 60 s + statistics every 10 min, the complete -> closed wait, closing and retry allowance', () => {
     expect(budgetFor(PROFILE_CADENCE['lean-full'])).toEqual({
       pbp: 151,
       summary: 15, // first at +30 s
       boxscore: 0,
-      afterComplete: 9, // pbp every 5 min, summary stays at 10 min
+      afterComplete: 13, // the summary stays at 10 min
       closing: 2,
-      retries: 2,
-      total: 179,
+      retries: 6,
+      total: 187,
     });
   });
-  it('two full games plus one extended fit a 1,000-call trial with discovery to spare', () => {
+  it('the slow phases poll one feed each: the pbp before play, the summary after complete', () => {
+    expect(PROFILE_CADENCE.full).toMatchObject({
+      preGameMs: 300_000,
+      preGameFeeds: ['pbp'],
+      afterCompleteFeeds: ['summary'],
+      closing: ['pbp', 'summary', 'boxscore'],
+    });
+    expect(PROFILE_CADENCE.extended).toMatchObject({
+      preGameFeeds: ['summary'],
+      afterCompleteFeeds: ['summary'],
+      closing: ['summary', 'boxscore'],
+    });
+  });
+  it('push reconciliation (M4) follows the same slow phases and closing set as a pbp profile (rev 4.12)', () => {
+    expect(PUSH_RECONCILE_CADENCE).toMatchObject({
+      preGameMs: 300_000,
+      preGameFeeds: ['pbp'],
+      afterCompleteFeeds: ['summary'],
+      closing: ['pbp', 'summary', 'boxscore'],
+      retryAllowance: 6,
+    });
+    expect(budgetFor(PUSH_RECONCILE_CADENCE)).toEqual({
+      pbp: 31, // every 5 min, t=0 through 2.5 h inclusive
+      summary: 30, // first at +2.5 min
+      boxscore: 0,
+      afterComplete: 25, // 120 min at one summary per 5 min, both ends; the pbp pauses
+      closing: 2, // the feed that did not report closed, then the boxscore
+      retries: 6,
+      total: 94,
+    });
+    expect(PUSH_CONNECTION_ALLOWANCE).toBe(20);
+  });
+  it('two full games plus one extended no longer fit the 900 spendable calls of a 1,000-call trial (12 over)', () => {
+    // They fitted exactly (900) with a retry allowance of 2; the allowance of 6 (owner decision
+    // 2026-11-03) adds 4 calls per reservation.
     const two = 2 * budgetFor(PROFILE_CADENCE.full).total;
     const one = budgetFor(PROFILE_CADENCE.extended).total;
-    expect(two + one).toBe(856);
-    expect(1000 - 100 - (two + one)).toBeGreaterThan(0); // 100 = default reserve
+    expect(two + one).toBe(912);
+    expect(1000 - 100 - (two + one)).toBe(-12); // 100 = default reserve
   });
 });
 
@@ -108,7 +144,14 @@ describe('cadenceFor (source, capabilities, coverage)', () => {
   });
   it('scaleCadence compresses intervals and horizon for a rehearsal without changing the budget', () => {
     const scaled = scaleCadence(PROFILE_CADENCE.full, 30);
-    expect(scaled).toMatchObject({ pbpMs: 1000, summaryMs: 10_000, horizonMs: 300_000 });
+    expect(scaled).toMatchObject({
+      pbpMs: 1000,
+      summaryMs: 10_000,
+      horizonMs: 300_000,
+      preGameMs: 10_000,
+      preGameFeeds: ['pbp'],
+      afterCompleteFeeds: ['summary'],
+    });
     expect(budgetFor(scaled)).toEqual(budgetFor(PROFILE_CADENCE.full));
     expect(scaleCadence(PROFILE_CADENCE.extended, 60).boxscoreAtMs).toEqual([120_000]);
     expect(() => scaleCadence(PROFILE_CADENCE.full, 0)).toThrow();

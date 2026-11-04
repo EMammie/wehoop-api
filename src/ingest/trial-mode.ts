@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { type Config, SPORTRADAR_DEFAULT_BASE_URL } from '../config.js';
 import type { Db } from '../db/client.js';
 import type { LeagueAdapter } from '../leagues/adapter.js';
@@ -401,6 +402,9 @@ function hasPush(resolver: UrlResolver): resolver is UrlResolver & PushUrlResolv
   return typeof (resolver as Partial<PushUrlResolver>).resolvePush === 'function';
 }
 
+/** Stored statuses of a game that will not be played under this id; `trial watch` refuses them. */
+const NOT_PLAYED: ReadonlySet<string> = new Set(['postponed', 'cancelled', 'unnecessary']);
+
 export interface TrialWatchDeps {
   db: Db;
   log: Logger;
@@ -443,6 +447,40 @@ export interface TrialWatchOutcome {
   stale: number;
   /** Present only in push mode. */
   push?: PushWatchOutcome;
+  retries: RetryReport;
+}
+
+/**
+ * Retries a watch spent against its reservation's allowance (owner decision 2026-11-03: is 6
+ * enough?). Stored as `ingest.ingestion_runs.meta->'retries'` of the watch_game run.
+ */
+export const RetryReportSchema = z.object({
+  used: z.int().nonnegative(),
+  allowance: z.int().nonnegative(),
+  retried429: z.int().nonnegative(),
+  retriedClosing: z.int().nonnegative(),
+});
+export type RetryReport = z.infer<typeof RetryReportSchema>;
+
+export function retryReport(
+  allowance: number,
+  counts: { retried429: number; retriedClosing: number },
+): RetryReport {
+  return {
+    used: counts.retried429 + counts.retriedClosing,
+    allowance,
+    retried429: counts.retried429,
+    retriedClosing: counts.retriedClosing,
+  };
+}
+
+/** One structured line per watch; a warning when the retries outran the allowance. */
+export function logRetryReport(log: Logger, runId: number, retries: RetryReport): void {
+  if (retries.used > retries.allowance) {
+    log.warn({ runId, retries }, 'trial watch retries exceeded the budgeted allowance');
+  } else {
+    log.info({ runId, retries }, 'trial watch retries');
+  }
 }
 
 /**
@@ -463,6 +501,14 @@ export async function runTrialWatch(
   const observationSource: ObservationSource = source === 'simulation' ? 'simulation' : 'rest';
   if (opts.game.status === 'closed') {
     throw new Error(`game ${opts.game.id} is already closed; nothing to watch`);
+  }
+  if (NOT_PLAYED.has(opts.game.status)) {
+    throw new Error(
+      `game ${opts.game.id} is ${opts.game.status}; nothing to watch. Sportradar lists a made-up ` +
+        'game under a new id, which is planned and watched as a new game. A game resumed under ' +
+        'this same id cannot be followed automatically; recovering it is an operator step ' +
+        '(`pnpm game rebuild`, planned, not built yet)',
+    );
   }
   const pushOpts: PushWatchOptions | null =
     opts.push === undefined || opts.push === false ? null : opts.push === true ? {} : opts.push;
@@ -548,6 +594,12 @@ export async function runTrialWatch(
   let status: string | null = null;
   let pushOutcome: PushWatchOutcome | undefined;
   let push: Awaited<ReturnType<typeof openPushStreams>> | null = null;
+  // Counted here, not from the loop's outcome: a quota refusal throws and loses it. Only the
+  // cadence loop's retries draw on `budget.retries`: in push mode, stream connection attempts are
+  // budgeted apart (PUSH_CONNECTION_ALLOWANCE) and backfills sit outside the reservation's budget,
+  // so neither is a retry here.
+  const spent = { retried429: 0, retriedClosing: 0 };
+  const retries = () => retryReport(plan.budget.retries, spent);
   try {
     // Inside the try: a failure to open the streams must still end the run and release the budget.
     if (pushOpts !== null && hasPush(resolver)) {
@@ -571,6 +623,10 @@ export async function runTrialWatch(
     const out = await cadenceLoop(watcher, docs, log, cadence, {
       untilClosed: opts.untilClosed ?? true,
       isStopped: deps.isStopped,
+      onRetry: (kind) => {
+        if (kind === 'http429') spent.retried429++;
+        else spent.retriedClosing++;
+      },
     });
     status = out.status;
     if (push) pushOutcome = await push.close('ok');
@@ -589,6 +645,13 @@ export async function runTrialWatch(
     // This game's pulse timer ends with its watch (the scheduler watches many games); the caller
     // still sends the closing pulse (`sendOnce`) after its final drain.
     deps.pulse?.stop(opts.game.id);
+    // Before the release, and never masking the watch's own error.
+    try {
+      await setRunMeta(db, run.id, { retries: retries() });
+    } catch (err) {
+      log.error({ err, runId: run.id }, 'could not store the retry report in the run meta');
+    }
+    logRetryReport(log, run.id, retries());
     await deps.guard.release(reservation.id);
   }
   const final = (await deps.guard.reservation(reservation.id)) ?? reservation;
@@ -603,6 +666,7 @@ export async function runTrialWatch(
       changes: watcher.applied,
       stale: watcher.stale,
       push: pushOutcome ?? null,
+      retries: retries(),
     },
     'trial watch finished',
   );
@@ -616,6 +680,7 @@ export async function runTrialWatch(
     refused: http.refused,
     changes: watcher.applied,
     stale: watcher.stale,
+    retries: retries(),
     ...(pushOutcome ? { push: pushOutcome } : {}),
   };
 }
