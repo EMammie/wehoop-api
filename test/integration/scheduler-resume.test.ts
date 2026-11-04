@@ -1,13 +1,32 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type Config, loadConfig } from '../../src/config.js';
+import { COMPLETE_CLOSE_WAIT_MS } from '../../src/ingest/cadence.js';
 import { QuotaGuard } from '../../src/ingest/quota-guard.js';
-import { Scheduler } from '../../src/ingest/scheduler.js';
-import { type GameRow, RetryReportSchema } from '../../src/ingest/trial-mode.js';
+import {
+  COMPLETE_REWATCH_CAP_MS,
+  completeRewatchUntil,
+  type GameRange,
+  gamesToWatch,
+  loadSchedulerGames,
+  Scheduler,
+} from '../../src/ingest/scheduler.js';
+import { RetryReportSchema } from '../../src/ingest/trial-mode.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
 import { contentHash } from '../../src/model/content-hash.js';
 import { PbpDocumentSchema } from '../../src/providers/sportradar/schemas/pbp.js';
 import { SummaryDocumentSchema } from '../../src/providers/sportradar/schemas/summary.js';
-import { counts, pbpClosed, R, seedGame, silentLog, staleReasons, testDb } from '../helpers/db.js';
+import {
+  apply,
+  counts,
+  observation,
+  pbpClosed,
+  R,
+  replayRun,
+  seedGame,
+  silentLog,
+  staleReasons,
+  testDb,
+} from '../helpers/db.js';
 import { fixture } from '../helpers/fixtures.js';
 import { relabelDoc, scriptedProvider } from '../helpers/scripted-provider.js';
 
@@ -45,10 +64,12 @@ afterAll(async () => {
 
 describe('scheduler resumes a complete game after a worker restart (review should 1)', () => {
   it('generation 2 starts in the slow phase, reaches closed, applies the corrected stats and play, writes no regression row', async () => {
-    // A unique game with the fixture's teams, tipped off 3 h ago: inside COMPLETE_REWATCH_MS (270 min).
+    // A unique game with the fixture's teams whose tip-off was scheduled 5 h ago (a late tip-off):
+    // the scheduled floor (+270 min) has passed, so only the completion anchor (the moment
+    // generation 1 records `complete`, + 120 min) keeps it resumable.
     // The documents carry the same tip-off (they write games.scheduled_at).
     const { gameId, providerGameId } = await seedGame(db, pbpClosed());
-    const tipOff = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const tipOff = new Date(Date.now() - 5 * 3_600_000).toISOString();
     await db`update public.games set scheduled_at = ${tipOff} where id = ${gameId}`;
     const doc = (feed: string) => ({
       ...(relabelDoc(fixture(`${R}-${feed}-closed.json`), REAL_ID, providerGameId) as Json),
@@ -85,12 +106,14 @@ describe('scheduler resumes a complete game after a worker restart (review shoul
       SPORTRADAR_BASE_URL: 'http://127.0.0.1:9', // loopback shape; fetchImpl answers, nothing listens
     });
     const guard = new QuotaGuard({ db, log });
-    // Only this game: the dev database holds other tests' games inside the scheduler's range.
-    const loadGames = async () =>
-      db<GameRow[]>`
-        select id, provider_game_id as "providerGameId", status::text as status,
-               coverage::text as coverage, scheduled_at as "scheduledAt"
-        from public.games where id = ${gameId}`;
+    // The scheduler's own loader, narrowed to this game: the dev database holds other tests'
+    // games inside the scheduler's range.
+    const loaded: Array<{ status: string; completedAt: Date | null }> = [];
+    const loadGames = async (league: 'wnba' | 'ncaawb' | 'unrivaled', range: GameRange) => {
+      const rows = (await loadSchedulerGames(db, league, range)).filter((g) => g.id === gameId);
+      for (const g of rows) loaded.push({ status: g.status, completedAt: g.completedAt ?? null });
+      return rows;
+    };
     const schedulerFor = (isStopped: () => boolean) =>
       new Scheduler({
         db,
@@ -133,8 +156,16 @@ describe('scheduler resumes a complete game after a worker restart (review shoul
     const restartedAt = new Date();
     const requestsBefore = provider.requests.length;
     const second = schedulerFor(() => false);
+    loaded.length = 0;
     await second.tick();
     expect(second.running.size).toBe(1);
+    // Resumed on the completion anchor: completedAt is generation 1's `status` change to complete.
+    const [marker] = await db<{ at: Date }[]>`
+      select min(created_at) as at from public.game_changes
+      where game_id = ${gameId} and change_type = 'status' and body->>'status' = 'complete'`;
+    expect(loaded[0]?.status).toBe('complete');
+    expect(loaded[0]?.completedAt?.getTime()).toBe(marker?.at.getTime());
+    expect(Date.parse(tipOff) + 270 * 60_000).toBeLessThan(restartedAt.getTime());
     await Promise.allSettled([...second.running.values()]);
     expect(second.stats).toMatchObject({
       watchesStarted: 1,
@@ -241,4 +272,46 @@ describe('scheduler resumes a complete game after a worker restart (review shoul
         and reason in ('run_regresses_state', 'ambiguous_regression', 'older_run')`;
     expect(late?.n).toBe(0);
   }, 120_000);
+
+  it('the loader reaches complete games up to 24 h back by tip-off, with their completion moment', async () => {
+    const now = new Date();
+    /** A game whose tip-off was `hoursAgo` ago, taken to `status` by one applied pbp document. */
+    const make = async (hoursAgo: number, status: string) => {
+      const { gameId, providerGameId } = await seedGame(db, pbpClosed());
+      const doc = {
+        ...(relabelDoc(fixture(`${R}-pbp-closed.json`), REAL_ID, providerGameId) as Json),
+        scheduled: new Date(now.getTime() - hoursAgo * 3_600_000).toISOString(),
+        status,
+      };
+      const nd = wnbaAdapter.normalizePbp(PbpDocumentSchema.parse(doc));
+      const run = await replayRun(db, gameId);
+      await apply({ db, log }, gameId, nd, observation(run, nd, new Date()));
+      return gameId;
+    };
+    const late = await make(7, 'complete'); // past maxLateStartMs, inside the 24 h reach
+    const stale = await make(25, 'complete'); // past COMPLETE_REWATCH_CAP_MS
+    const closed = await make(7, 'closed');
+    const range: GameRange = {
+      from: new Date(now.getTime() - 6 * 3_600_000),
+      to: new Date(now.getTime() + 2 * 86_400_000),
+      completeFrom: new Date(now.getTime() - COMPLETE_REWATCH_CAP_MS),
+    };
+    const rows = (await loadSchedulerGames(db, 'wnba', range)).filter((g) =>
+      [late, stale, closed].includes(g.id),
+    );
+    expect(rows.map((g) => g.id)).toEqual([late]);
+    const g = rows[0];
+    if (!g) throw new Error('late complete game not loaded');
+    const [marker] = await db<{ at: Date }[]>`
+      select min(created_at) as at from public.game_changes
+      where game_id = ${late} and change_type = 'status' and body->>'status' = 'complete'`;
+    expect(g.completedAt?.getTime()).toBe(marker?.at.getTime());
+    expect(completeRewatchUntil(g)).toBe((g.completedAt?.getTime() ?? 0) + COMPLETE_CLOSE_WAIT_MS);
+    expect(
+      gamesToWatch([g], new Date(), new Set(), {
+        watchLeadMs: 600_000,
+        maxLateStartMs: 6 * 3_600_000,
+      }),
+    ).toEqual([g]);
+  });
 });

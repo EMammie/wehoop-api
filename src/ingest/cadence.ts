@@ -84,13 +84,19 @@ const AFTER_COMPLETE = {
 const PRE_GAME_MS = 5 * MIN;
 
 /**
- * How long after its scheduled tip-off a game stored as `complete` is still (re)watched by the
- * scheduler: the planning horizon plus the budgeted complete -> closed wait (150 + 120 = 270 min).
- * A worker restarted during that wait resumes the watch (the validated statistics and the closing
- * pbp arrive with `closed`); a game still `complete` past it is left alone instead of being
- * re-watched by every restart.
+ * The budgeted complete -> closed wait (rev 4.12 (3): 120 min), exported for the scheduler: a
+ * game stored as `complete` is (re)watched until at least this long after it BECAME complete
+ * (`completeRewatchUntil` in scheduler.ts).
  */
-export const COMPLETE_REWATCH_MS = GAME_HORIZON_MS + AFTER_COMPLETE.closeWaitMs;
+export const COMPLETE_CLOSE_WAIT_MS = AFTER_COMPLETE.closeWaitMs;
+
+/**
+ * The scheduled-time floor of the same bound: a game stored as `complete` is (re)watched at least
+ * until its scheduled tip-off plus the planning horizon plus the budgeted wait (150 + 120 = 270
+ * min), even when the moment it became complete is unknown. A late tip-off or overtime pushes
+ * the end of the wait past this, which is why the scheduler also anchors on that moment.
+ */
+export const COMPLETE_REWATCH_MS = GAME_HORIZON_MS + COMPLETE_CLOSE_WAIT_MS;
 
 /**
  * Plan §4: full = pbp/30 s + box-score statistics/5 min; extended = summary/60 s

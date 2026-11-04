@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../../src/config.js';
-import { COMPLETE_REWATCH_MS } from '../../../src/ingest/cadence.js';
+import { COMPLETE_CLOSE_WAIT_MS, COMPLETE_REWATCH_MS } from '../../../src/ingest/cadence.js';
 import type { QuotaGuard } from '../../../src/ingest/quota-guard.js';
 import {
+  COMPLETE_REWATCH_CAP_MS,
+  completeRewatchUntil,
   gamesToWatch,
   inGameWindow,
   localDate,
@@ -105,6 +107,53 @@ describe('scheduler decisions (plan §4 production scheduler)', () => {
   });
 });
 
+describe('a complete game is anchored on when it became complete (late tip-off, overtime)', () => {
+  const tip = new Date('2026-10-19T23:00:00Z');
+  const at = (min: number) => new Date(tip.getTime() + min * 60_000);
+  const o = { watchLeadMs: 10 * 60_000, maxLateStartMs: 6 * 3_600_000 };
+  const completeAt = (min: number) => ({ ...game('c', tip, 'complete'), completedAt: at(min) });
+
+  it('90 min late plus overtime: complete at +230 min, the whole 120 min wait stays covered (to +350, past the 270 min floor)', () => {
+    expect(COMPLETE_CLOSE_WAIT_MS).toBe(120 * 60_000);
+    const g = completeAt(230);
+    expect(completeRewatchUntil(g)).toBe(at(350).getTime());
+    // The observed 71 min wait ends at +301: a restart at +300 still resumes it.
+    for (const min of [240, 300, 350]) {
+      expect(
+        gamesToWatch([g], at(min), new Set(), o).map((x) => x.id),
+        String(min),
+      ).toEqual(['c']);
+    }
+    expect(gamesToWatch([g], new Date(at(350).getTime() + 1), new Set(), o)).toEqual([]);
+  });
+
+  it('150 min late: complete at +290 (already past the scheduled floor) is still resumed until +410', () => {
+    const g = completeAt(290);
+    expect(completeRewatchUntil(g)).toBe(at(410).getTime());
+    expect(gamesToWatch([g], at(300), new Set(), o).map((x) => x.id)).toEqual(['c']);
+    // Past maxLateStartMs (6 h after tip-off) a complete game is still resumed within its bound.
+    expect(gamesToWatch([g], at(400), new Set(), o).map((x) => x.id)).toEqual(['c']);
+    expect(gamesToWatch([g], at(411), new Set(), o)).toEqual([]);
+    // The same game without the marker falls back to the scheduled floor (+270): not resumed.
+    expect(gamesToWatch([game('c', tip, 'complete')], at(300), new Set(), o)).toEqual([]);
+  });
+
+  it('an early completion keeps the scheduled floor; the bound never passes tip-off + 24 h', () => {
+    expect(completeRewatchUntil(completeAt(100))).toBe(at(270).getTime());
+    expect(COMPLETE_REWATCH_CAP_MS).toBe(24 * 3_600_000);
+    expect(completeRewatchUntil(completeAt(23 * 60))).toBe(at(24 * 60).getTime());
+    expect(gamesToWatch([completeAt(23 * 60)], at(24 * 60 + 1), new Set(), o)).toEqual([]);
+  });
+
+  it('a late tip-off never revives a not-complete game past maxLateStartMs, nor any other post status', () => {
+    expect(gamesToWatch([game('l', tip, 'inprogress')], at(361), new Set(), o)).toEqual([]);
+    for (const status of ['closed', 'cancelled', 'postponed', 'unnecessary']) {
+      const g = { ...game('x', tip, status), completedAt: at(230) };
+      expect(gamesToWatch([g], at(300), new Set(), o), status).toEqual([]);
+    }
+  });
+});
+
 describe('Scheduler.tick with injected provider and watch', () => {
   const config = loadConfig({
     DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:54322/postgres',
@@ -179,6 +228,22 @@ describe('Scheduler.tick with injected provider and watch', () => {
     for (const f of finishers) f();
     await new Promise((r) => setTimeout(r, 0));
     expect(sched.stats).toMatchObject({ ticks: 5, schedulePolls: 2, watchesStarted: 3 });
+  });
+
+  it('a watchSpeed other than 1 is refused at construction off a rehearsal host', () => {
+    const make = (watchSpeed: number) =>
+      new Scheduler({
+        db: {} as never,
+        log,
+        config,
+        guard: {} as QuotaGuard,
+        pulse: null,
+        leagues: ['wnba'],
+        isStopped: () => true,
+        watchSpeed,
+      });
+    expect(() => make(1)).not.toThrow();
+    expect(() => make(30)).toThrow(/only allowed against a rehearsal host/);
   });
 
   it('a failed watch is not restarted every tick: exponential retry window from 10 min', async () => {

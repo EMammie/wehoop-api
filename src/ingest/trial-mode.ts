@@ -306,6 +306,11 @@ export interface GameRow {
   status: string;
   coverage: string;
   scheduledAt: Date;
+  /**
+   * Scheduler only: when the game's current `complete` phase began (the first durable `status`
+   * change to `complete` after the last one to any other status); null or absent when unknown.
+   */
+  completedAt?: Date | null;
 }
 
 /** `--game` accepts the games.id uuid or the provider game id. */
