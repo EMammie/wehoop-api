@@ -85,25 +85,36 @@ function dropEventsAfterFirstPbp(provider: ReturnType<typeof scriptedProvider>) 
   return state;
 }
 
-/** Resolves once the game's first backfill sub-run has ended (ok or error). */
-async function backfillEnded(gameId: string, timeoutMs = 40_000): Promise<string> {
-  const until = Date.now() + timeoutMs;
-  while (Date.now() < until) {
+/** Resolves once the game's first backfill sub-run has started (`started`) or ended (`ended`). */
+async function backfillReached(
+  gameId: string,
+  until: 'started' | 'ended',
+  timeoutMs = 40_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     const [r] = await db<{ status: string }[]>`
       select status from ingest.ingestion_runs
-      where game_id = ${gameId} and kind = 'backfill' and status <> 'running' order by id limit 1`;
-    if (r) return r.status;
+      where game_id = ${gameId} and kind = 'backfill'
+        and ${until === 'ended' ? db`status <> 'running'` : db`true`}
+      order by id limit 1`;
+    if (r) return;
     await new Promise((res) => setTimeout(res, 100));
   }
-  throw new Error('no backfill ended in time');
+  throw new Error(`no backfill ${until} in time`);
 }
 
-/** Watch with push until the first backfill has ended, then stop (the cadence loop is 5-min). */
+/**
+ * Watch with push until the first backfill has started or ended, then stop. Stopping never cuts a
+ * backfill short: closing the streams waits for the reconnect hook. With `started`, the watch's
+ * own cadence calls (the summary at +150 s, the next pbp at +5 min) can never interleave.
+ */
 async function watchUntilBackfill(
   gameId: string,
   game: NonNullable<Awaited<ReturnType<typeof resolveGame>>>,
   provider: ReturnType<typeof scriptedProvider>,
   guard: QuotaGuard,
+  until: 'started' | 'ended',
 ): Promise<TrialWatchOutcome> {
   let stop = false;
   const watching = runTrialWatch(
@@ -120,7 +131,7 @@ async function watchUntilBackfill(
     { game, profile: 'full', push: { backoffMinMs: 100, backoffMaxMs: 200 } },
   );
   try {
-    await backfillEnded(gameId);
+    await backfillReached(gameId, until);
   } finally {
     stop = true;
   }
@@ -159,7 +170,7 @@ describe('a reconnect backfill is rate-limited on the shared ledger, guarded, lo
       for (let i = 0; i < 2; i++) external.push((await store.claim(product, 2000)).slotAt);
     };
     const guard = new QuotaGuard({ db, log });
-    const out = await watchUntilBackfill(gameId, game, provider, guard);
+    const out = await watchUntilBackfill(gameId, game, provider, guard, 'ended');
     expect(out.push).toMatchObject({ backfills: 1, backfillsFailed: 0, backfillsSkipped: 0 });
 
     const [bf] = await db<{ id: string; status: string }[]>`
@@ -244,7 +255,7 @@ describe('a reconnect backfill is rate-limited on the shared ledger, guarded, lo
                where q.product = ${product}`;
     };
     const guard = new QuotaGuard({ db, log });
-    const out = await watchUntilBackfill(gameId, game, provider, guard);
+    const out = await watchUntilBackfill(gameId, game, provider, guard, 'started');
     expect(out.push).toMatchObject({ backfills: 0, backfillsFailed: 1 });
     const [bf] = await db<{ id: string; status: string; error: string | null }[]>`
       select id::text, status, error from ingest.ingestion_runs
