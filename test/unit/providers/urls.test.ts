@@ -19,6 +19,11 @@ describe('UrlResolver', () => {
     expect(u('schedule', { seasonYear: 2025, seasonType: 'REG' })).toBe(
       `${root}/games/2025/REG/schedule.json`,
     );
+    expect(u('daily_schedule', { date: '2026-11-08' })).toBe(
+      `${root}/games/2026/11/08/schedule.json`,
+    );
+    expect(() => prod.resolve('daily_schedule', { date: '2026-1-8' })).toThrow(/YYYY-MM-DD/);
+    expect(() => prod.resolve('daily_schedule', {})).toThrow(/date/);
     expect(u('tournament_list', { seasonYear: 2025, seasonType: 'OOT' })).toBe(
       `${root}/tournaments/2025/OOT/schedule.json`,
     );

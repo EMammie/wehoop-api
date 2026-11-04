@@ -387,11 +387,13 @@ export async function applyChanges(
       isComplete: observation.isComplete,
     });
 
-    // `observation` carries watchId and score, so rule 2d can read a previous ambiguous row without a join.
+    // `observation` carries watchId and score, so rule 2d can read a previous ambiguous row without a
+    // join, and the decision `detail` (e.g. `2d: ...`, `3-lagging-view: ...`) so the row explains itself.
     const logStale = async (reason: StaleReason) => {
+      const logged = { ...incomingView, detail: decision.detail };
       await tx`insert into ingest.stale_observations (game_id, run_id, source, observed_at, observation, stored, reason)
                values (${gameId}, ${observation.runId}, ${observation.source}, ${observation.observedAt},
-                       ${tx.json(incomingView as never)}, ${tx.json(storedView as never)}, ${reason})`;
+                       ${tx.json(logged as never)}, ${tx.json(storedView as never)}, ${reason})`;
     };
 
     if (decision.kind === 'stale') {
@@ -860,7 +862,11 @@ export async function applyChanges(
                  events_updated = events_updated + ${counts.updated},
                  events_deleted = events_deleted + ${counts.deleted}
                where id = ${observation.runId}`;
-      await tx.notify('outbox', gameId);
+      // pg_notify through `tx`, never `tx.notify()`: postgres.js binds `notify` to the pool, so
+      // `tx.notify` runs on another connection immediately, the publisher wakes before this
+      // batch commits, finds nothing, and the rows wait for the 30 s safety drain (live run
+      // 2026-10-19: 429 of 1,306 changes published ~30 s late).
+      await tx`select pg_notify('outbox', ${gameId})`;
       // Crash point (b): every write of this batch is issued; the transaction has not committed.
       deps.fault?.maybeFire('before_commit', newLastSeq);
     }

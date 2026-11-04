@@ -3,13 +3,21 @@ import type { Db } from '../db/client.js';
 import type { LeagueAdapter, NormalizeContext } from '../leagues/adapter.js';
 import type { PulseSender } from '../live/pulse.js';
 import type { Logger } from '../logger.js';
-import type { FetchedDocument, SportradarHttp } from '../providers/sportradar/http.js';
+import { GameStatusSchema } from '../model/live-event.js';
+import {
+  type FetchedDocument,
+  ProviderHttpError,
+  type SportradarHttp,
+} from '../providers/sportradar/http.js';
 import { BoxscoreDocumentSchema } from '../providers/sportradar/schemas/boxscore.js';
 import { PbpDocumentSchema } from '../providers/sportradar/schemas/pbp.js';
 import { SummaryDocumentSchema } from '../providers/sportradar/schemas/summary.js';
-import { type Feed, isGameFeed } from '../providers/sportradar/urls.js';
+import { type Feed, type FeedParams, isGameFeed } from '../providers/sportradar/urls.js';
 import { type ApplyDeps, type ApplyResult, applyChanges, ensureGame } from './apply-changes.js';
+import type { Cadence } from './cadence.js';
+import { phaseOf } from './freshness.js';
 import { ensurePlayers, ensureSeason, ensureTeams } from './identity.js';
+import { QuotaRefusedError } from './quota-guard.js';
 import {
   appendRecordedDocument,
   type RecordedDocument,
@@ -33,9 +41,11 @@ export class HttpDocumentSource implements DocumentSource {
     private readonly http: SportradarHttp,
     readonly observationSource: ObservationSource,
     private readonly recordTo: string | null = null,
+    /** Feed parameters (the provider game id for production URLs; ignored by the simulation resolver). */
+    private readonly params: FeedParams = {},
   ) {}
   async fetch<T>(feed: Feed, schema: ZodType<T>): Promise<FetchedDocument<T>> {
-    const doc = await this.http.getJson(feed, schema);
+    const doc = await this.http.getJson(feed, schema, this.params);
     if (this.recordTo) appendRecordedDocument(this.recordTo, toRecordedDocument(feed, doc));
     return doc;
   }
@@ -156,6 +166,26 @@ export class GameWatcher {
     return { gameId, status: this.lastStatus ?? status, result };
   }
 
+  /**
+   * Bind the watcher to a game row that already exists (trial mode: `pnpm trial plan` created it
+   * from the schedule; no automatic discovery). Same side effects as the first document's
+   * `ensure`, without needing a document.
+   */
+  async attach(gameId: string): Promise<void> {
+    if (this.gameId === gameId) return;
+    if (this.gameId) throw new Error(`watcher already bound to game ${this.gameId}`);
+    const [row] = await this.deps.db<{ id: string; status: string }[]>`
+      select id, status::text as status from public.games where id = ${gameId}`;
+    if (!row) throw new Error(`game ${gameId} does not exist`);
+    await this.deps
+      .db`update ingest.ingestion_runs set game_id = ${gameId} where id = ${this.deps.run.id}`;
+    this.gameId = gameId;
+    this.lastStatus = row.status;
+    this.deps.log.info({ gameId, status: row.status }, 'watcher attached to game row');
+    this.deps.onGameKnown?.(gameId);
+    this.deps.pulse?.start(gameId);
+  }
+
   private async ensure(nd: NormalizedDocument): Promise<string> {
     if (this.gameId) return this.gameId;
     const teamIds = await ensureTeams(this.deps.db, this.deps.adapter.league, nd.teams);
@@ -272,6 +302,258 @@ export async function pollLoop(
     await sleep(Math.max(0, opts.pollIntervalMs - elapsed));
   }
   return status;
+}
+
+export interface CadenceLoopOptions {
+  untilClosed: boolean;
+  isStopped: () => boolean;
+  /** Called after every fetch (budget accounting / evidence). */
+  onCall?: (feed: Feed) => void;
+  /**
+   * Called for every retry that was sent (a counted call against the reservation's retry
+   * allowance): after a cadence HTTP 429, or after any fetch failure of a closing feed. A retry is
+   * reported once its request got past the quota guard, so a retry the guard refuses is neither
+   * sent, counted, nor reported. Lets a caller that loses the outcome (the loop throws on a quota
+   * refusal) still report the retries spent.
+   */
+  onRetry?: (kind: RetryKind, feed: Feed) => void;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Why a fetch was retried at once: a cadence or closing HTTP 429, or another closing failure. */
+export type RetryKind = 'http429' | 'closing';
+
+export interface CadenceOutcome {
+  status: string | null;
+  /** Fetches that returned a document and were processed (failed attempts are not counted here). */
+  okFetches: number;
+  failed: number;
+  /** HTTP 429s retried at once through the next rate slot (each retry is a logged call). */
+  retried429: number;
+  /** Closing-set fetches retried after any other failure (timeout, 5xx, parse; each a logged call). */
+  retriedClosing: number;
+  elapsedMs: number;
+}
+
+/**
+ * Cadence-driven loop (trial / production REST, plan §4): each feed is fetched
+ * at its own interval from the watch start (first poll at t=0), one-off
+ * boxscores at their offsets, and the closing summary + boxscore once the
+ * game is `closed`, `cancelled`, `unnecessary` or `postponed` (the latter
+ * three end the watch even without `--until closed`: nothing more will be
+ * played under this watch). The horizon is a planning number: a game that runs
+ * long (overtime) keeps being watched; the quota guard, not the horizon, is
+ * what refuses calls. A cadence fetch that fails is logged and retried at its
+ * next due time; an HTTP 429 is retried once at once through the next rate slot, because
+ * the provider's spacing rule is not known exactly (live run 2026-10-19). A
+ * closing fetch has no next due time, so any failure but a quota refusal
+ * (timeout, 5xx, 429, schema) is retried twice through the next rate slots.
+ * The status starts from the stored one (`watcher.lastStatus`), so a watch
+ * attached to a `complete` game starts in the slow phase.
+ */
+export async function cadenceLoop(
+  watcher: GameWatcher,
+  source: DocumentSource,
+  log: Logger,
+  cadence: Cadence,
+  opts: CadenceLoopOptions,
+): Promise<CadenceOutcome> {
+  const now = opts.now ?? (() => Date.now());
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const startedAt = now();
+  const schemaFor = (feed: GameFeedName) =>
+    feed === 'pbp'
+      ? PbpDocumentSchema
+      : feed === 'summary'
+        ? SummaryDocumentSchema
+        : BoxscoreDocumentSchema;
+  let status: string | null = watcher.lastStatus ?? null;
+  let okFetches = 0;
+  let failed = 0;
+  let retried429 = 0;
+  let retriedClosing = 0;
+  let horizonWarned = false;
+  /**
+   * The feed whose document first reported a terminal status (`closed`, `cancelled`,
+   * `unnecessary`, `postponed`) in this watch; the closing set skips it (rev 4.12). Null until a
+   * document of this watch is processed while the stored or written status is terminal, so a
+   * seeded stored status never triggers the closing set without a fetch.
+   */
+  let terminalBy: GameFeedName | null = null;
+  const countRetry = (kind: RetryKind, feed: GameFeedName) => {
+    if (kind === 'http429') retried429++;
+    else retriedClosing++;
+    opts.onRetry?.(kind, feed);
+  };
+  const fetchOne = async (feed: GameFeedName, closing = false): Promise<void> => {
+    let doc: FetchedDocument<unknown> | null = null;
+    /** The retry in flight; reported once its request is past the quota guard. */
+    let retrying: RetryKind | null = null;
+    for (let attempt = 0; doc === null; attempt++) {
+      try {
+        doc = await source.fetch(feed, schemaFor(feed));
+      } catch (err) {
+        // No budget: stop the watch (the run ends as error, the reservation is released) instead
+        // of issuing a guard query per tick forever. A refused retry was never sent.
+        if (err instanceof QuotaRefusedError) throw err;
+        if (retrying) countRetry(retrying, feed);
+        const is429 = err instanceof ProviderHttpError && err.status === 429;
+        // Only the fetch is retried: an error applying a document (below) costs no refetch.
+        if (!opts.isStopped() && (closing ? attempt < 2 : is429 && attempt < 1)) {
+          retrying = is429 ? 'http429' : 'closing';
+          log.warn(
+            { err: is429 ? undefined : err, feed, attempt: attempt + 1, okFetches, closing },
+            is429 ? 'HTTP 429; retrying at the next rate slot' : 'closing fetch failed; retrying',
+          );
+          continue;
+        }
+        failed++;
+        log.error(
+          { err, feed, okFetches, closing },
+          closing
+            ? 'closing fetch failed; giving up'
+            : 'fetch failed; retrying at the next due time',
+        );
+        return;
+      }
+      if (retrying) countRetry(retrying, feed);
+    }
+    okFetches++;
+    opts.onCall?.(feed);
+    try {
+      const out = await watcher.process(
+        feed,
+        JSON.parse(doc.rawText),
+        doc.requestedAt,
+        source.observationSource,
+      );
+      if (terminalBy === null && out && isTerminal(out.status)) terminalBy = feed;
+      status = out?.status ?? status;
+    } catch (err) {
+      failed++;
+      log.error({ err, feed, okFetches, closing }, 'document failed to apply; not refetched');
+    }
+  };
+  // Periodic feeds: next due time per feed. One-offs: a sorted queue of offsets.
+  // `base` anchors each feed's grid (the summary sits half a pbp interval off the pbp grid).
+  const periodic: Array<{ feed: GameFeedName; everyMs: number; base: number; nextAt: number }> = [];
+  const addPeriodic = (feed: GameFeedName, everyMs: number | null, offsetMs = 0) => {
+    if (everyMs !== null)
+      periodic.push({ feed, everyMs, base: startedAt + offsetMs, nextAt: startedAt + offsetMs });
+  };
+  addPeriodic('pbp', cadence.pbpMs);
+  addPeriodic('summary', cadence.summaryMs, cadence.summaryOffsetMs ?? 0);
+  addPeriodic('boxscore', cadence.boxscoreMs);
+  // Slow phases: while the game waits for `closed` after `complete` (or idles on `closed`
+  // without `--until closed`), poll at most every `afterCompleteMs` (rev 4.9); before play
+  // starts, at most every `preGameMs` (rev 4.12). A phase may poll only some feeds; the others
+  // stay on their own grids without fetching.
+  const slowPhase = (): { ms: number; feeds: readonly GameFeedName[] | undefined } | null => {
+    if (
+      cadence.afterCompleteMs != null &&
+      (status === 'complete' || (status === 'closed' && !opts.untilClosed))
+    )
+      return { ms: cadence.afterCompleteMs, feeds: cadence.afterCompleteFeeds };
+    if (cadence.preGameMs != null && status !== null && isPreGame(status))
+      return { ms: cadence.preGameMs, feeds: cadence.preGameFeeds };
+    return null;
+  };
+  const slowed = () => slowPhase() !== null;
+  /**
+   * A document of this watch ended it: nothing but the closing set runs after that, not even a
+   * feed due in the same tick (a cadence summary there would repeat the closing summary). `closed`
+   * without `--until closed` keeps polling.
+   */
+  const ending = () =>
+    terminalBy !== null && isTerminal(status) && (status !== 'closed' || opts.untilClosed);
+  const oneOffs = [...cadence.boxscoreAtMs].sort((a, b) => a - b).map((ms) => startedAt + ms);
+  const outcome = (): CadenceOutcome => ({
+    status,
+    okFetches,
+    failed,
+    retried429,
+    retriedClosing,
+    elapsedMs: now() - startedAt,
+  });
+  while (!opts.isStopped()) {
+    const t = now();
+    for (const p of periodic) {
+      if (ending()) break;
+      // Leaving `complete` (a newer event re-opened play): pull a slot booked at the slow pace
+      // back to the next slot of the feed's own grid.
+      if (!slowed() && p.nextAt - t > p.everyMs) {
+        p.nextAt = p.base + Math.ceil((t - p.base) / p.everyMs) * p.everyMs;
+      }
+      if (t >= p.nextAt) {
+        const phase = slowPhase();
+        if (phase?.feeds && !phase.feeds.includes(p.feed)) {
+          // Paused in this phase: stay on the feed's own grid without fetching.
+          while (p.nextAt <= t) p.nextAt += p.everyMs;
+          continue;
+        }
+        await fetchOne(p.feed);
+        // Keep the grid anchored to the start, skipping slots a slow fetch already passed.
+        const after = slowPhase();
+        const everyMs = after ? Math.max(p.everyMs, after.ms) : p.everyMs;
+        while (p.nextAt <= now()) p.nextAt += everyMs;
+      }
+    }
+    while (!ending() && oneOffs.length > 0 && t >= (oneOffs[0] ?? Number.POSITIVE_INFINITY)) {
+      oneOffs.shift();
+      await fetchOne('boxscore');
+    }
+    // `postponed` is terminal too: once it is recorded (`last_seq` >= 1), neither a later
+    // `scheduled` (post -> pre only while `last_seq = 0`) nor an `inprogress` document without
+    // newer events (a lagging view) is accepted, so polling could never see a resumption.
+    // Known gap: a game resumed under the same id (another day, or after plays were recorded)
+    // is not followed automatically; recovery is an operator step (`pnpm game rebuild`, planned,
+    // not built yet). Sportradar lists a made-up game under a new id, which is planned and
+    // watched as a new game; id reuse has not been observed in our data.
+    if (ending()) {
+      // Keep the summary's offset from the document that reported the final status before the
+      // closing set (rev 4.9 (2)), so no pbp <-> summary pair leaves at the minimum spacing; skip
+      // the feed that reported it, which was just fetched (rev 4.12 (2)).
+      const closing = cadence.closing.filter((feed) => feed !== terminalBy);
+      if (cadence.summaryOffsetMs && closing.length > 0) await sleep(cadence.summaryOffsetMs);
+      for (const feed of closing) await fetchOne(feed, true);
+      const final = outcome();
+      log.info(final, status === 'closed' ? 'game closed' : `game ${status}; watch ends`);
+      return final;
+    }
+    if (!horizonWarned && now() - startedAt >= cadence.horizonMs) {
+      horizonWarned = true;
+      log.warn(
+        { okFetches, horizonMs: cadence.horizonMs },
+        'watch horizon reached; game not closed, continuing under the quota guard',
+      );
+    }
+    const dueTimes = [
+      ...periodic.map((p) => p.nextAt),
+      ...(oneOffs.length ? [oneOffs[0] ?? 0] : []),
+    ];
+    if (dueTimes.length === 0) {
+      log.warn('cadence polls nothing; stopping');
+      break;
+    }
+    const waitMs = Math.max(0, Math.min(...dueTimes) - now());
+    await sleep(Math.min(waitMs, 1000));
+  }
+  return outcome();
+}
+
+type GameFeedName = 'pbp' | 'summary' | 'boxscore';
+
+/** Statuses after which this watch sees nothing more: the closing set runs, then the watch ends. */
+const TERMINAL: ReadonlySet<string> = new Set(['closed', 'cancelled', 'unnecessary', 'postponed']);
+function isTerminal(status: string | null): boolean {
+  return status !== null && TERMINAL.has(status);
+}
+
+/** True for a known pre-game status (`scheduled`, `created`, `time_tbd`, `if_necessary`). */
+function isPreGame(status: string): boolean {
+  const known = GameStatusSchema.safeParse(status);
+  return known.success && phaseOf(known.data) === 'pre';
 }
 
 export interface ReplayOutcome {

@@ -472,7 +472,25 @@ export async function mergePlayers(
       'identity merge dropped loser rows that collided with the survivor; content kept in ingest.player_merges',
     );
   }
-  log?.info({ survivor, loser, mergeId: merge.id, repoint, trigger }, 'players merged');
+  // The trigger may carry the whole profile document (held-document provenance); log its identity only.
+  log?.info(
+    {
+      survivor,
+      loser,
+      mergeId: merge.id,
+      repoint,
+      trigger: {
+        league: trigger.league,
+        feed: trigger.feed,
+        documentId: trigger.documentId,
+        source: trigger.source,
+        runId: trigger.runId,
+        documentObservedAt:
+          (trigger as { documentObservedAt?: Date }).documentObservedAt?.toISOString() ?? null,
+      },
+    },
+    'players merged',
+  );
   return { survivor, loser, mergeId: merge.id, repoint, conflicts };
 }
 

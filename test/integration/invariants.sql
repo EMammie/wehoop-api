@@ -329,3 +329,86 @@ select (has_table_privilege('anon', 'ingest.player_merges', 'SELECT')::int
       + has_table_privilege('anon', 'ingest.player_merge_holds', 'SELECT')::int
       + has_table_privilege('authenticated', 'ingest.player_merges', 'SELECT')::int
       + has_table_privilege('authenticated', 'ingest.player_merge_holds', 'SELECT')::int);
+
+-- check: sim_fixture_and_rehearsal_calls_never_count_quota | expect: 0
+select count(*)
+from ingest.provider_calls
+where quota_counted and source in ('simulation', 'fixture', 'rehearsal');
+
+-- check: trial_and_production_calls_always_count_quota | expect: 0
+select count(*)
+from ingest.provider_calls
+where not quota_counted and source in ('trial', 'production');
+
+-- check: quota_counted_calls_carry_a_product | expect: 0
+select count(*) from ingest.provider_calls where quota_counted and product is null;
+
+-- check: trial_watch_runs_have_a_reservation | expect: 0
+select count(*)
+from ingest.ingestion_runs r
+where r.kind = 'watch_game'
+  and r.source in ('trial', 'production', 'rehearsal')
+  and not exists (select 1 from ingest.budget_reservations b where b.run_id = r.id);
+
+-- check: counted_calls_spaced_at_least_one_second_per_product | expect: 0
+select count(*)
+from (
+  select called_at - lag(called_at) over (partition by product order by called_at, id) as gap
+  from ingest.provider_calls
+  where quota_counted
+) g
+where g.gap < interval '1 second';
+
+-- check: rate_limited_calls_spaced_at_least_one_second_per_product | expect: 0
+select count(*)
+from (
+  select called_at - lag(called_at) over (partition by product order by called_at, id) as gap
+  from ingest.provider_calls
+  where source in ('trial', 'production', 'rehearsal')
+) g
+where g.gap < interval '1 second';
+
+-- check: rate_limited_calls_claimed_a_shared_slot | expect: 0
+-- Every rate-limited call claims its slot from ingest.provider_rate_slots (rev 4.6), which
+-- then holds at least one interval beyond that call; a call logged past that point was made
+-- by a process that bypassed the shared ledger (the per-process limiter of evidence M3 1c).
+select count(*)
+from ingest.provider_calls pc
+join ingest.provider_rate_slots s on s.product = pc.product
+where pc.source in ('trial', 'production', 'rehearsal')
+  and pc.called_at > s.next_slot_at - interval '1 second';
+
+-- check: every_quota_product_has_a_rate_slot | expect: 0
+-- 0011 seeds a slot row per quota row; a product added later gets one on its first rate-limited
+-- call (PgSlotStore) or has made none. Any quota row that has rate-limited calls but no slot row
+-- was served by a process that bypassed the shared ledger.
+select count(*)
+from ingest.product_quotas q
+left join ingest.provider_rate_slots s on s.product = q.product
+where s.product is null
+  and exists (select 1 from ingest.provider_calls pc
+              where pc.product = q.product and pc.source in ('trial', 'production', 'rehearsal'));
+
+-- check: no_open_reservation_for_a_finished_watch_run | expect: 0
+select count(*)
+from ingest.budget_reservations b
+join ingest.ingestion_runs r on r.id = b.run_id
+where b.released_at is null and r.status <> 'running';
+
+-- check: reservation_used_calls_match_provider_calls | expect: 0
+select count(*)
+from ingest.budget_reservations b
+where b.used_calls <> (select count(*) from ingest.provider_calls c where c.reservation_id = b.id);
+
+-- check: counted_reservations_are_trial_or_production | expect: 0
+select count(*)
+from ingest.budget_reservations b
+join ingest.provider_calls c on c.reservation_id = b.id
+where c.quota_counted <> (b.source in ('trial', 'production'));
+
+-- check: quota_tables_closed_to_clients | expect: 0
+select count(*)
+from information_schema.role_table_grants
+where table_schema = 'ingest'
+  and table_name in ('product_quotas', 'provider_calls', 'budget_reservations', 'v_quota')
+  and grantee in ('anon', 'authenticated');

@@ -9,7 +9,8 @@ export type RunKind =
   | 'backfill'
   | 'changes'
   | 'profile';
-export type RunSource = 'production' | 'trial' | 'simulation' | 'fixture';
+/** `rehearsal` = trial/production code path against a local stand-in host: rate-limited, never quota-counted. */
+export type RunSource = 'production' | 'trial' | 'rehearsal' | 'simulation' | 'fixture';
 
 export interface RunHandle {
   id: number;

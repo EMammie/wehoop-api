@@ -4,13 +4,17 @@ coverage/
 .env
 .env.*
 !.env.example
+!.env.rehearsal.example
 *.log
 .DS_Store
 
-# Supabase local state
+# Supabase local state (dev stack and the persistent trial stack)
 supabase/.branches/
 supabase/.temp/
 supabase/.env
+supabase-trial/supabase/.branches/
+supabase-trial/supabase/.temp/
+supabase-trial/supabase/.env
 
 # Claude Code local settings (shared agents/skills ARE committed)
 .claude/settings.local.json
