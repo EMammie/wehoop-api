@@ -84,6 +84,15 @@ const AFTER_COMPLETE = {
 const PRE_GAME_MS = 5 * MIN;
 
 /**
+ * How long after its scheduled tip-off a game stored as `complete` is still (re)watched by the
+ * scheduler: the planning horizon plus the budgeted complete -> closed wait (150 + 120 = 270 min).
+ * A worker restarted during that wait resumes the watch (the validated statistics and the closing
+ * pbp arrive with `closed`); a game still `complete` past it is left alone instead of being
+ * re-watched by every restart.
+ */
+export const COMPLETE_REWATCH_MS = GAME_HORIZON_MS + AFTER_COMPLETE.closeWaitMs;
+
+/**
  * Plan §4: full = pbp/30 s + box-score statistics/5 min; extended = summary/60 s
  * + 1 boxscore at +120 min; lean-full = pbp/60 s + statistics/10 min.
  * In Sportradar v8 the team and player statistics live in the Game Summary

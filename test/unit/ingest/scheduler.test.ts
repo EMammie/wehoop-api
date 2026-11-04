@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../../../src/config.js';
+import { COMPLETE_REWATCH_MS } from '../../../src/ingest/cadence.js';
 import type { QuotaGuard } from '../../../src/ingest/quota-guard.js';
 import {
   gamesToWatch,
@@ -67,6 +68,40 @@ describe('scheduler decisions (plan §4 production scheduler)', () => {
         (g) => g.id,
       ),
     ).toEqual(['soon', 'live']);
+  });
+
+  it('a complete game is resumed until tip-off + horizon + budgeted complete wait; closed, cancelled, postponed, unnecessary never', () => {
+    // 150 min planning horizon + 120 min budgeted complete -> closed wait (rev 4.12 (3)).
+    expect(COMPLETE_REWATCH_MS).toBe(270 * 60_000);
+    const tip = new Date('2026-10-19T23:00:00Z');
+    const at = (min: number) => new Date(tip.getTime() + min * 60_000);
+    const o = { watchLeadMs: 10 * 60_000, maxLateStartMs: 6 * 3_600_000 };
+    const w = { windowBeforeMs: 30 * 60_000, windowAfterMs: 4 * 3_600_000 };
+    const complete = game('c', tip, 'complete');
+    // Inside the bound (a worker restarted during the wait): watched again, inside the window.
+    for (const min of [90, 180, 270]) {
+      expect(gamesToWatch([complete], at(min), new Set(), o).map((g) => g.id)).toEqual(['c']);
+    }
+    expect(inGameWindow([complete], at(180), w)).toBe(true);
+    // Past the bound: a game stuck at complete is not re-watched by every restart.
+    expect(gamesToWatch([complete], new Date(at(270).getTime() + 1), new Set(), o)).toEqual([]);
+    expect(gamesToWatch([complete], at(300), new Set(), o)).toEqual([]);
+    // The window still ends at tip-off + 4 h, and a tighter bound wins inside it.
+    expect(inGameWindow([complete], new Date(at(240).getTime() + 1), w)).toBe(false);
+    expect(inGameWindow([complete], at(120), { ...w, completeRewatchMs: 60 * 60_000 })).toBe(false);
+    expect(
+      gamesToWatch([complete], at(120), new Set(), { ...o, completeRewatchMs: 60 * 60_000 }),
+    ).toEqual([]);
+    // Already running: not started twice.
+    expect(gamesToWatch([complete], at(90), new Set(['c']), o)).toEqual([]);
+    // Every other post status stays excluded, even right after tip-off.
+    for (const status of ['closed', 'cancelled', 'postponed', 'unnecessary']) {
+      const g = game('x', tip, status);
+      for (const min of [30, 90, 180]) {
+        expect(gamesToWatch([g], at(min), new Set(), o), status).toEqual([]);
+        expect(inGameWindow([g], at(min), w), status).toBe(false);
+      }
+    }
   });
 });
 
