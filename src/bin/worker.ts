@@ -464,12 +464,16 @@ async function main() {
       log.error({ err: failure }, 'trial watch failed');
     }
     // The changes already committed still reach subscribers: the same tail as a clean end (final
-    // drain, then the closing pulse), best effort, and the exit code stays the watch's own.
+    // drain, then the closing pulse and the last scoreboard tick), best effort, and the exit code
+    // stays the watch's own. runTrialWatch has already closed any push streams and stopped this
+    // game's pulse timer before it threw.
     try {
       pulse.stop();
       const left = await finalDrain();
       if (gameIdKnown) await pulse.sendOnce(gameIdKnown);
       publisher.stop();
+      scoreboard.stop();
+      if (scheduler || args.scores) await scoreboard.tick().catch(() => undefined);
       if (left.pending > 0) {
         log.error(
           { pending: left.pending, dead: left.dead, drainTimeoutMs },

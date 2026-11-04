@@ -156,7 +156,9 @@ export const SIM_CADENCE: { full: Cadence; scoreOnly: Cadence } = {
  * statistics (summary) every 5 minutes, plus the closing pair. Push statistics
  * are not consumed yet (no recorded sample pins their shape), so statistics
  * stay on the summary feed. The budget is REST only; each stream connection is
- * a counted call on top of it, allowed for by PUSH_CONNECTION_ALLOWANCE.
+ * a counted call on top of it, allowed for by PUSH_CONNECTION_ALLOWANCE. The
+ * rev 4.12 pre-game and after-complete rules and the rev 4.13 retry allowance
+ * apply as for the polling profiles.
  */
 export const PUSH_RECONCILE_CADENCE: Cadence = {
   pbpMs: 5 * MIN,
@@ -164,11 +166,17 @@ export const PUSH_RECONCILE_CADENCE: Cadence = {
   boxscoreMs: null,
   boxscoreAtMs: [],
   horizonMs: GAME_HORIZON_MS,
-  closing: CLOSING,
+  // Rev 4.12 (2), as for every pbp profile: the summary alone polls after `complete` and the pbp
+  // pauses, so the closing set is pbp, summary, boxscore minus the feed that reported `closed`
+  // (the closing pbp carries plays corrected during the wait). Two closing calls either way.
+  closing: PBP_CLOSING,
   // Rev 4.9: the reconciliation pbp and summary share a 5-min grid, so the summary sits half
   // an interval off it; the after-complete pace (5 min) equals the reconciliation pace, so
-  // only the budgeted complete -> closed wait and the 429 allowance change the total.
+  // only the budgeted complete -> closed wait and the retry allowance change the total.
   summaryOffsetMs: 150_000,
+  // Rev 4.12 (1): before play, the pbp alone every 5 min (the summary pauses on its grid).
+  preGameMs: PRE_GAME_MS,
+  preGameFeeds: ['pbp'],
   ...AFTER_COMPLETE,
 };
 
