@@ -128,12 +128,14 @@ describe('push watch non-happy exits (review should 2)', () => {
       ),
     ).rejects.toMatchObject({ reason: 'below_reserve' });
     expect(guard.seen).toBe(4);
-    // Never sent: the refused summary reached no provider; the streams are closed.
-    expect(provider.requests.map((r) => r.feed).sort()).toEqual([
-      'pbp',
-      'push_clock',
-      'push_events',
-    ]);
+    // Never sent: the refused summary reached no provider (the t=0 pbp did; a stream that passed
+    // the guard but was still waiting for its slot when the watch failed is stopped unsent).
+    const sent = provider.requests.map((r) => r.feed);
+    expect(sent).toContain('pbp');
+    expect(sent.filter((f) => f !== 'pbp' && f !== 'push_events' && f !== 'push_clock')).toEqual(
+      [],
+    );
+    expect(sent.filter((f) => f === 'pbp')).toHaveLength(1);
     expect(provider.openStreams).toBe(0);
     const [last] = (await guard.reservations({ product })).slice(-1);
     if (!last?.runId) throw new Error('no reservation for the watch');
@@ -154,7 +156,10 @@ describe('push watch non-happy exits (review should 2)', () => {
       retriedClosing: 0,
     });
     expect(res?.releasedAt).toBeInstanceOf(Date);
-    expect(res?.used).toBe(3);
+    const [logged] = await db<{ n: number }[]>`
+      select count(*)::int as n from ingest.provider_calls where reservation_id = ${last.id}`;
+    expect(res?.used).toBe(logged?.n);
+    expect(res?.used).toBe(sent.length);
   }, 60_000);
 
   for (const terminal of ['postponed', 'cancelled'] as const) {

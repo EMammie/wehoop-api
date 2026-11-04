@@ -68,6 +68,23 @@ async function liveGame() {
   };
 }
 
+/**
+ * After the cadence's t=0 pbp has been served (so it is pbp #1 and the next pbp is the backfill's),
+ * cut the events stream as soon as its first connection is open: the reconnect needs a backfill.
+ */
+function dropEventsAfterFirstPbp(provider: ReturnType<typeof scriptedProvider>) {
+  const state = { pbps: 0, dropped: false };
+  provider.onServe = (feed) => {
+    if (feed !== 'pbp' || ++state.pbps !== 1) return;
+    let tries = 0;
+    const t = setInterval(() => {
+      if (provider.dropStreams('push_events') > 0) state.dropped = true;
+      if (state.dropped || ++tries > 300) clearInterval(t);
+    }, 100);
+  };
+  return state;
+}
+
 /** Resolves once the game's first backfill sub-run has ended (ok or error). */
 async function backfillEnded(gameId: string, timeoutMs = 40_000): Promise<string> {
   const until = Date.now() + timeoutMs;
@@ -128,15 +145,10 @@ describe('a reconnect backfill is rate-limited on the shared ledger, guarded, lo
     const { game, gameId, docs } = await liveGame();
     const provider = scriptedProvider();
     provider.docs = docs;
-    // The cadence's t=0 pbp, then cut the events stream: its reconnect needs a backfill.
-    let pbps = 0;
-    provider.onServe = (feed) => {
-      if (feed === 'pbp' && ++pbps === 1)
-        setTimeout(() => provider.dropStreams('push_events'), 300);
-    };
+    const drop = dropEventsAfterFirstPbp(provider);
     // The backfill's first attempt draws a 429 (retried once at the next slot).
     provider.fault = (feed) =>
-      feed === 'pbp' && pbps === 2
+      feed === 'pbp' && drop.pbps === 2
         ? new Response('{"message":"Too Many Requests"}', { status: 429 })
         : undefined;
     // While the events stream reconnects, another process claims the next two slots of the product.
@@ -220,11 +232,7 @@ describe('a reconnect backfill is rate-limited on the shared ledger, guarded, lo
     const { game, gameId, docs } = await liveGame();
     const provider = scriptedProvider();
     provider.docs = docs;
-    let pbps = 0;
-    provider.onServe = (feed) => {
-      if (feed === 'pbp' && ++pbps === 1)
-        setTimeout(() => provider.dropStreams('push_events'), 300);
-    };
+    dropEventsAfterFirstPbp(provider);
     // The reconnect itself passes the guard; before it answers, the reservation is spent and the
     // product sits at its reserve, so the backfill that follows is refused.
     provider.onStream = async (feed, n) => {
