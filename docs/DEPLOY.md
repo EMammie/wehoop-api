@@ -106,9 +106,13 @@ curl -s https://wehoop-api.fly.dev/health | jq '.worker.lockHeld'   # true
 
 A restart during a game's complete -> closed wait resumes that game: the scheduler watches a game
 stored as `complete` again, as a new generation starting in the slow after-complete phase, until
-270 min after tip-off (`COMPLETE_REWATCH_MS`: 150 min horizon + 120 min budgeted wait); expect
-"scheduler: resuming the watch of a complete game (waiting for closed)". Covered on the dev stack
-by `test/integration/scheduler-resume.test.ts`.
+the later of (a) 120 min after the game became complete (`COMPLETE_CLOSE_WAIT_MS`, the budgeted
+wait; the moment is the `created_at` of its first `status` change to `complete` in `game_changes`)
+and (b) 270 min after its scheduled tip-off (`COMPLETE_REWATCH_MS`: 150 min horizon + 120 min
+wait, the floor when that moment is unknown), never later than 24 h after the scheduled tip-off
+(`COMPLETE_REWATCH_CAP_MS`). A late tip-off or overtime therefore keeps the whole wait. Expect
+"scheduler: resuming the watch of a complete game (waiting for closed)" with `completedAt` and
+`until` in the log line. Covered on the dev stack by `test/integration/scheduler-resume.test.ts`.
 
 **Local rehearsal (run this today, dev stack only).** It kills the push-mode worker with
 SIGKILL mid-game and restarts it; the second worker waits for the lingering lock, takes it, aborts the
