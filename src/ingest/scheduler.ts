@@ -10,13 +10,13 @@ import { SportradarHttp } from '../providers/sportradar/http.js';
 import { rateLimiterFor } from '../providers/sportradar/rate-limiter.js';
 import { createResolver } from '../providers/sportradar/resolver.js';
 import { DailyScheduleDocumentSchema } from '../providers/sportradar/schemas/schedule.js';
-import { coverageIsFull } from './cadence.js';
+import { COMPLETE_CLOSE_WAIT_MS, COMPLETE_REWATCH_MS, coverageIsFull } from './cadence.js';
 import type { FaultInjector } from './fault.js';
 import { phaseOf } from './freshness.js';
 import { needsRateLimit, type QuotaGuard, QuotaRefusedError } from './quota-guard.js';
 import { ReferenceIngester } from './reference.js';
 import { endRun, startRun } from './runs.js';
-import { type GameRow, runSourceOf, runTrialWatch } from './trial-mode.js';
+import { assertSpeedAllowed, type GameRow, runSourceOf, runTrialWatch } from './trial-mode.js';
 
 /**
  * Production scheduler (plan §4 "Production/simulation scheduler"), the
@@ -26,7 +26,13 @@ import { type GameRow, runSourceOf, runTrialWatch } from './trial-mode.js';
  * that league is inside its window), and starts a coverage-aware watch for
  * every game near tip-off (`runTrialWatch`, push mode where the league offers
  * push events and the game has play-by-play coverage). Several watches run at
- * once; each is the ordinary watch generation with its own reservation.
+ * once; each is the ordinary watch generation with its own reservation. A game
+ * stored as `complete` (a worker restarted during the complete -> closed wait)
+ * is watched again, as a new generation, until `completeRewatchUntil`: the later
+ * of scheduled tip-off + COMPLETE_REWATCH_MS and the moment it became complete +
+ * COMPLETE_CLOSE_WAIT_MS, never past tip-off + COMPLETE_REWATCH_CAP_MS; the watch
+ * starts in the slow after-complete phase (the loop status is seeded from the
+ * stored one).
  *
  * Deliberately NOT here yet: `changes(date)` every 30 min (no daily change
  * log feed, schema or fixture exists in the repo; see the M4 handoff), and any
@@ -51,6 +57,18 @@ export interface SchedulerOptions {
   watchRetryMs?: number;
   /** A failed schedule poll is retried after this (default 5 min). */
   pollRetryMs?: number;
+  /**
+   * A game stored as `complete` is watched (and counts as inside its window) at least until this
+   * long after its scheduled tip-off (default COMPLETE_REWATCH_MS: horizon + budgeted wait) ...
+   */
+  completeRewatchMs?: number;
+  /** ... and at least until this long after it became complete (default COMPLETE_CLOSE_WAIT_MS). */
+  completeCloseWaitMs?: number;
+  /**
+   * Rehearsal time scale passed to every watch (`assertSpeedAllowed` refuses anything but 1
+   * outside a loopback rehearsal host). Default 1.
+   */
+  watchSpeed?: number;
 }
 
 export interface SchedulerDeps extends SchedulerOptions {
@@ -66,7 +84,7 @@ export interface SchedulerDeps extends SchedulerOptions {
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   /** Injection points for tests; the defaults talk to the database and the provider. */
-  loadGames?: (league: LeagueCode, from: Date, to: Date) => Promise<GameRow[]>;
+  loadGames?: (league: LeagueCode, range: GameRange) => Promise<GameRow[]>;
   pollSchedule?: (adapter: LeagueAdapter, dates: string[]) => Promise<void>;
   watch?: (adapter: LeagueAdapter, game: GameRow, push: boolean) => Promise<void>;
   fetchImpl?: typeof fetch;
@@ -129,34 +147,122 @@ export function shouldPollSchedule(
 
 const isPost = (status: string) => phaseOf(status as GameStatus) === 'post';
 
-/** Any game inside [tip-off - before, tip-off + after] that is not finished. */
+/** A `complete` game is never resumed later than this after its scheduled tip-off (also the loader's reach back). */
+export const COMPLETE_REWATCH_CAP_MS = 24 * 3_600_000;
+
+export interface CompleteBounds {
+  /** Floor from the scheduled tip-off (COMPLETE_REWATCH_MS). */
+  completeRewatchMs?: number;
+  /** From the moment the game became complete (COMPLETE_CLOSE_WAIT_MS). */
+  completeCloseWaitMs?: number;
+}
+
+/**
+ * Until when (ms epoch) a game stored as `complete` is still (re)watched: the later of
+ * `scheduledAt + completeRewatchMs` and `completedAt + completeCloseWaitMs`, capped at
+ * `scheduledAt + COMPLETE_REWATCH_CAP_MS`. Anchoring on `completedAt` keeps the whole budgeted
+ * wait after a late tip-off or overtime (a 60 min delay plus one overtime would otherwise lose the
+ * end of a 71 min wait, and a delay of 135 min or more all of it); the scheduled floor covers a
+ * game whose completion moment is unknown.
+ */
+export function completeRewatchUntil(g: GameRow, bounds: CompleteBounds = {}): number {
+  const tip = g.scheduledAt.getTime();
+  const fromTip = tip + (bounds.completeRewatchMs ?? COMPLETE_REWATCH_MS);
+  const fromComplete = g.completedAt
+    ? g.completedAt.getTime() + (bounds.completeCloseWaitMs ?? COMPLETE_CLOSE_WAIT_MS)
+    : Number.NEGATIVE_INFINITY;
+  return Math.min(tip + COMPLETE_REWATCH_CAP_MS, Math.max(fromTip, fromComplete));
+}
+
+/**
+ * Not finished, for the scheduler: every status outside the post phase, and `complete` (game
+ * over, statistics not yet validated) until `completeRewatchUntil`. A worker restarted during the
+ * complete -> closed wait must resume the watch, or the validated statistics and the closing pbp
+ * never arrive; `closed`, `cancelled`, `postponed` and `unnecessary` are never watched again.
+ */
+export function stillWatchable(g: GameRow, now: Date, bounds: CompleteBounds = {}): boolean {
+  if (!isPost(g.status)) return true;
+  return g.status === 'complete' && now.getTime() <= completeRewatchUntil(g, bounds);
+}
+
+/**
+ * Any game inside [tip-off - before, tip-off + after] that is not finished (stillWatchable).
+ * Accepted cost: a `complete` game inside its window counts, so the hourly schedule polls go on
+ * during the complete -> closed wait (about 2 to 4 extra daily-schedule calls per league).
+ */
 export function inGameWindow(
   games: GameRow[],
   now: Date,
-  opts: { windowBeforeMs: number; windowAfterMs: number },
+  opts: { windowBeforeMs: number; windowAfterMs: number } & CompleteBounds,
 ): boolean {
   return games.some(
     (g) =>
-      !isPost(g.status) &&
+      stillWatchable(g, now, opts) &&
       g.scheduledAt.getTime() - opts.windowBeforeMs <= now.getTime() &&
       now.getTime() <= g.scheduledAt.getTime() + opts.windowAfterMs,
   );
 }
 
-/** Games to start watching now: tip-off within the lead, not too late, not finished, not already watched. */
+/**
+ * Games to start watching now: tip-off within the lead, not finished (stillWatchable), not
+ * already watched, and not too late: `maxLateStartMs` after tip-off for a game not yet complete;
+ * a `complete` game is resumed within its own bound (completeRewatchUntil), however late it tipped.
+ */
 export function gamesToWatch(
   games: GameRow[],
   now: Date,
   running: ReadonlySet<string>,
-  opts: { watchLeadMs: number; maxLateStartMs: number },
+  opts: { watchLeadMs: number; maxLateStartMs: number } & CompleteBounds,
 ): GameRow[] {
   return games.filter(
     (g) =>
       !running.has(g.id) &&
-      !isPost(g.status) &&
+      stillWatchable(g, now, opts) &&
       g.scheduledAt.getTime() <= now.getTime() + opts.watchLeadMs &&
-      g.scheduledAt.getTime() >= now.getTime() - opts.maxLateStartMs,
+      (g.status === 'complete' || g.scheduledAt.getTime() >= now.getTime() - opts.maxLateStartMs),
   );
+}
+
+/** What the scheduler loads per tick: games by tip-off in [from, to], plus `complete` games since `completeFrom`. */
+export interface GameRange {
+  from: Date;
+  to: Date;
+  completeFrom: Date;
+}
+
+/**
+ * The scheduler's games for one league, with `completedAt` for complete games: the `created_at`
+ * (`now()`, the start of the applyChanges transaction that wrote it, on the database clock) of
+ * the first `status` change to `complete` after the last `status` change to any other status.
+ * game_changes is append-only and retention only removes rows of closed games, so the marker
+ * survives restarts; play re-opened after `complete` restarts it, and a later `complete` row (a
+ * score correction during the wait) does not move it.
+ *
+ * Known, left to the owner: a generation-less schedule poll may write the status too, so a game
+ * no watch ever saw, first reported `complete` by a poll, gets its marker at that poll and is
+ * watched (for its final) like a resumed one.
+ */
+export async function loadSchedulerGames(
+  db: Db,
+  league: LeagueCode,
+  range: GameRange,
+): Promise<GameRow[]> {
+  return db<GameRow[]>`
+    select g.id, g.provider_game_id as "providerGameId", g.status::text as status,
+           g.coverage::text as coverage, g.scheduled_at as "scheduledAt",
+           case when g.status = 'complete' then (
+             select min(c.created_at) from public.game_changes c
+             where c.game_id = g.id and c.change_type = 'status' and c.body->>'status' = 'complete'
+               and c.seq > coalesce((
+                 select max(o.seq) from public.game_changes o
+                 where o.game_id = g.id and o.change_type = 'status'
+                   and o.body->>'status' is distinct from 'complete'), 0)
+           ) end as "completedAt"
+    from public.games g
+    where g.league = ${league}
+      and (g.scheduled_at between ${range.from} and ${range.to}
+           or (g.status = 'complete' and g.scheduled_at between ${range.completeFrom} and ${range.to}))
+    order by g.scheduled_at, g.id`;
 }
 
 export class Scheduler {
@@ -185,7 +291,12 @@ export class Scheduler {
       maxLateStartMs: deps.maxLateStartMs ?? 6 * 3_600_000,
       watchRetryMs: deps.watchRetryMs ?? 10 * 60_000,
       pollRetryMs: deps.pollRetryMs ?? 5 * 60_000,
+      completeRewatchMs: deps.completeRewatchMs ?? COMPLETE_REWATCH_MS,
+      completeCloseWaitMs: deps.completeCloseWaitMs ?? COMPLETE_CLOSE_WAIT_MS,
+      watchSpeed: deps.watchSpeed ?? 1,
     };
+    // Fail at construction, not at the first watch: a speed is only allowed on a rehearsal host.
+    if (this.opts.watchSpeed !== 1) assertSpeedAllowed(deps.config, this.opts.watchSpeed);
   }
 
   private now(): Date {
@@ -199,9 +310,12 @@ export class Scheduler {
     for (const league of this.deps.leagues) {
       if (this.deps.isStopped()) return;
       const adapter = adapterFor(league);
-      const from = new Date(now.getTime() - this.opts.maxLateStartMs);
-      const to = new Date(now.getTime() + 2 * 86_400_000);
-      let games = await this.loadGames(league, from, to);
+      const range: GameRange = {
+        from: new Date(now.getTime() - this.opts.maxLateStartMs),
+        to: new Date(now.getTime() + 2 * 86_400_000),
+        completeFrom: new Date(now.getTime() - COMPLETE_REWATCH_CAP_MS),
+      };
+      let games = await this.loadGames(league, range);
       const window = inGameWindow(games, now, this.opts);
       const retryAt = this.nextPollAt.get(league);
       const due = retryAt
@@ -214,7 +328,7 @@ export class Scheduler {
           this.stats.schedulePolls++;
           this.lastSchedulePoll.set(league, now);
           this.nextPollAt.delete(league);
-          games = await this.loadGames(league, from, to);
+          games = await this.loadGames(league, range);
         } catch (err) {
           this.stats.schedulePollFailures++;
           // A refusal (quota) or a provider error: retry in pollRetryMs, never crash the loop, and
@@ -244,8 +358,17 @@ export class Scheduler {
         coverage: game.coverage,
         push,
         scheduledAt: game.scheduledAt,
+        status: game.status,
+        ...(game.status === 'complete'
+          ? {
+              completedAt: game.completedAt ?? null,
+              until: new Date(completeRewatchUntil(game, this.opts)),
+            }
+          : {}),
       },
-      'scheduler: starting watch',
+      game.status === 'complete'
+        ? 'scheduler: resuming the watch of a complete game (waiting for closed)'
+        : 'scheduler: starting watch',
     );
     const p = (this.deps.watch ?? this.defaultWatch.bind(this))(adapter, game, push)
       .then(() => {
@@ -293,14 +416,9 @@ export class Scheduler {
     this.deps.log.info({ stats: this.stats }, 'scheduler stopped');
   }
 
-  private async loadGames(league: LeagueCode, from: Date, to: Date): Promise<GameRow[]> {
-    if (this.deps.loadGames) return this.deps.loadGames(league, from, to);
-    return this.deps.db<GameRow[]>`
-      select id, provider_game_id as "providerGameId", status::text as status, coverage::text as coverage,
-             scheduled_at as "scheduledAt"
-      from public.games
-      where league = ${league} and scheduled_at between ${from} and ${to}
-      order by scheduled_at, id`;
+  private async loadGames(league: LeagueCode, range: GameRange): Promise<GameRow[]> {
+    if (this.deps.loadGames) return this.deps.loadGames(league, range);
+    return loadSchedulerGames(this.deps.db, league, range);
   }
 
   /** One `poll_schedule` run: the daily schedule for each date, ingested generation-less. */
@@ -368,7 +486,7 @@ export class Scheduler {
         isStopped: this.deps.isStopped,
         ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
       },
-      { game, push, untilClosed: true, note: 'scheduler' },
+      { game, push, untilClosed: true, note: 'scheduler', speed: this.opts.watchSpeed },
     );
     // The closing pulse (plan §4: once when the game closes), only after a watch that ran; a pulse
     // failure is harmless and must not replace the watch outcome.

@@ -84,6 +84,21 @@ const AFTER_COMPLETE = {
 const PRE_GAME_MS = 5 * MIN;
 
 /**
+ * The budgeted complete -> closed wait (rev 4.12 (3): 120 min), exported for the scheduler: a
+ * game stored as `complete` is (re)watched until at least this long after it BECAME complete
+ * (`completeRewatchUntil` in scheduler.ts).
+ */
+export const COMPLETE_CLOSE_WAIT_MS = AFTER_COMPLETE.closeWaitMs;
+
+/**
+ * The scheduled-time floor of the same bound: a game stored as `complete` is (re)watched at least
+ * until its scheduled tip-off plus the planning horizon plus the budgeted wait (150 + 120 = 270
+ * min), even when the moment it became complete is unknown. A late tip-off or overtime pushes
+ * the end of the wait past this, which is why the scheduler also anchors on that moment.
+ */
+export const COMPLETE_REWATCH_MS = GAME_HORIZON_MS + COMPLETE_CLOSE_WAIT_MS;
+
+/**
  * Plan §4: full = pbp/30 s + box-score statistics/5 min; extended = summary/60 s
  * + 1 boxscore at +120 min; lean-full = pbp/60 s + statistics/10 min.
  * In Sportradar v8 the team and player statistics live in the Game Summary
@@ -159,6 +174,15 @@ export const SIM_CADENCE: { full: Cadence; scoreOnly: Cadence } = {
  * a counted call on top of it, allowed for by PUSH_CONNECTION_ALLOWANCE. The
  * rev 4.12 pre-game and after-complete rules and the rev 4.13 retry allowance
  * apply as for the polling profiles.
+ *
+ * Backfills are not budgeted here. During the post-`complete` wait the pbp is paused, so no
+ * applied pbp of the generation is ever newer than a reconnect (`backfillNeeded`): every
+ * reconnect of the events stream (not the clock stream) triggers a backfill, one REST pbp plus at
+ * most one 429 retry. Those calls go through the shared rate slot and the quota guard, are logged
+ * in `ingest.provider_calls` and counted in the watch reservation's `used_calls`, but neither
+ * `budgetFor` nor PUSH_CONNECTION_ALLOWANCE sizes the reservation for them; they are bounded only
+ * by the connection allowance (each reconnect spends one of its attempts) and, once the
+ * reservation is spent, by the guard's reserve. They are not counted in `meta.retries` either.
  */
 export const PUSH_RECONCILE_CADENCE: Cadence = {
   pbpMs: 5 * MIN,

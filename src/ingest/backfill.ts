@@ -105,7 +105,13 @@ export async function runBackfill(
         gameId: deps.gameId,
         changes: watcher.applied,
         stale: watcher.stale,
+        // The watcher's view of the stored status: read when it attached, replaced only when this
+        // document's game-level fields were written. A view superseded by a newer observation
+        // (a push clock line received after this pbp's request) leaves the attach-time status,
+        // which the database may already have moved past; documentStatus and gameLevel say which.
         status: outcome?.status ?? null,
+        documentStatus: pbp.data.status,
+        gameLevel: outcome?.result.outcome === 'applied' ? outcome.result.gameLevel : null,
       },
       'backfill finished',
     );
