@@ -38,6 +38,11 @@ afterAll(async () => {
 
 describe('outbox admin', () => {
   it('dead rows stay dead through a drain; requeue clears them and they publish in seq order; status and lag read from the DB', async () => {
+    // Other test files leave unpublished rows behind, and a drain shares its batch round-robin
+    // across every ready channel: with enough of them, only part of this game's head chunk would
+    // be attempted and dead-lettered, and the healthy drain below would publish the rest. Drain
+    // them first so this game's channel is the only one pending.
+    await new OutboxPublisher({ db, log: silentLog, transport: new MemoryTransport() }).drain();
     const nd = pbpQ1();
     const { gameId } = await seedGame(db, nd);
     const run = await replayRun(db, gameId);
