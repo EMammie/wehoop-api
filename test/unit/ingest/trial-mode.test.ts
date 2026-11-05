@@ -8,10 +8,12 @@ import {
   backfillNeeded,
   lagFromRecord,
   logRetryReport,
+  planWatch,
   retryReport,
   runTrialWatch,
 } from '../../../src/ingest/trial-mode.js';
 import { ncaawbAdapter } from '../../../src/leagues/ncaawb/adapter.js';
+import { wnbaAdapter } from '../../../src/leagues/wnba/adapter.js';
 import { createLogger, type Logger } from '../../../src/logger.js';
 
 const base = {
@@ -286,5 +288,25 @@ describe('backfillNeeded (push reconnect -> REST pbp backfill?)', () => {
   it('a reconnect moment that could not be read on the database clock: always backfill', () => {
     expect(backfillNeeded({ lastPbpCalledAt: at(-2), reconnectedAt: null })).toBe(true);
     expect(backfillNeeded({ lastPbpCalledAt: null, reconnectedAt: null })).toBe(true);
+  });
+});
+
+describe('planWatch push budget: REST reconciliation + connection allowance + backfill allowance', () => {
+  it('94 + 20 + 19 = 133 for WNBA (events + clock) and an events-only league alike; polling is unchanged', () => {
+    const wnba = planWatch(wnbaAdapter, 'trial', 'full', 'full', true);
+    expect(wnba.budget).toMatchObject({ connections: 20, backfills: 19, total: 133 });
+    const eventsOnly = {
+      ...wnbaAdapter,
+      capabilities: { ...wnbaAdapter.capabilities, pushClock: false },
+    };
+    expect(planWatch(eventsOnly, 'trial', 'full', 'full', true).budget).toMatchObject({
+      connections: 20,
+      backfills: 19,
+      total: 133,
+    });
+    const polling = planWatch(wnbaAdapter, 'trial', 'full', 'full', false).budget;
+    expect(polling.total).toBe(364);
+    expect(polling.connections).toBeUndefined();
+    expect(polling.backfills).toBeUndefined();
   });
 });

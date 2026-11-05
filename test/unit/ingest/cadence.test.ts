@@ -4,9 +4,12 @@ import {
   cadenceFor,
   defaultProfileFor,
   PROFILE_CADENCE,
+  PUSH_BACKFILL_ALLOWANCE,
   PUSH_CONNECTION_ALLOWANCE,
   PUSH_RECONCILE_CADENCE,
   profileAllowed,
+  pushAllowances,
+  pushFeedsFor,
   SIM_CADENCE,
   scaleCadence,
 } from '../../../src/ingest/cadence.js';
@@ -155,5 +158,16 @@ describe('cadenceFor (source, capabilities, coverage)', () => {
     expect(budgetFor(scaled)).toEqual(budgetFor(PROFILE_CADENCE.full));
     expect(scaleCadence(PROFILE_CADENCE.extended, 60).boxscoreAtMs).toEqual([120_000]);
     expect(() => scaleCadence(PROFILE_CADENCE.full, 0)).toThrow();
+  });
+});
+
+describe('push backfill allowance (owner decision 2026-11-05): one backfill pbp per possible events reconnect', () => {
+  it('is the shared connection allowance minus the events first connection, whatever streams are open (a refunded clock attempt can leave all 20 to events)', () => {
+    expect(PUSH_BACKFILL_ALLOWANCE).toBe(PUSH_CONNECTION_ALLOWANCE - 1);
+    expect(PUSH_BACKFILL_ALLOWANCE).toBe(19);
+    expect(pushAllowances()).toEqual({ connections: 20, backfills: 19 });
+    // The streams a watch opens: the allowance does not depend on them.
+    expect(pushFeedsFor(wnbaAdapter.capabilities)).toEqual(['push_events', 'push_clock']);
+    expect(pushFeedsFor({ pushClock: false })).toEqual(['push_events']);
   });
 });

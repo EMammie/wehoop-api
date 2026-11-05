@@ -32,6 +32,8 @@ import {
   type Cadence,
   cadenceFor,
   PUSH_CONNECTION_ALLOWANCE,
+  pushAllowances,
+  pushFeedsFor,
   scaleCadence,
   type TrialProfile,
 } from './cadence.js';
@@ -340,7 +342,7 @@ export interface WatchPlan {
 /**
  * The cadence and budget a game takes under a profile (defaulting the profile from coverage).
  * With `push` (M4, opt-in) the cadence is the 5-minute REST reconciliation and the budget
- * carries the stream connection allowance on top.
+ * carries the stream connection allowance and the backfill allowance on top (`pushAllowances`).
  */
 export function planWatch(
   adapter: LeagueAdapter,
@@ -361,10 +363,12 @@ export function planWatch(
     push,
   });
   const budget = budgetFor(cadence);
+  if (!push) return { profile: chosen, cadence, budget };
+  const extra = pushAllowances();
   return {
     profile: chosen,
     cadence,
-    budget: push ? { ...budget, total: budget.total + PUSH_CONNECTION_ALLOWANCE } : budget,
+    budget: { ...budget, ...extra, total: budget.total + extra.connections + extra.backfills },
   };
 }
 
@@ -600,9 +604,9 @@ export async function runTrialWatch(
   let pushOutcome: PushWatchOutcome | undefined;
   let push: Awaited<ReturnType<typeof openPushStreams>> | null = null;
   // Counted here, not from the loop's outcome: a quota refusal throws and loses it. Only the
-  // cadence loop's retries draw on `budget.retries`: in push mode, stream connection attempts are
-  // budgeted apart (PUSH_CONNECTION_ALLOWANCE) and backfills sit outside the reservation's budget,
-  // so neither is a retry here.
+  // cadence loop's retries draw on `budget.retries`: in push mode, stream connection attempts and
+  // backfill pbps are budgeted apart (`budget.connections`, `budget.backfills`), so neither is a
+  // retry here; a backfill's own 429 retry has no term and draws on the reservation's slack.
   const spent = { retried429: 0, retriedClosing: 0 };
   const retries = () => retryReport(plan.budget.retries, spent);
   try {
@@ -807,10 +811,8 @@ async function openPushStreams(a: OpenPushArgs): Promise<{
     if (done.outcome?.result.outcome === 'applied')
       noteAppliedPbp(a.appliedPbp, done.pbpRequestedAt);
   };
-  const feeds: PushFeed[] = [
-    'push_events',
-    ...(adapter.capabilities.pushClock ? ['push_clock' as const] : []),
-  ];
+  // The same streams planWatch sized the backfill allowance for.
+  const feeds: PushFeed[] = pushFeedsFor(adapter.capabilities);
   // PUSH_CONNECTION_ALLOWANCE is the cap for the whole watch: both streams draw on one budget and
   // stop for good when it is spent; the 5-minute REST cadence keeps the game moving.
   const attemptBudget = { remaining: PUSH_CONNECTION_ALLOWANCE };
