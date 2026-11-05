@@ -173,7 +173,7 @@ export const SIM_CADENCE: { full: Cadence; scoreOnly: Cadence } = {
  * stay on the summary feed. This cadence's budget (`budgetFor`) is REST only; a push watch's
  * reservation adds two allowances on top (`pushAllowances`): every stream connection attempt is a
  * counted call (PUSH_CONNECTION_ALLOWANCE), and every reconnect of the events stream may cost one
- * backfill pbp (`pushBackfillAllowance`). The rev 4.12 pre-game and after-complete rules and the
+ * backfill pbp (PUSH_BACKFILL_ALLOWANCE). The rev 4.12 pre-game and after-complete rules and the
  * rev 4.13 retry allowance apply as for the polling profiles.
  *
  * Backfills: during the post-`complete` wait the pbp is paused, so no applied pbp of the
@@ -214,28 +214,19 @@ export function pushFeedsFor(capabilities: Pick<LeagueCapabilities, 'pushClock'>
 }
 
 /**
- * Backfill pbp calls a push watch reserves (owner decision 2026-11-05): one per possible
- * events-stream reconnect. The streams share PUSH_CONNECTION_ALLOWANCE attempts; every attempt
- * spends one, and a stream's first successful connection is not a reconnect, so each stream the
- * watch opens takes at least one attempt that can never trigger a backfill: 20 - 2 = 18 with the
- * clock stream (WNBA), 20 - 1 = 19 with events only.
+ * Backfill pbp calls a push watch reserves (owner decision 2026-11-05): the minimum that always
+ * covers one per possible events-stream reconnect, PUSH_CONNECTION_ALLOWANCE - 1 = 19, whatever
+ * streams the watch opens. Only an events reconnect triggers a backfill, and a stream's first
+ * successful connection is not a reconnect, so at most the events stream's own attempts minus one
+ * can. Those attempts are not bounded by 20 - streams: an attempt whose slot claim times out
+ * before anything is sent is refunded (push-client.ts), so a clock stream whose every attempt was
+ * refunded nets zero and leaves all 20 attempts, and 19 reconnects, to the events stream.
  */
-export function pushBackfillAllowance(streams: number): number {
-  if (!Number.isInteger(streams) || streams < 1 || streams > PUSH_CONNECTION_ALLOWANCE) {
-    throw new Error(`a push watch opens 1..${PUSH_CONNECTION_ALLOWANCE} streams, got ${streams}`);
-  }
-  return PUSH_CONNECTION_ALLOWANCE - streams;
-}
+export const PUSH_BACKFILL_ALLOWANCE = PUSH_CONNECTION_ALLOWANCE - 1;
 
 /** What a push watch reserves on top of the REST budget: connection attempts and backfills. */
-export function pushAllowances(capabilities: Pick<LeagueCapabilities, 'pushClock'>): {
-  connections: number;
-  backfills: number;
-} {
-  return {
-    connections: PUSH_CONNECTION_ALLOWANCE,
-    backfills: pushBackfillAllowance(pushFeedsFor(capabilities).length),
-  };
+export function pushAllowances(): { connections: number; backfills: number } {
+  return { connections: PUSH_CONNECTION_ALLOWANCE, backfills: PUSH_BACKFILL_ALLOWANCE };
 }
 
 /** The push cadence for a game, or why it cannot be pushed (no push capability, no play-by-play coverage). */
@@ -260,7 +251,7 @@ export interface Budget {
   retries: number;
   /** Push watch only: stream connection attempts (PUSH_CONNECTION_ALLOWANCE). */
   connections?: number;
-  /** Push watch only: backfill pbp calls, one per possible events reconnect (pushBackfillAllowance). */
+  /** Push watch only: backfill pbp calls, one per possible events reconnect (PUSH_BACKFILL_ALLOWANCE). */
   backfills?: number;
   total: number;
 }

@@ -3,9 +3,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type Config, loadConfig } from '../../src/config.js';
 import {
   budgetFor,
+  PUSH_BACKFILL_ALLOWANCE,
   PUSH_CONNECTION_ALLOWANCE,
   PUSH_RECONCILE_CADENCE,
-  pushBackfillAllowance,
 } from '../../src/ingest/cadence.js';
 import { QuotaGuard } from '../../src/ingest/quota-guard.js';
 import { resolveGame, runTrialWatch, type TrialWatchOutcome } from '../../src/ingest/trial-mode.js';
@@ -24,7 +24,7 @@ import { relabelDoc, scriptedProvider } from '../helpers/scripted-provider.js';
  * reserve (never sent, never logged); (3) it is logged in `ingest.provider_calls` with
  * `quota_counted` true for a trial source; (4) it is counted in the watch reservation's
  * `used_calls`, which the backfill allowance sizes for (owner decision 2026-11-05: one pbp per
- * possible events reconnect, PUSH_CONNECTION_ALLOWANCE - streams); (5) its 429 retry is not in
+ * possible events reconnect, PUSH_BACKFILL_ALLOWANCE = PUSH_CONNECTION_ALLOWANCE - 1); (5) its 429 retry is not in
  * `meta.retries`.
  *
  * The source must be `trial` for (3), so the config is MODE=trial on the production-shaped host
@@ -239,18 +239,16 @@ describe('a reconnect backfill is rate-limited on the shared ledger, guarded, lo
 
     // (4) Every call of the watch, the backfill's included, is in used_calls; the reservation is
     // the REST budget plus the connection allowance plus the backfill allowance (WNBA: events +
-    // clock, so 20 - 2 = 18 backfills): 94 + 20 + 18 = 132.
+    // clock, but the allowance is 20 - 1 = 19 whatever streams are open): 94 + 20 + 19 = 133.
     const [n] = await db<{ n: number }[]>`
       select count(*)::int as n from ingest.provider_calls where reservation_id = ${out.reservation.id}`;
     expect(out.reservation.usedCalls).toBe(n?.n);
     expect(out.reservation.reservedCalls).toBe(out.budget.total);
     expect(out.budget.total).toBe(
-      budgetFor(PUSH_RECONCILE_CADENCE).total +
-        PUSH_CONNECTION_ALLOWANCE +
-        pushBackfillAllowance(2),
+      budgetFor(PUSH_RECONCILE_CADENCE).total + PUSH_CONNECTION_ALLOWANCE + PUSH_BACKFILL_ALLOWANCE,
     );
-    expect(out.budget).toMatchObject({ connections: 20, backfills: 18, total: 132 });
-    expect(out.reservation.reservedCalls).toBe(132);
+    expect(out.budget).toMatchObject({ connections: 20, backfills: 19, total: 133 });
+    expect(out.reservation.reservedCalls).toBe(133);
     // (5) The backfill's 429 retry is a counted call but not part of the retry report.
     expect(out.retries).toEqual({ used: 0, allowance: 6, retried429: 0, retriedClosing: 0 });
   }, 90_000);

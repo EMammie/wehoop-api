@@ -364,7 +364,7 @@ export function planWatch(
   });
   const budget = budgetFor(cadence);
   if (!push) return { profile: chosen, cadence, budget };
-  const extra = pushAllowances(adapter.capabilities);
+  const extra = pushAllowances();
   return {
     profile: chosen,
     cadence,

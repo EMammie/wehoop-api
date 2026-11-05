@@ -173,10 +173,10 @@ describe('push mode against the fake provider with a mid-game stream drop', () =
       expect(server.stats.rejected429).toBe(0);
       expect(server.stats.rejected401).toBe(0);
       expect(server.stats.pushDrops).toBeGreaterThanOrEqual(1);
-      // Budget: REST reconciliation plus the stream connection and backfill allowances (132 for
+      // Budget: REST reconciliation plus the stream connection and backfill allowances (133 for
       // WNBA), released at the end.
       expect(out.reservation.reservedCalls).toBe(out.budget.total);
-      expect(out.budget).toMatchObject({ connections: 20, backfills: 18, total: 132 });
+      expect(out.budget).toMatchObject({ connections: 20, backfills: 19, total: 133 });
       expect(out.reservation.releasedAt).toBeInstanceOf(Date);
 
       // Sub-runs of the watch generation: one push_stream, >= 1 backfill, every provider call accounted.

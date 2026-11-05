@@ -4,11 +4,11 @@ import {
   cadenceFor,
   defaultProfileFor,
   PROFILE_CADENCE,
+  PUSH_BACKFILL_ALLOWANCE,
   PUSH_CONNECTION_ALLOWANCE,
   PUSH_RECONCILE_CADENCE,
   profileAllowed,
   pushAllowances,
-  pushBackfillAllowance,
   pushFeedsFor,
   SIM_CADENCE,
   scaleCadence,
@@ -162,15 +162,12 @@ describe('cadenceFor (source, capabilities, coverage)', () => {
 });
 
 describe('push backfill allowance (owner decision 2026-11-05): one backfill pbp per possible events reconnect', () => {
-  it('is the shared connection allowance minus the streams the watch opens (each first connection is no reconnect)', () => {
-    expect(pushFeedsFor({ pushClock: true })).toEqual(['push_events', 'push_clock']);
+  it('is the shared connection allowance minus the events first connection, whatever streams are open (a refunded clock attempt can leave all 20 to events)', () => {
+    expect(PUSH_BACKFILL_ALLOWANCE).toBe(PUSH_CONNECTION_ALLOWANCE - 1);
+    expect(PUSH_BACKFILL_ALLOWANCE).toBe(19);
+    expect(pushAllowances()).toEqual({ connections: 20, backfills: 19 });
+    // The streams a watch opens: the allowance does not depend on them.
+    expect(pushFeedsFor(wnbaAdapter.capabilities)).toEqual(['push_events', 'push_clock']);
     expect(pushFeedsFor({ pushClock: false })).toEqual(['push_events']);
-    expect(pushBackfillAllowance(2)).toBe(PUSH_CONNECTION_ALLOWANCE - 2);
-    expect(pushBackfillAllowance(2)).toBe(18);
-    expect(pushBackfillAllowance(1)).toBe(19);
-    expect(pushAllowances(wnbaAdapter.capabilities)).toEqual({ connections: 20, backfills: 18 });
-    expect(pushAllowances({ pushClock: false })).toEqual({ connections: 20, backfills: 19 });
-    for (const bad of [0, -1, 1.5, PUSH_CONNECTION_ALLOWANCE + 1])
-      expect(() => pushBackfillAllowance(bad)).toThrow(/streams/);
   });
 });

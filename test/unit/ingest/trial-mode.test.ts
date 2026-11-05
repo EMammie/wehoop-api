@@ -292,9 +292,9 @@ describe('backfillNeeded (push reconnect -> REST pbp backfill?)', () => {
 });
 
 describe('planWatch push budget: REST reconciliation + connection allowance + backfill allowance', () => {
-  it('WNBA (events + clock): 94 + 20 + 18 = 132; an events-only league: 94 + 20 + 19 = 133; polling is unchanged', () => {
+  it('94 + 20 + 19 = 133 for WNBA (events + clock) and an events-only league alike; polling is unchanged', () => {
     const wnba = planWatch(wnbaAdapter, 'trial', 'full', 'full', true);
-    expect(wnba.budget).toMatchObject({ connections: 20, backfills: 18, total: 132 });
+    expect(wnba.budget).toMatchObject({ connections: 20, backfills: 19, total: 133 });
     const eventsOnly = {
       ...wnbaAdapter,
       capabilities: { ...wnbaAdapter.capabilities, pushClock: false },
