@@ -119,7 +119,7 @@ curl -s https://wehoop-api.fly.dev/health | jq '{ok, degraded, alerts, worker}'
 pnpm health check --url https://wehoop-api.fly.dev      # exit 0 = healthy, 1 = degraded or down
 ```
 
-Before the first deploy the Supabase project must carry migrations `0001..0011`
+Before the first deploy the Supabase project must carry migrations `0001..0013` (M4 alone needs `0001..0011`; `0012` and `0013` are additive, so M4 code also runs on a database that has them)
 (`supabase db push`) and `ingest.product_quotas.verified_at` must be set for every product with a
 key (`pnpm trial quota ...` against the cloud DB), otherwise the QuotaGuard refuses every call and
 `/health` shows `watch_without_provider_calls` as soon as a game is due.
