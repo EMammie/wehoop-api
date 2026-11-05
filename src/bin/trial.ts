@@ -6,12 +6,7 @@ import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
-import {
-  budgetFor,
-  PUSH_CONNECTION_ALLOWANCE,
-  TRIAL_PROFILES,
-  type TrialProfile,
-} from '../ingest/cadence.js';
+import { budgetFor, TRIAL_PROFILES, type TrialProfile } from '../ingest/cadence.js';
 import { runPreflight } from '../ingest/preflight.js';
 import { QuotaGuard, QuotaRefusedError } from '../ingest/quota-guard.js';
 import {
@@ -218,7 +213,7 @@ async function main() {
           );
         const plan = planWatch(adapter, source, game.coverage, profile, args.push);
         console.log(
-          `game ${game.id} (${game.providerGameId}) status=${game.status} coverage=${game.coverage}: profile ${plan.profile}${args.push ? ' + push streams (REST reconciliation every 5 min)' : ''}, budget ${plan.budget.total} calls (pbp ${plan.budget.pbp}, summary ${plan.budget.summary}, boxscore ${plan.budget.boxscore}, after complete ${plan.budget.afterComplete}, closing ${plan.budget.closing}, retries ${plan.budget.retries}${args.push ? `, stream connections ${PUSH_CONNECTION_ALLOWANCE}` : ''})`,
+          `game ${game.id} (${game.providerGameId}) status=${game.status} coverage=${game.coverage}: profile ${plan.profile}${args.push ? ' + push streams (REST reconciliation every 5 min)' : ''}, budget ${plan.budget.total} calls (pbp ${plan.budget.pbp}, summary ${plan.budget.summary}, boxscore ${plan.budget.boxscore}, after complete ${plan.budget.afterComplete}, closing ${plan.budget.closing}, retries ${plan.budget.retries}${args.push ? `, stream connections ${plan.budget.connections ?? 0}, backfills ${plan.budget.backfills ?? 0}` : ''})`,
         );
         const [q] = (await guard.status()).filter((s) => s.product === adapter.product);
         if (q) {
