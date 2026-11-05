@@ -33,6 +33,18 @@ Observations worth knowing (all from this recording):
 - The pbp header `clock` is the clock of the latest event, not a live clock; `clock_running`
   is derived (see `src/ingest/clock.ts`). Push `clock` messages carry `running` directly.
 
+## Push mock (M4)
+
+`pnpm sim serve` derives push lines from the compact replay fixture instead of a recorded push
+stream (`src/providers/sportradar/fake-push.ts`): consecutive pbp documents are diffed, a new event
+id is an `insert` line, a changed event body an `update`, a new `deleted_events[]` id a `delete`
+(only when an earlier document carried the event's body: 2 of the 5 markers here), and every
+header change (status, clock, score, period) a clock line with `clocks.running` derived. Every line
+is Zod-parsed against the two recorded push samples above, so the mock cannot drift from the shape
+the client (`src/providers/sportradar/push-client.ts`) accepts; the clock is written in the sample's
+digit form (`"1000"`), which the ingester normalizes back to `m:ss`. No new committed fixture: the
+timelines are built at server start (1,073 event lines + 50 clock lines from this recording).
+
 ## Replay fixture
 
 Every replay evidence row in `devlog/evidence/M1.md` runs from a committed, reproducible

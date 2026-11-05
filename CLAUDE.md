@@ -2,7 +2,7 @@
 
 Backend for Wehoop, a live stats app for women's basketball (WNBA, NCAA Women's, Unrivaled) on Sportradar data. Node 22 + TypeScript worker on Fly.io, Supabase for Postgres + Realtime Broadcast + anonymous auth. The iOS client lives in a separate repo.
 
-Full plan with rationale: `docs/PLAN.md`. Current milestone: see `docs/MILESTONE.md`.
+Full plan with rationale: `docs/PLAN.md`. Current milestone: see `docs/MILESTONE.md`. Deploy runbook, alert conditions and the local rehearsals: `docs/DEPLOY.md`.
 
 ## Commands
 
@@ -29,9 +29,17 @@ pnpm trial:live plan --league ncaawb --date YYYY-MM-DD [--season]   # 1 call: th
 pnpm preflight:live | preflight:rehearsal   # what a live run would do, no secrets; exit 0 = ready, 65 = problems
 pnpm worker:live | worker:rehearsal, pnpm api:live | api:rehearsal   # the same env loading for worker / API
 pnpm trial:db start|status|stop|migration up --local   # persistent trial stack (supabase-trial/, ports +1000); NEVER `db reset`
+pnpm sim serve --replay-file <jsonl.gz> [--speed 30] [--port 8787] [--push-drop-after <s> [--push-drop-for 30] [--push-drop-every <s>]]   # fake api.sportradar.com incl. push streams + drop fault (M4)
+pnpm worker:rehearsal --league wnba --game <id> --profile full --push [--speed N]   # push mode (opt-in, M4): events + clock streams, REST reconciliation every 5 min, backfill on reconnect; also `pnpm trial:rehearsal watch ... --push`
+pnpm worker:rehearsal --schedule [--speed N]   # the production scheduler against the fake provider (MODE=production runs it by default without --game)
+pnpm dev:worker ... --scores   # also publish league:{code}:scores every 5 s (on by default only with the scheduler; a single trial watch never does)
+pnpm subscribe --league wnba  # receive league:wnba:scores scoreboard deltas
+pnpm outbox status | requeue --channel game:<uuid> | --all | lag [--since 24h]   # dead-letter recovery, outbox lag p50/p95
+pnpm retention run --closed-before <ISO|30d> [--dry-run] [--game <uuid>]   # the only code that deletes game_changes (moves retained_from_seq)
+pnpm health check [--url http://127.0.0.1:3000]   # external monitor probe of /health: exit 0 healthy, 1 degraded/down
 ```
 
-`tsx` loads no `.env`: the plain `pnpm trial` / `dev:worker` / `dev:api` / `sim` / `invariants` scripts read only exported shell variables. The `*:live` / `*:rehearsal` scripts are `node --env-file=.env --env-file=.env.<name> --import tsx src/bin/<x>.ts`.
+`tsx` loads no `.env`: the plain `pnpm trial` / `dev:worker` / `dev:api` / `sim` / `invariants` / `outbox` / `retention` scripts read only exported shell variables (`pnpm health` reads only `API_BASE_URL`/`PORT`). The `*:live` / `*:rehearsal` scripts are `node --env-file=.env --env-file=.env.<name> --import tsx src/bin/<x>.ts`.
 
 ## Environments
 
@@ -63,12 +71,12 @@ Rules: the later file overrides the earlier; **exported shell variables override
 
 ```
 src/model      LiveEvent union, GameChange schema, game-state reducer, content hash
-src/providers  Sportradar HTTP, URL resolvers (prod | simulation), Zod schemas, push client
+src/providers  Sportradar HTTP, URL resolvers (prod | simulation), Zod schemas, push client (push-client.ts), fake provider + push mock
 src/leagues    LeagueAdapter interface + wnba / ncaawb / unrivaled adapters
-src/ingest     freshness, apply-changes, scheduler, trial-mode, game-watcher, backfill, identity
-src/live       LiveTransport interface, Supabase Broadcast transport, outbox publisher, pulse
-src/api        Hono routes: snapshot, changes, players, health
-src/bin        worker, api, sim, subscribe CLIs
+src/ingest     freshness, apply-changes, scheduler, trial-mode, game-watcher, push-ingest, backfill, retention, identity
+src/live       LiveTransport interface, Supabase Broadcast transport, outbox publisher + admin, pulse, scoreboard
+src/api        Hono routes: snapshot, changes, players, health (alerts)
+src/bin        worker, api, sim, subscribe, trial, outbox, retention, health CLIs
 supabase/      config + SQL migrations (the only schema source of truth)
 fixtures/      recorded provider payloads, committed
 test/          unit (vitest) and integration (needs supabase start) + invariants.sql

@@ -4,7 +4,12 @@ import {
   cadenceFor,
   defaultProfileFor,
   PROFILE_CADENCE,
+  PUSH_BACKFILL_ALLOWANCE,
+  PUSH_CONNECTION_ALLOWANCE,
+  PUSH_RECONCILE_CADENCE,
   profileAllowed,
+  pushAllowances,
+  pushFeedsFor,
   SIM_CADENCE,
   scaleCadence,
 } from '../../../src/ingest/cadence.js';
@@ -57,6 +62,25 @@ describe('trial profiles: budgets derived from the cadence constants (plan §4)'
       afterCompleteFeeds: ['summary'],
       closing: ['summary', 'boxscore'],
     });
+  });
+  it('push reconciliation (M4) follows the same slow phases and closing set as a pbp profile (rev 4.12)', () => {
+    expect(PUSH_RECONCILE_CADENCE).toMatchObject({
+      preGameMs: 300_000,
+      preGameFeeds: ['pbp'],
+      afterCompleteFeeds: ['summary'],
+      closing: ['pbp', 'summary', 'boxscore'],
+      retryAllowance: 6,
+    });
+    expect(budgetFor(PUSH_RECONCILE_CADENCE)).toEqual({
+      pbp: 31, // every 5 min, t=0 through 2.5 h inclusive
+      summary: 30, // first at +2.5 min
+      boxscore: 0,
+      afterComplete: 25, // 120 min at one summary per 5 min, both ends; the pbp pauses
+      closing: 2, // the feed that did not report closed, then the boxscore
+      retries: 6,
+      total: 94,
+    });
+    expect(PUSH_CONNECTION_ALLOWANCE).toBe(20);
   });
   it('two full games plus one extended no longer fit the 900 spendable calls of a 1,000-call trial (12 over)', () => {
     // They fitted exactly (900) with a retry allowance of 2; the allowance of 6 (owner decision
@@ -134,5 +158,16 @@ describe('cadenceFor (source, capabilities, coverage)', () => {
     expect(budgetFor(scaled)).toEqual(budgetFor(PROFILE_CADENCE.full));
     expect(scaleCadence(PROFILE_CADENCE.extended, 60).boxscoreAtMs).toEqual([120_000]);
     expect(() => scaleCadence(PROFILE_CADENCE.full, 0)).toThrow();
+  });
+});
+
+describe('push backfill allowance (owner decision 2026-11-05): one backfill pbp per possible events reconnect', () => {
+  it('is the shared connection allowance minus the events first connection, whatever streams are open (a refunded clock attempt can leave all 20 to events)', () => {
+    expect(PUSH_BACKFILL_ALLOWANCE).toBe(PUSH_CONNECTION_ALLOWANCE - 1);
+    expect(PUSH_BACKFILL_ALLOWANCE).toBe(19);
+    expect(pushAllowances()).toEqual({ connections: 20, backfills: 19 });
+    // The streams a watch opens: the allowance does not depend on them.
+    expect(pushFeedsFor(wnbaAdapter.capabilities)).toEqual(['push_events', 'push_clock']);
+    expect(pushFeedsFor({ pushClock: false })).toEqual(['push_events']);
   });
 });

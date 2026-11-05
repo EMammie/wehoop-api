@@ -1,6 +1,7 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, type Server, type ServerResponse } from 'node:http';
 import { readRecording } from '../../ingest/recording.js';
 import type { Logger } from '../../logger.js';
+import { buildPushTimelines, type PushTimelines, type TimedLine } from './fake-push.js';
 import { SummaryDocumentSchema } from './schemas/summary.js';
 import type { Feed } from './urls.js';
 
@@ -18,6 +19,18 @@ import type { Feed } from './urls.js';
  *     which is what a missing RateLimiter would produce against a trial key.
  * The season schedule feed is synthesized from the recording's first summary
  * (one game, its real coverage and teams) so `pnpm trial plan` can be rehearsed.
+ *
+ * M4: the push streams `/{league}/{access}/stream/en/{events|clock}/subscribe`
+ * replay the recording's pbp deltas as chunked NDJSON lines (fake-push.ts),
+ * time-scaled with the same `speed`, with a heartbeat line every `heartbeatMs`.
+ * A connection receives only lines whose offset is AFTER the moment it
+ * connected (a real stream has no history), so whatever a client misses while
+ * disconnected is recoverable only by its REST backfill. Fault switch for the
+ * acceptance test: `pushDrop` closes every open push socket and refuses push
+ * connections (socket reset) for `forMs` starting `afterMs` after start
+ * (repeating every `everyMs` when set); `POST /_fault/push-drop?for=<ms>`
+ * starts a window on demand. The statistics stream is not mocked (no recorded
+ * sample to pin its shape): it answers 404.
  */
 export interface FakeProviderOptions {
   replayFile: string;
@@ -29,6 +42,10 @@ export interface FakeProviderOptions {
   requireKey?: boolean;
   log?: Logger;
   now?: () => number;
+  /** Heartbeat line interval on the push streams (default 5000 ms, as the recorded sample announces). */
+  heartbeatMs?: number;
+  /** Push fault: refuse / cut push connections for `forMs`, first at `afterMs`, then every `everyMs`. */
+  pushDrop?: { afterMs: number; forMs: number; everyMs?: number };
 }
 
 export interface FakeProviderStats {
@@ -37,6 +54,12 @@ export interface FakeProviderStats {
   rejected401: number;
   rejected429: number;
   byFeed: Record<string, number>;
+  /** Push connections accepted (per feed in byFeed as push_events / push_clock). */
+  pushConnections: number;
+  /** Push connections refused or cut by the drop fault. */
+  pushDrops: number;
+  pushLinesSent: number;
+  pushHeartbeatsSent: number;
 }
 
 export interface FakeProvider {
@@ -44,7 +67,11 @@ export interface FakeProvider {
   port: number;
   providerGameId: string;
   documents: number;
+  /** Push lines derived from the recording (events incl. deletes, clock lines). */
+  pushLines: { events: number; clocks: number };
   stats: FakeProviderStats;
+  /** Start a push outage now (what POST /_fault/push-drop does). */
+  dropPush(forMs: number): void;
   close(): Promise<void>;
 }
 
@@ -114,8 +141,84 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
     rejected401: 0,
     rejected429: 0,
     byFeed: {},
+    pushConnections: 0,
+    pushDrops: 0,
+    pushLinesSent: 0,
+    pushHeartbeatsSent: 0,
   };
   let lastAcceptedAt: number | null = null;
+  const push: PushTimelines = buildPushTimelines(docs.pbp);
+  const heartbeatMs = opts.heartbeatMs ?? 5000;
+  const elapsedMs = () => (now() - startedAt) * opts.speed;
+
+  // Push outage windows (wall clock, not time-scaled): [start, start + forMs).
+  let dropWindow: { start: number; end: number } | null = null;
+  let nextScheduledDrop: number | null = opts.pushDrop ? startedAt + opts.pushDrop.afterMs : null;
+  const openPush = new Set<ServerResponse>();
+  const dropPush = (forMs: number) => {
+    const t = now();
+    dropWindow = { start: t, end: t + forMs };
+    for (const res of openPush) {
+      stats.pushDrops++;
+      res.destroy();
+    }
+    openPush.clear();
+    opts.log?.warn({ forMs }, 'fake provider: push drop window opened');
+  };
+  const dropActive = (): boolean => {
+    const t = now();
+    if (nextScheduledDrop !== null && t >= nextScheduledDrop && opts.pushDrop) {
+      dropPush(opts.pushDrop.forMs);
+      nextScheduledDrop =
+        opts.pushDrop.everyMs !== undefined ? nextScheduledDrop + opts.pushDrop.everyMs : null;
+    }
+    if (dropWindow && t >= dropWindow.end) dropWindow = null;
+    return dropWindow !== null;
+  };
+
+  const streamPush = (
+    res: ServerResponse,
+    feed: 'push_events' | 'push_clock',
+    lines: TimedLine[],
+  ) => {
+    stats.pushConnections++;
+    stats.byFeed[feed] = (stats.byFeed[feed] ?? 0) + 1;
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
+    res.flushHeaders();
+    openPush.add(res);
+    // No history: only lines after the moment of connection.
+    const connectedAt = elapsedMs();
+    let i = lines.findIndex((l) => l.offsetMs > connectedAt);
+    if (i < 0) i = lines.length;
+    const write = (line: unknown) => {
+      if (res.destroyed || res.writableEnded) return;
+      res.write(`${JSON.stringify(line)}\n`);
+    };
+    const hb = setInterval(() => {
+      stats.pushHeartbeatsSent++;
+      write({ heartbeat: { interval: heartbeatMs } });
+    }, heartbeatMs);
+    const tick = setInterval(() => {
+      if (dropActive()) return; // dropPush() already destroyed this response
+      const e = elapsedMs();
+      while (i < lines.length && (lines[i]?.offsetMs ?? Number.POSITIVE_INFINITY) <= e) {
+        stats.pushLinesSent++;
+        write(lines[i]?.line);
+        i++;
+      }
+    }, 50);
+    const done = () => {
+      clearInterval(hb);
+      clearInterval(tick);
+      openPush.delete(res);
+    };
+    // `res` 'close' is the connection going away; `req` 'close' would fire as soon as the (empty) request body is read.
+    res.on('close', done);
+    opts.log?.info(
+      { feed, connectedAtOffsetMs: Math.round(connectedAt) },
+      'fake provider: push connected',
+    );
+  };
 
   const pick = (feed: 'pbp' | 'summary' | 'boxscore'): unknown => {
     const elapsed = (now() - startedAt) * opts.speed;
@@ -139,6 +242,13 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
       res.end(text);
     };
     const url = new URL(req.url ?? '/', 'http://fake');
+    if (req.method === 'POST' && url.pathname === '/_fault/push-drop') {
+      // Loopback control endpoint for rehearsals: no key, no spacing check.
+      const forMs = Number(url.searchParams.get('for') ?? '30000');
+      if (!Number.isFinite(forMs) || forMs <= 0) return send(400, { message: 'for=<ms> required' });
+      dropPush(forMs);
+      return send(200, { dropped: true, forMs, until: new Date(now() + forMs).toISOString() });
+    }
     if (requireKey && !req.headers['x-api-key']) {
       stats.rejected401++;
       return send(401, { message: 'Unauthorized' });
@@ -148,6 +258,24 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
       stats.rejected429++;
       opts.log?.warn({ spacingMs: t - lastAcceptedAt, path: url.pathname }, 'fake provider: 429');
       return send(429, { message: 'Too Many Requests: developer over QPS' });
+    }
+    const stream = /\/stream\/[a-z]{2}\/(events|clock|statistics)\/subscribe$/.exec(url.pathname);
+    if (stream) {
+      lastAcceptedAt = t;
+      if (stream[1] === 'statistics') return send(404, { message: 'push statistics not mocked' });
+      if (dropActive()) {
+        stats.pushDrops++;
+        opts.log?.warn(
+          { path: url.pathname },
+          'fake provider: push connection refused (drop window)',
+        );
+        req.socket.destroy();
+        return;
+      }
+      stats.served++;
+      return stream[1] === 'events'
+        ? streamPush(res, 'push_events', push.events)
+        : streamPush(res, 'push_clock', push.clocks);
     }
     const game = /\/games\/[^/]+\/(pbp|summary|boxscore)\.json$/.exec(url.pathname);
     const sched = /\/games\/\d+\/[A-Z]+\/schedule\.json$/.exec(url.pathname);
@@ -190,7 +318,15 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : (opts.port ?? 0);
   opts.log?.info(
-    { port, speed: opts.speed, documents: total, providerGameId, minSpacingMs },
+    {
+      port,
+      speed: opts.speed,
+      documents: total,
+      providerGameId,
+      minSpacingMs,
+      pushLines: { events: push.events.length, clocks: push.clocks.length },
+      pushDrop: opts.pushDrop ?? null,
+    },
     'fake provider listening',
   );
   return {
@@ -198,9 +334,13 @@ export async function startFakeProvider(opts: FakeProviderOptions): Promise<Fake
     port,
     providerGameId,
     documents: total,
+    pushLines: { events: push.events.length, clocks: push.clocks.length },
     stats,
+    dropPush,
     close: () =>
       new Promise<void>((resolve, reject) => {
+        for (const res of openPush) res.destroy();
+        openPush.clear();
         server.close((err) => (err ? reject(err) : resolve()));
         server.closeAllConnections();
       }),
