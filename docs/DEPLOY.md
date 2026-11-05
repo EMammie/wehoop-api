@@ -1,11 +1,13 @@
 # Deploying wehoop-api (M4)
 
-Status (2026-11-04): **built, rehearsed locally, NOT deployed.** The owner decision of
+Status (2026-11-05): **built, rehearsed locally, NOT deployed.** The owner decision of
 2026-10-18 kept the live runs on the M3 commit and the polling path until M3 was validated. M3
 is done: merged in PR #5 (`c48edec`), final evidence summary in PR #7, tag `m3` on `0e9be72`
-(2026-11-04). The Fly deploy and the switch of live ingestion to push now wait on the remaining
-prerequisites of the runbook below, among them the `ANTHROPIC_API_KEY` secret for the hosted
-review row and the owner's go; the deploy itself has NOT been run. Every step below that needs a
+(2026-11-04). The Fly deploy now waits on a payment card on the Fly account and the owner's go;
+the deploy itself has NOT been run. The `ANTHROPIC_API_KEY` repository secret is needed only for
+the hosted review row, not for the deploy. No production Sportradar key exists yet, so the first
+deploy is a **quiet deploy** (below): it proves the deploy, the lock and the restart, not
+ingestion. Every step below that needs a
 Fly account is written as the exact command and marked NOT RUN; the restart check has a local
 rehearsal the validator can run against the dev stack today.
 
@@ -30,8 +32,12 @@ Set as Fly secrets (`fly secrets set NAME=value -a wehoop-api`), both process gr
 ```
 MODE=production
 DATABASE_URL                 Supabase cloud: the SESSION pooler or the direct connection (port 5432).
-DATABASE_SESSION_URL         Same host, SESSION mode (5432). NEVER the transaction pooler (6543 /
-                             pgbouncer=true): config refuses it; the advisory lock and LISTEN need a session.
+DATABASE_SESSION_URL         SESSION mode, never the transaction pooler (6543 / pgbouncer=true): config
+                             refuses it; the advisory lock and LISTEN need a session. Use the DIRECT
+                             connection (db.<ref>.supabase.co:5432, IPv6, which Fly machines have):
+                             through the session pooler the lock lives on a pooled server connection,
+                             and how the pooler resets that connection after a client dies is not
+                             verified, so a dead worker's lock could outlive it.
 SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY    Publisher credential for Realtime Broadcast (private channels).
 SUPABASE_ANON_KEY            Only needed by `pnpm subscribe` / tests; harmless on the server.
@@ -65,18 +71,47 @@ tag `m3`, 2026-11-04):
    call order, with a unit test of concurrent callers whose claims finish out of order. Each claim is
    also bounded (`DEFAULT_CLAIM_TIMEOUT_MS`, 10 s), so one hung claim fails its caller instead of
    stalling every later claim of the process.
-2. `ingest.product_quotas` verified for every product the deployment has a key for (the guard refuses
-   every call otherwise).
-3. The `ANTHROPIC_API_KEY` repository secret for the hosted review row.
-4. The owner's go for the deploy and for switching live ingestion to push.
+2. `ingest.product_quotas` verified for every product the deployment has a **production** key for
+   (the guard refuses every call otherwise). For the quiet deploy they stay unverified on purpose.
+3. A payment card on the Fly account.
+4. The owner's go for the deploy and, once production keys exist, for switching live ingestion to push.
+
+(The `ANTHROPIC_API_KEY` repository secret belongs to the hosted review row, not to this list.)
+
+### Quiet deploy (until production keys exist)
+
+`MODE=production` requires `SPORTRADAR_ACCESS_LEVEL=production` (`src/config.ts`), and the Fly
+worker has no other way to start: its command has no `--game`, and `MODE=trial` without one exits
+64 on every restart. The keys that exist are trial keys, so the first deploy runs production mode
+without being able to ingest:
+
+- set `SPORTRADAR_WNBA_KEY` to a placeholder (e.g. `placeholder-until-production`), never a trial
+  key, so no real key is ever on Fly;
+- leave every `ingest.product_quotas.verified_at` null on the cloud database: the QuotaGuard refuses
+  each call before it claims a slot or sends, so nothing reaches Sportradar;
+- expect `schedule poll failed` (a quota refusal) in the worker log every hour. No game is
+  discovered, so no watch starts and `/health` stays free of `watch_without_provider_calls`.
+
+What it proves: the image boots on Fly, the worker takes the lock over the cloud connection,
+`/health` is clean, and a restart re-acquires the lock. What it does not prove: resuming a watched
+game after a restart on Fly (covered locally by the rehearsal below and
+`test/integration/scheduler-resume.test.ts`) and the production scheduler end to end, which waits
+for a production key. Plan rev 4.15 (B4) adds a demo host that runs the scheduler continuously
+against committed recordings on Fly; once it exists the restart check is repeated with a game
+mid-watch.
+
+Cost: two shared-cpu-1x machines (512 MB worker, 256 MB api), roughly $5 a month (estimate, not
+checked against current Fly pricing); `fly scale count api=0 worker=0` stops both.
 
 ```
 fly auth login                    # the project's own Fly account (fly auth whoami)
 # app already created (see above); fly.toml carries app name and region, so no `fly launch`
-fly secrets set MODE=production SPORTRADAR_ACCESS_LEVEL=production \
-  DATABASE_URL=... DATABASE_SESSION_URL=... SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... \
-  SPORTRADAR_WNBA_KEY=... ADMIN_BEARER_TOKEN=...
-fly deploy                        # builds the Dockerfile, deploys both process groups
+# the owner writes the secrets (NAME=value per line, names above) to a file outside the repo, so the
+# values never enter shell history, imports it and deletes it:
+fly secrets import -a wehoop-api < ~/wehoop-fly.env && rm ~/wehoop-fly.env
+fly deploy --ha=false             # builds the Dockerfile, deploys both process groups; without
+                                  # --ha=false Fly starts 2 machines per group and the 2nd worker
+                                  # exits 2 and restarts forever
 fly scale count api=1 worker=1    # exactly one worker (the lock makes a second exit 2)
 fly status
 fly logs -a wehoop-api --process-group worker | grep -E "worker lock acquired|scheduler started"
@@ -102,7 +137,14 @@ fly logs -a wehoop-api --process-group worker       # expect, in order:
 #   "aborted orphaned runs" / "aborted orphaned sub-runs" / "released orphaned reservations"
 #   "scheduler started"  (production) or "trial watch started" + "push streams opened"
 curl -s https://wehoop-api.fly.dev/health | jq '.worker.lockHeld'   # true
+# optional, the crash path (the lock lingers until Postgres notices the dead socket; flags checked
+# on flyctl v0.5.4):
+fly machine stop <worker-machine-id> --signal SIGKILL -a wehoop-api && fly machine start <worker-machine-id> -a wehoop-api
 ```
+
+`fly machine restart` sends `kill_signal` (SIGTERM): the worker drains and releases the lock, so the
+new process usually takes it at once. In the quiet deploy there is no run to abort, so the
+"aborted orphaned ..." lines may report nothing.
 
 A restart during a game's complete -> closed wait resumes that game: the scheduler watches a game
 stored as `complete` again, as a new generation starting in the slow after-complete phase, until
