@@ -1,5 +1,12 @@
 import type { Db } from '../db/client.js';
 import type { Logger } from '../logger.js';
+import { COMPLETE_REWATCH_CAP_MS, DEFAULT_MAX_LATE_START_MS } from './scheduler.js';
+
+/**
+ * How long after its tip-off the scheduler may still start or resume a watch of a game that is not
+ * closed: the late-start bound plus the `complete` re-watch cap (30 h).
+ */
+export const SCHEDULER_RESUME_HORIZON_MS = DEFAULT_MAX_LATE_START_MS + COMPLETE_REWATCH_CAP_MS;
 
 /**
  * `pnpm demo purge` (plan rev 4.15 (5)): delete closed replay games with every
@@ -71,6 +78,12 @@ export async function purgeReplayGames(
 ): Promise<PurgeResult> {
   const now = (opts.now ?? (() => new Date()))();
   const listedUntil = new Date(now.getTime() - opts.listingHorizonMs);
+  // A game that is not closed may still be resumed by the scheduler (a watch in failure back-off,
+  // a `complete` game between re-watches) until its tip-off is older than the latest start it
+  // allows: never purge it before that, whatever the flags (review 2, nit 2).
+  const resumableUntil = new Date(
+    now.getTime() - Math.max(opts.listingHorizonMs, SCHEDULER_RESUME_HORIZON_MS),
+  );
   const quiet = (cutoff: Date) =>
     db`coalesce((select max(c.created_at) from public.game_changes c where c.game_id = g.id), g.updated_at) < ${cutoff}`;
   const candidates = await db<{ id: string; providerGameId: string }[]>`
@@ -78,6 +91,7 @@ export async function purgeReplayGames(
     from public.games g
     where g.replay is not null
       and g.scheduled_at < ${listedUntil}
+      and (g.status = 'closed' or g.scheduled_at < ${resumableUntil})
       and ${
         opts.olderThan === null
           ? db`true`
@@ -114,8 +128,8 @@ export async function purgeReplayGames(
             ...ids(c),
             reason: `unpublished outbox rows (pending ${ob?.pending ?? 0}, dead ${ob?.dead ?? 0}); ${
               (ob?.dead ?? 0) > 0
-                ? `pnpm outbox requeue --channel game:${c.id}`
-                : 'wait for the publisher'
+                ? `requeue the dead rows with the demo configuration: ${demoMaintenance(`outbox requeue --channel game:${c.id}`)}`
+                : 'wait for the publisher (the demo worker drains on start and every 30 s)'
             }`,
           });
           return;
@@ -228,6 +242,15 @@ export async function purgeReplayGames(
       ).count;
   }
   return result;
+}
+
+/**
+ * How to run a maintenance CLI (`pnpm outbox`, `pnpm retention`) on a demo database: in MODE=demo,
+ * the only mode that may write to it (review 2, nit 3). The demo app's Fly [env] already sets
+ * MODE=demo and the loopback SPORTRADAR_BASE_URL; from a laptop both are passed explicitly.
+ */
+export function demoMaintenance(args: string): string {
+  return `MODE=demo SPORTRADAR_BASE_URL=http://127.0.0.1:8790 pnpm ${args} (on Fly: fly ssh console -a wehoop-demo -C "node src/bin/${args.split(' ')[0]}.js ${args.split(' ').slice(1).join(' ')}")`;
 }
 
 class DryRunRollback extends Error {}

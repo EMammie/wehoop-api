@@ -99,7 +99,12 @@ without being able to ingest:
   worker writes `ingest.environment = production` before it takes the lock (rev 4.15 review), so an
   empty production project can never be turned into the demo by a mis-pointed `pnpm demo init`
   (which also refuses any database with quota-counted calls or an operator-verified limit).
-  Every non-demo mode (production, trial, sim) refuses a database marked `demo`.
+  Every non-demo mode (production, trial, sim) refuses a database marked `demo`. The marker is
+  written in one statement that only touches a row of the same kind, so a `demo init` racing a
+  production start loses with a refusal instead of believing it marked the database. A database
+  marked `production` by mistake (a demo project a production worker was pointed at before
+  `demo init`) is unmarked by the owner only, by hand, after checking it holds no production data:
+  `delete from ingest.environment;` in the SQL editor of that project, then `pnpm demo init`.
 
 What it proves: the image boots on Fly, the worker takes the lock over the cloud connection,
 `/health` is clean, and a restart re-acquires the lock. What it does not prove: resuming a watched
@@ -367,8 +372,16 @@ Cleanup: `pnpm demo purge --older-than 7d [--dry-run]` (or `--all`) deletes, wit
 row, one transaction per game, in foreign-key order (`src/ingest/demo-purge.ts`): closed replay
 games quiet for that long, and replay games that never closed whose tip-off is that old. Whatever
 the flags, it never touches a slot inside the listing horizon (the latest `closed` moment of any
-known recording plus 30 min after its tip-off, about 3 h 6 min) and skips a game with a `running`
-run or with unpublished or dead outbox rows; it prints what it did. A rotation, `--interval` or
+known recording plus 30 min after its tip-off, about 3 h 6 min), never a game that is not closed
+while the scheduler could still resume it (30 h after its tip-off: the 6 h late-start bound plus the
+24 h `complete` re-watch cap), and skips a game with a `running` run or with unpublished or dead
+outbox rows; it prints what it did. Dead rows are requeued with the ordinary maintenance CLI in
+demo mode, the only mode allowed to write to a demo database (the same CLIs, not demo-specific
+wrappers: one code path for outbox and retention in every environment):
+`MODE=demo SPORTRADAR_BASE_URL=http://127.0.0.1:8790 pnpm outbox requeue --channel game:<uuid>`
+(likewise `pnpm outbox status` and `pnpm retention run ...`); on Fly the demo app's `[env]`
+already sets both, so `fly ssh console -a wehoop-demo -C "node src/bin/outbox.js requeue --channel game:<uuid>"`
+(NOT RUN). Under the default `MODE=sim` those CLIs refuse a demo database (exit 65). A rotation, `--interval` or
 `--league` change in a later deploy orphans the slots already listed under the old grid (their ids
 no longer parse on the new one, so their documents answer 404 and they never close): purge removes
 them once they are older than the cutoff. Demo databases and the dev stack only. Besides the retention job it is the only code that

@@ -41,6 +41,8 @@ import { assertSpeedAllowed, type GameRow, runSourceOf, runTrialWatch } from './
  */
 export const SCHEDULER_TZ = 'America/New_York';
 export const SCHEDULE_POLL_HOUR = 6;
+/** Default `maxLateStartMs`: never start a watch on a game whose tip-off is older than this. */
+export const DEFAULT_MAX_LATE_START_MS = 6 * 3_600_000;
 
 export interface SchedulerOptions {
   /** How often the loop wakes to decide (default 60 s). */
@@ -293,7 +295,7 @@ export class Scheduler {
       watchLeadMs: deps.watchLeadMs ?? 10 * 60_000,
       windowBeforeMs: deps.windowBeforeMs ?? 30 * 60_000,
       windowAfterMs: deps.windowAfterMs ?? 4 * 3_600_000,
-      maxLateStartMs: deps.maxLateStartMs ?? 6 * 3_600_000,
+      maxLateStartMs: deps.maxLateStartMs ?? DEFAULT_MAX_LATE_START_MS,
       watchRetryMs: deps.watchRetryMs ?? 10 * 60_000,
       pollRetryMs: deps.pollRetryMs ?? 5 * 60_000,
       completeRewatchMs: deps.completeRewatchMs ?? COMPLETE_REWATCH_MS,

@@ -36,16 +36,24 @@ export async function readEnvironment(db: Db): Promise<EnvironmentKind | null> {
   return EnvironmentRowSchema.parse(row).kind;
 }
 
-/** Mark the database (`pnpm demo init`). Refuses to re-mark a database marked as something else. */
+/**
+ * Mark the database (`pnpm demo init`, the production worker's first start). Refuses to re-mark a
+ * database marked as something else. One statement decides: the upsert only touches an existing
+ * row of the same kind, so when `demo init` and a production start race, the loser gets no row
+ * back and is refused instead of returning as if it had marked its own kind.
+ */
 export async function markEnvironment(db: Db, kind: EnvironmentKind, note: string): Promise<void> {
-  const current = await readEnvironment(db);
-  if (current !== null && current !== kind) {
+  const rows = await db<{ kind: string }[]>`
+    insert into ingest.environment (singleton, kind, note) values (true, ${kind}, ${note})
+    on conflict (singleton) do update set note = excluded.note
+      where ingest.environment.kind = excluded.kind
+    returning kind`;
+  if (rows.length === 0) {
+    const current = await readEnvironment(db);
     throw new EnvironmentRefusedError(
-      `this database is marked ${current}; refusing to mark it ${kind}`,
+      `this database is marked ${current ?? 'differently'}; refusing to mark it ${kind}`,
     );
   }
-  await db`insert into ingest.environment (singleton, kind, note) values (true, ${kind}, ${note})
-           on conflict (singleton) do update set note = excluded.note`;
 }
 
 /**

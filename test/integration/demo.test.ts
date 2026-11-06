@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,7 +7,7 @@ import { loadSnapshot } from '../../src/api/routes/snapshot.js';
 import { type Config, loadConfig } from '../../src/config.js';
 import { ensureGame } from '../../src/ingest/apply-changes.js';
 import { DEMO_QUOTA_LIMIT, demoInit } from '../../src/ingest/demo-init.js';
-import { purgeReplayGames } from '../../src/ingest/demo-purge.js';
+import { demoMaintenance, purgeReplayGames } from '../../src/ingest/demo-purge.js';
 import {
   assertEnvironment,
   EnvironmentRefusedError,
@@ -305,6 +306,13 @@ describe('demo purge', () => {
     expect(label).toEqual({ replay: 'recorded', status: 'created' });
     // A replay game that never closed (listed, never watched) is purged once its tip-off is past
     // the cutoff, whatever its status: a host outage or a rotation change leaves such games.
+    // ... but not while the scheduler could still resume it (late-start bound + complete re-watch
+    // cap: 30 h after the tip-off), even with --all.
+    const resumable = await purge({
+      gameIds: [recreated.id],
+      now: () => new Date(TIP + 20 * 3_600_000),
+    });
+    expect(resumable.candidates).toBe(0);
     const neverClosed = await purge({
       gameIds: [recreated.id],
       olderThan: new Date(TIP + 86_400_000),
@@ -357,6 +365,59 @@ describe('environment marker', () => {
     await expect(db`insert into ingest.environment (kind) values ('demo')`).rejects.toThrow();
     await db`delete from ingest.environment`;
   });
+
+  it('markEnvironment is decided in one statement: a database marked otherwise by a racing writer is refused, the same kind is idempotent', async () => {
+    try {
+      // The race: another process marked it production between our read and our write.
+      await db`insert into ingest.environment (kind, note) values ('production', 'racing writer')`;
+      await expect(markEnvironment(db, 'demo', 'pnpm demo init')).rejects.toThrow(
+        /marked production; refusing to mark it demo/,
+      );
+      expect(await readEnvironment(db)).toBe('production');
+      await expect(markEnvironment(db, 'production', 'again')).resolves.toBeUndefined();
+    } finally {
+      await db`delete from ingest.environment`;
+    }
+  });
+
+  it('the maintenance CLIs (outbox, retention) write to a demo database only in MODE=demo', async () => {
+    const run = (script: string, args: string[], env: Record<string, string>) =>
+      spawnSync(process.execPath, ['--import', 'tsx', script, ...args], {
+        cwd: new URL('../../', import.meta.url).pathname,
+        env: { ...process.env, ...env },
+        encoding: 'utf8',
+      });
+    const demoEnv = {
+      MODE: 'demo',
+      SPORTRADAR_BASE_URL: 'http://127.0.0.1:8790',
+      LOG_LEVEL: 'error',
+    };
+    const noGame = [
+      'run',
+      '--closed-before',
+      '30d',
+      '--dry-run',
+      '--game',
+      '00000000-0000-0000-0000-000000000000',
+    ];
+    await markEnvironment(db, 'demo', 'integration test');
+    try {
+      const simOutbox = run('src/bin/outbox.ts', ['status'], { MODE: 'sim' });
+      expect(simOutbox.status).toBe(65);
+      expect(simOutbox.stderr).toMatch(/MODE=sim refuses .*marked demo/);
+      expect(run('src/bin/retention.ts', noGame, { MODE: 'sim' }).status).toBe(65);
+      const demoOutbox = run('src/bin/outbox.ts', ['status'], demoEnv);
+      expect(demoOutbox.status, demoOutbox.stderr).toBe(0);
+      const demoRetention = run('src/bin/retention.ts', noGame, demoEnv);
+      expect(demoRetention.status, demoRetention.stderr).toBe(0);
+    } finally {
+      await db`delete from ingest.environment`;
+    }
+    // The purge skip hint prints exactly that invocation.
+    expect(demoMaintenance('outbox requeue --channel game:x')).toMatch(
+      /^MODE=demo SPORTRADAR_BASE_URL=http:\/\/127\.0\.0\.1:8790 pnpm outbox requeue --channel game:x/,
+    );
+  }, 120_000);
 
   it('the production worker marks an unmarked non-dev database production at start, never the dev stack or a marked one', async () => {
     await expect(markProductionOnStart(db, as('production', true), log)).resolves.toBeNull();
