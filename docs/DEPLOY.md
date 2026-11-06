@@ -336,25 +336,51 @@ pnpm demo run                                # real time: one replay every 3 h; 
 curl -s 127.0.0.1:8790/_demo/status          # listed slots, their status, host counters (no key)
 ```
 
-Restart-continuity rehearsal at compressed speed (about 3 minutes; the automated version is
-`test/integration/demo-restart.test.ts`):
+Restart-continuity rehearsal at compressed speed (about 4 minutes; the automated version is
+`test/integration/demo-restart.test.ts`). Run from the repo root after the four setup lines above
+(`db reset`, `source .env`, `demo init`), with no other `demo run` or worker running:
 
 ```
-E=$(pnpm -s demo epoch --speed 60 --lead 12 --league wnba | sed -n 's/^DEMO_EPOCH=//p')
-pnpm demo run --league wnba --speed 60 --epoch "$E" > demo1.log 2>&1 &   # note WORKER_PID=, DEMO_HOST=
-# the next WNBA slot's id: the line "next slot ..." printed by `demo epoch`, or /_demo/status
-pnpm subscribe --game <games.id of that slot> --record sub.jsonl &        # connected throughout
-#   ... once v_schedule shows it inprogress with plays:
-kill -9 <WORKER_PID>
-pnpm demo run --league wnba --speed 60 --epoch "$E" > demo2.log 2>&1 &   # SAME --speed and --epoch
-#   ... when the game is closed and the last watch_game run of it is `ok`: kill -TERM <new WORKER_PID>
-pnpm demo export-slot --league wnba --slot <slot id> --game-id test-poll-<n> --out poll.jsonl
-pnpm dev:worker --mode sim --league wnba --replay-file poll.jsonl --pace 0   # the same shifted slot, polling-only
-pnpm dump-game --league wnba --provider-game-id <slot id> > demo.json
-pnpm dump-game --league wnba --provider-game-id test-poll-<n> > poll.json
-diff demo.json poll.json                     # expect only the providerGameId line to differ
+q() { docker exec supabase_db_wehoop-api psql -U postgres -Atc "$1"; }
+T0=$(q "select now()")                                         # for the no-traffic check below
+EP=$(pnpm -s demo epoch --speed 60 --lead 12 --league wnba)
+E=$(echo "$EP" | sed -n 's/^DEMO_EPOCH=//p'); SLOT=$(echo "$EP" | sed -n 's/^next slot \([^ ]*\).*/\1/p')
+pnpm api > api.log 2>&1 & API=$!                               # the Hono API on :3000 (non-watch), for the subscriber
+pnpm demo run --league wnba --speed 60 --epoch "$E" > demo1.log 2>&1 &
+until [ -n "$(q "select id from public.games where provider_game_id = '$SLOT'")" ]; do sleep 1; done
+GAME=$(q "select id from public.games where provider_game_id = '$SLOT'")
+pnpm subscribe --game "$GAME" --record sub.jsonl --settle-ms 5000 > sub.log 2>&1 & SUB=$!   # connected throughout
+until [ "$(q "select count(*) >= 120 from public.play_events where game_id = '$GAME'")" = t ]; do sleep 1; done
+kill -9 "$(sed -n 's/^WORKER_PID=//p' demo1.log)"              # mid-game, no tail runs
+pnpm demo run --league wnba --speed 60 --epoch "$E" > demo2.log 2>&1 & RUN2=$!   # SAME --speed and --epoch
+until [ "$(q "select status from ingest.ingestion_runs where kind = 'watch_game' and game_id = '$GAME' order by id desc limit 1")" = ok ]; do sleep 2; done
+until [ "$(q "select count(*) from ingest.broadcast_outbox where game_id = '$GAME' and published_at is null")" = 0 ]; do sleep 1; done
+kill -TERM "$(sed -n 's/^WORKER_PID=//p' demo2.log)"; wait $RUN2; echo demo2 exit=$?   # drains, exits 0
+wait $SUB                                                      # the subscriber exits after closed + settle
+q "select id, status from ingest.ingestion_runs where kind = 'watch_game' and game_id = '$GAME' order by id"   # aborted, then ok
+pnpm demo verify-slot --slot "$SLOT"; echo exit=$?            # PASS, exit 0 (the polling-only comparison)
+grep '"kind":"pulse"' sub.jsonl | tail -1                      # the pulse carries "replay":"recorded"
+tail -3 sub.log                                                # summary: contiguous, derived state equals the final snapshot
 pnpm invariants
+kill $API                                                      # the API
 ```
+
+`verify-slot` replays the closed slot's shifted documents polling-only (pace 0, in-process,
+through applyChanges) into a check game `check-<slot id>` and compares the canonical state of the
+two games: status, score, periods, the non-deleted events (count, bodies, ordering key), team and
+player stats. It deliberately does not compare `last_seq` or the number of changes, `deleted_at`
+rows, or stale observations, which legitimately differ between ingestion paths of one recording:
+the 3 s polling replay numbers every intermediate revision it sees, the push watch with 5-minute
+REST reconciliation sees fewer intermediate states but adds clock-carried score steps, and the
+restarted watch re-reads documents (logged stale, never written twice). In the validator's run of
+this rehearsal `last_seq` was 999 for the restarted demo game, 1022 for an uninterrupted demo
+replay and 1233 for the polling-only replay, with events, periods, score and status equal. A play inserted and
+retracted between two REST reconciliations is never observed by the push path, so it has no
+`deleted_at` row there. `verify-slot` takes no ingester lock (the check game has its own provider
+id, row and generation; the demo scheduler never watches a `check-` game and the host never lists
+one), so it can run next to `demo run`, e.g. as the hosted demo's periodic self-check; while the
+check game exists (seconds) `v_schedule` shows it as a second replay of the slot. It is purged with
+every dependent row afterwards unless `--keep`; it refuses a slot that is not `closed` (exit 65).
 
 No-traffic check (every provider call of the demo is on the demo host and uncounted):
 
@@ -375,7 +401,9 @@ the flags, it never touches a slot inside the listing horizon (the latest `close
 known recording plus 30 min after its tip-off, about 3 h 6 min), never a game that is not closed
 while the scheduler could still resume it (30 h after its tip-off: the 6 h late-start bound plus the
 24 h `complete` re-watch cap), and skips a game with a `running` run or with unpublished or dead
-outbox rows; it prints what it did. Dead rows are requeued with the ordinary maintenance CLI in
+outbox rows; it prints what it did and, dry run or not, every replay game it left alone, counted
+by the rule that kept it (inside the listing horizon, inside the 30 h resume window, a running run,
+unpublished outbox rows, not quiet since the cutoff). Dead rows are requeued with the ordinary maintenance CLI in
 demo mode, the only mode allowed to write to a demo database (the same CLIs, not demo-specific
 wrappers: one code path for outbox and retention in every environment):
 `MODE=demo SPORTRADAR_BASE_URL=http://127.0.0.1:8790 pnpm outbox requeue --channel game:<uuid>`
