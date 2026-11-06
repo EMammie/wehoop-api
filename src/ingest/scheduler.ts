@@ -241,11 +241,15 @@ export interface GameRange {
  * Known, left to the owner: a generation-less schedule poll may write the status too, so a game
  * no watch ever saw, first reported `complete` by a poll, gets its marker at that poll and is
  * watched (for its final) like a resumed one.
+ *
+ * `replayOnly` (demo mode, rev 4.15): only games labelled `games.replay`; the demo host has no
+ * documents for any other game, so watching one would only fail and retry.
  */
 export async function loadSchedulerGames(
   db: Db,
   league: LeagueCode,
   range: GameRange,
+  opts: { replayOnly?: boolean } = {},
 ): Promise<GameRow[]> {
   return db<GameRow[]>`
     select g.id, g.provider_game_id as "providerGameId", g.status::text as status,
@@ -260,6 +264,7 @@ export async function loadSchedulerGames(
            ) end as "completedAt"
     from public.games g
     where g.league = ${league}
+      and ${opts.replayOnly ? db`g.replay is not null` : db`true`}
       and (g.scheduled_at between ${range.from} and ${range.to}
            or (g.status = 'complete' and g.scheduled_at between ${range.completeFrom} and ${range.to}))
     order by g.scheduled_at, g.id`;
