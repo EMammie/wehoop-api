@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/api/server.js';
 import { loadConfig } from '../../src/config.js';
@@ -179,34 +179,45 @@ async function connectSubscriber(gameId: string) {
   realtime = client;
   await client.realtime.setAuth(anonKey);
   const via = { broadcast: 0, 'catch-up': 0, buffer: 0 };
-  const triggers: string[] = [];
+  const catchUps: Array<{ from: number; to: number; pages: number }> = [];
   const sub = new GameSubscriber(gameId, api, {
     onChange: (_c, how) => {
       via[how]++;
     },
-    log: (msg, data) => {
-      if (msg === 'catch-up' || msg === 'gap')
-        triggers.push(`${msg}:${String(data?.trigger ?? '')}`);
-    },
+    onCatchUp: (info) => catchUps.push({ from: info.from, to: info.to, pages: info.pages }),
   });
-  const channel = client.channel(gameChannel(gameId), { config: { private: true } });
-  channel.on('broadcast', { event: '*' }, (m) =>
-    sub.handleMessage({ event: m.event, payload: m.payload }),
-  );
-  let subscribed = false;
-  await new Promise<void>((resolve, reject) => {
-    channel.subscribe((status, err) => {
-      if (status === 'SUBSCRIBED') {
-        if (!subscribed) {
-          subscribed = true;
-          sub.start().then(resolve, reject);
-        } else void sub.reconnect();
-      }
-      if (!subscribed && (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT'))
-        reject(new Error(`${status}: ${err?.message}`));
+  // The app's channel handling: the first SUBSCRIBED starts the subscriber (snapshot + buffer); any
+  // later SUBSCRIBED (a rejoin after the socket dropped) runs its reconnect, i.e. /changes from
+  // its last seq. The test never calls reconnect() itself.
+  let started = false;
+  let channel: RealtimeChannel | null = null;
+  const join = () =>
+    new Promise<void>((resolve, reject) => {
+      const ch = client.channel(gameChannel(gameId), { config: { private: true } });
+      channel = ch;
+      ch.on('broadcast', { event: '*' }, (m) =>
+        sub.handleMessage({ event: m.event, payload: m.payload }),
+      );
+      ch.subscribe((status, err) => {
+        if (status === 'SUBSCRIBED') {
+          if (!started) {
+            started = true;
+            sub.start().then(resolve, reject);
+          } else {
+            void sub.reconnect();
+            resolve();
+          }
+        }
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT')
+          reject(new Error(`${status}: ${err?.message}`));
+      });
     });
-  });
-  return { sub, via, triggers };
+  const drop = async () => {
+    if (channel) await client.removeChannel(channel);
+    channel = null;
+  };
+  await join();
+  return { sub, via, catchUps, rejoin: join, drop };
 }
 
 beforeAll(async () => {
@@ -247,6 +258,13 @@ describe('demo restart continuity', () => {
       180_000,
       first,
     );
+    // The app loses its socket first (the gap is real: nothing reaches it until it rejoins).
+    await client.drop();
+    await client.sub.idle();
+    const dropSeq = client.sub.lastSeq;
+    const catchUpAppliedAtDrop = client.via['catch-up'];
+    const catchUpsAtDrop = client.catchUps.length;
+    expect(dropSeq).toBeGreaterThan(0);
     first.child.kill('SIGKILL');
     expect(await first.exited).toBeNull(); // killed, no exit code
     const firstWatch = mid.watchRunId;
@@ -259,9 +277,30 @@ describe('demo restart continuity', () => {
       60_000,
       second,
     );
-    // What the app does when its socket comes back or it returns to the foreground: catch up
-    // through /changes from its last seq.
-    await client.sub.reconnect();
+    // Rejoin only once the restarted worker has published changes past the drop (its startup
+    // drain and the resumed watch): those seqs exist only through /changes for this client.
+    const publishedMax = await until(
+      'changes past the drop to be published',
+      async () => {
+        const [o] = await db<{ max: string | null }[]>`
+          select max(seq)::text as max from ingest.broadcast_outbox
+          where game_id = ${mid.id} and published_at is not null and seq > ${dropSeq}`;
+        return o?.max ? Number(o.max) : null;
+      },
+      120_000,
+      second,
+    );
+    await client.rejoin(); // its SUBSCRIBED handler runs the reconnect (the app's normal path)
+    const recovery = await until(
+      'the rejoined subscriber to catch up through /changes',
+      async () =>
+        client.catchUps.slice(catchUpsAtDrop).find((c) => c.from === dropSeq && c.to > c.from) ??
+        null,
+      30_000,
+      second,
+    );
+    expect(recovery.to).toBeGreaterThanOrEqual(publishedMax);
+    expect(client.via['catch-up'] - catchUpAppliedAtDrop).toBeGreaterThan(0);
     const closed = await until(
       'the resumed watch to close the game',
       async () => {
@@ -320,15 +359,14 @@ describe('demo restart continuity', () => {
     }
     expect(calls.some((c) => c.url.includes('/schedule.json'))).toBe(true);
 
-    // The subscriber connected throughout recovered through /changes and folds to the snapshot.
-    let final = await api.snapshot(closed.id);
-    for (let i = 0; i < 5 && client.sub.lastSeq < final.seq; i++) {
-      await client.sub.reconnect();
-      final = await api.snapshot(closed.id);
-    }
+    // Convergence on the subscriber's own (broadcast, pulse, close) path: no reconnect from here.
+    const final = await api.snapshot(closed.id);
+    await until(
+      'the subscriber to reach the final seq by itself',
+      async () => (client.sub.lastSeq >= final.seq && client.sub.finalSnapshot ? true : null),
+      60_000,
+    );
     await client.sub.idle();
-    expect(client.sub.catchUps).toBeGreaterThan(0);
-    expect(client.triggers.some((t) => t.startsWith('catch-up'))).toBe(true);
     expect(client.sub.lastSeq).toBe(final.seq);
     const seqs = client.sub.applied.map((c) => c.seq);
     expect(seqs.every((q, i) => i === 0 || q === (seqs[i - 1] ?? 0) + 1)).toBe(true);
