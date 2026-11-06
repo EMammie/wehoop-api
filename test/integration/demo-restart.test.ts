@@ -287,5 +287,9 @@ describe('demo restart continuity', () => {
       ) x where x.content_hash is not null and x.content_hash = x.prev`;
     expect(dup?.n).toBe(0);
     for (const inv of await invariants()) expect(inv.actual, inv.check).toBe(inv.expect);
+    // Housekeeping: nobody subscribes to the comparison game; its rows must not reach the next
+    // file that drains the whole outbox to the real Realtime (realtime-auth).
+    await db`update ingest.broadcast_outbox set published_at = now()
+             where game_id = ${watcher.gameId} and published_at is null`;
   }, 600_000);
 });

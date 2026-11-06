@@ -428,3 +428,30 @@ from public.games g
 where g.retained_from_seq = g.last_seq + 1
   and g.last_seq > 0
   and exists (select 1 from public.game_changes c where c.game_id = g.id);
+
+-- check: no_entity_has_consecutive_identical_changes | expect: 0
+-- A durable change is written only when the entity's content changed (plan §4 rule 3): two
+-- consecutive changes of one entity (a play, a team or player stat line, the game status, the
+-- line score) with the same content hash mean a generation re-wrote what it re-read (rev 4.15
+-- restart acceptance: a resumed demo watch must not).
+select count(*) from (
+  select c.content_hash,
+         lag(c.content_hash) over (partition by c.game_id, e.entity order by c.seq) as prev
+  from public.game_changes c
+  cross join lateral (select case
+    when c.change_type in ('event_insert', 'event_update', 'event_delete') then 'event:' || c.provider_event_id
+    when c.change_type = 'stats_player' then 'player:' || (c.body->>'providerPlayerId')
+    when c.change_type = 'stats_team' then 'team:' || (c.body->>'providerTeamId')
+    else c.change_type::text end as entity) e
+) x
+where x.content_hash is not null and x.content_hash = x.prev;
+
+-- check: replay_games_have_matching_provenance | expect: 0
+-- Rev 4.15 (3): games.replay is set only from ingest.replay_slots (0014 trigger), so every
+-- labelled game has its provenance row with the same kind (until `pnpm demo purge` removes both).
+select count(*)
+from public.games g
+where g.replay is not null
+  and not exists (select 1 from ingest.replay_slots s
+                  where s.league = g.league and s.provider_game_id = g.provider_game_id
+                    and s.provenance = g.replay);
