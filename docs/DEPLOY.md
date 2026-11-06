@@ -354,7 +354,10 @@ pnpm invariants
 No-traffic check (every provider call of the demo is on the demo host and uncounted):
 
 ```
-docker exec supabase_db_wehoop-api psql -U postgres -Atc "select count(*) from ingest.provider_calls where url not like 'http://127.0.0.1:8790/%' and run_id in (select id from ingest.ingestion_runs where game_id in (select id from public.games where replay is not null))"   # expect 0
+T0=$(docker exec supabase_db_wehoop-api psql -U postgres -Atc "select now()")    # BEFORE the first pnpm demo run
+# ... the demo runs ...
+docker exec supabase_db_wehoop-api psql -U postgres -Atc "select count(*) from ingest.provider_calls where called_at >= '$T0' and (url not like 'http://127.0.0.1:8790/%' or quota_counted or source <> 'rehearsal')"   # expect 0: EVERY call since the demo started (schedule polls with no game included)
+docker exec supabase_db_wehoop-api psql -U postgres -Atc "select count(*) from ingest.provider_calls where called_at >= '$T0'"   # expect > 0 (the check above is not vacuous)
 docker exec supabase_db_wehoop-api psql -U postgres -Atc "select count(*) from ingest.provider_calls where quota_counted and source = 'rehearsal'"   # expect 0
 SPORTRADAR_WNBA_KEY=x pnpm demo run; echo exit=$?                               # refused: exit 65
 SPORTRADAR_BASE_URL=https://api.sportradar.com pnpm demo run; echo exit=$?      # refused: exit 65

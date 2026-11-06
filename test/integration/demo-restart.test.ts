@@ -3,11 +3,18 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createApp } from '../../src/api/server.js';
+import { loadConfig } from '../../src/config.js';
 import { purgeReplayGames } from '../../src/ingest/demo-purge.js';
 import { GameWatcher, replayRecording } from '../../src/ingest/game-watcher.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
+import { type ChangesApi, GameSubscriber } from '../../src/live/subscriber.js';
+import { gameChannel } from '../../src/live/transport.js';
 import { canonicalJson } from '../../src/model/content-hash.js';
+import { canonicalState, stateFromSnapshot } from '../../src/model/game-state.js';
+import { ChangesPageSchema, SnapshotSchema } from '../../src/model/snapshot.js';
 import {
   DEFAULT_INTERVAL_MS,
   epochFor,
@@ -142,6 +149,66 @@ async function invariants(): Promise<Array<{ check: string; expect: string; actu
   return out;
 }
 
+/**
+ * The reference client (src/live/subscriber.ts) on the real Realtime private channel with the
+ * anon key, against the Hono API in-process (`app.request`, the HTTP bodies Zod-parsed exactly as
+ * `pnpm subscribe` parses fetch responses). Connected before the SIGKILL and through the restart.
+ */
+const apiConfig = loadConfig({ ...process.env, MODE: 'sim' });
+const app = createApp({ db, config: apiConfig, log: silentLog });
+const api: ChangesApi = {
+  async snapshot(id) {
+    const res = await app.request(`/v1/games/${id}/snapshot`);
+    if (!res.ok) throw new Error(`snapshot HTTP ${res.status}`);
+    return SnapshotSchema.parse(await res.json());
+  },
+  async changes(id, after, limit = 200) {
+    const res = await app.request(`/v1/games/${id}/changes?after=${after}&limit=${limit}`);
+    if (!res.ok) throw new Error(`changes HTTP ${res.status}`);
+    return ChangesPageSchema.parse(await res.json());
+  },
+};
+let realtime: SupabaseClient | null = null;
+
+async function connectSubscriber(gameId: string) {
+  const anonKey = apiConfig.supabase.anonKey;
+  if (!anonKey) throw new Error('SUPABASE_ANON_KEY is required for the restart subscriber');
+  const client = createClient(apiConfig.supabase.url, anonKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  realtime = client;
+  await client.realtime.setAuth(anonKey);
+  const via = { broadcast: 0, 'catch-up': 0, buffer: 0 };
+  const triggers: string[] = [];
+  const sub = new GameSubscriber(gameId, api, {
+    onChange: (_c, how) => {
+      via[how]++;
+    },
+    log: (msg, data) => {
+      if (msg === 'catch-up' || msg === 'gap')
+        triggers.push(`${msg}:${String(data?.trigger ?? '')}`);
+    },
+  });
+  const channel = client.channel(gameChannel(gameId), { config: { private: true } });
+  channel.on('broadcast', { event: '*' }, (m) =>
+    sub.handleMessage({ event: m.event, payload: m.payload }),
+  );
+  let subscribed = false;
+  await new Promise<void>((resolve, reject) => {
+    channel.subscribe((status, err) => {
+      if (status === 'SUBSCRIBED') {
+        if (!subscribed) {
+          subscribed = true;
+          sub.start().then(resolve, reject);
+        } else void sub.reconnect();
+      }
+      if (!subscribed && (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT'))
+        reject(new Error(`${status}: ${err?.message}`));
+    });
+  });
+  return { sub, via, triggers };
+}
+
 beforeAll(async () => {
   await db`select 1`;
   // 12 demo minutes before the slot at the moment the first process starts.
@@ -159,13 +226,18 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   for (const c of children) if (c.exitCode === null) c.kill('SIGKILL');
+  await realtime?.removeAllChannels();
   rmSync(dir, { recursive: true, force: true });
   await db.end();
 });
 
 describe('demo restart continuity', () => {
   it('SIGKILL mid-game: the same provider game id resumes as a new generation, closes, and equals the slot replayed polling-only', async () => {
+    const [started] = await db<{ at: Date }[]>`select now() as at`;
     const first = startDemo();
+    const listed = await until('the slot to be listed', gameRow, 120_000, first);
+    // The app's subscriber connects before the game starts and stays connected throughout.
+    const client = await connectSubscriber(listed.id);
     const mid = await until(
       'the replay to reach mid-game',
       async () => {
@@ -181,6 +253,15 @@ describe('demo restart continuity', () => {
     expect(firstWatch).not.toBeNull();
 
     const second = startDemo();
+    await until(
+      'the restarted worker to take the lock',
+      async () => (second.out.join('').includes('WORKER_PID=') ? true : null),
+      60_000,
+      second,
+    );
+    // What the app does when its socket comes back or it returns to the foreground: catch up
+    // through /changes from its last seq.
+    await client.sub.reconnect();
     const closed = await until(
       'the resumed watch to close the game',
       async () => {
@@ -227,17 +308,36 @@ describe('demo restart continuity', () => {
     expect(closed.watchRunId).toBe(watches.at(-1)?.id);
     expect(closed.watchRunId).not.toBe(firstWatch);
 
-    // No Sportradar traffic: every call of the game's runs went to the demo host, never counted.
+    // No Sportradar traffic: EVERY provider call since the demo started (schedule polls with no
+    // game included) went to the demo host, never counted.
     const calls = await db<{ url: string; source: string; counted: boolean }[]>`
-      select c.url, c.source::text as source, c.quota_counted as counted
-      from ingest.provider_calls c join ingest.ingestion_runs r on r.id = c.run_id
-      where r.game_id = ${closed.id}
-         or r.parent_run_id in (select id from ingest.ingestion_runs where game_id = ${closed.id})`;
+      select url, source::text as source, quota_counted as counted
+      from ingest.provider_calls where called_at >= ${started?.at ?? new Date(0)}`;
     expect(calls.length).toBeGreaterThan(10);
     for (const c of calls) {
       expect(c.url.startsWith(`http://127.0.0.1:${PORT}/`)).toBe(true);
       expect(c).toMatchObject({ source: 'rehearsal', counted: false });
     }
+    expect(calls.some((c) => c.url.includes('/schedule.json'))).toBe(true);
+
+    // The subscriber connected throughout recovered through /changes and folds to the snapshot.
+    let final = await api.snapshot(closed.id);
+    for (let i = 0; i < 5 && client.sub.lastSeq < final.seq; i++) {
+      await client.sub.reconnect();
+      final = await api.snapshot(closed.id);
+    }
+    await client.sub.idle();
+    expect(client.sub.catchUps).toBeGreaterThan(0);
+    expect(client.triggers.some((t) => t.startsWith('catch-up'))).toBe(true);
+    expect(client.sub.lastSeq).toBe(final.seq);
+    const seqs = client.sub.applied.map((c) => c.seq);
+    expect(seqs.every((q, i) => i === 0 || q === (seqs[i - 1] ?? 0) + 1)).toBe(true);
+    if (!client.sub.state) throw new Error('subscriber has no state');
+    expect(canonicalState(client.sub.state)).toBe(canonicalState(stateFromSnapshot(final)));
+    expect(client.sub.state).toEqual(stateFromSnapshot(final));
+    expect(final.game.replay).toBe('recorded');
+    expect(final.game.status).toBe('closed');
+
     const [label] = await db<
       { replay: string | null }[]
     >`select replay from public.games where id = ${closed.id}`;
