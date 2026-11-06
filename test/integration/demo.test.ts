@@ -7,7 +7,13 @@ import { loadSnapshot } from '../../src/api/routes/snapshot.js';
 import { type Config, loadConfig } from '../../src/config.js';
 import { ensureGame } from '../../src/ingest/apply-changes.js';
 import { DEMO_QUOTA_LIMIT, demoInit } from '../../src/ingest/demo-init.js';
-import { demoMaintenance, purgeCheckGame, purgeReplayGames } from '../../src/ingest/demo-purge.js';
+import {
+  CheckPurgeRefusedError,
+  demoMaintenance,
+  purgeCheckGame,
+  purgeReplayGames,
+} from '../../src/ingest/demo-purge.js';
+import { VerifyRefusedError, verifySlot } from '../../src/ingest/demo-verify.js';
 import {
   assertEnvironment,
   EnvironmentRefusedError,
@@ -21,6 +27,7 @@ import { QuotaGuard } from '../../src/ingest/quota-guard.js';
 import { endRun, startRun } from '../../src/ingest/runs.js';
 import { loadSchedulerGames } from '../../src/ingest/scheduler.js';
 import { planDay } from '../../src/ingest/trial-mode.js';
+import { abortOrphanedRuns } from '../../src/ingest/worker-runtime.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
 import { buildPulse } from '../../src/live/pulse.js';
 import { DbScoreboardSource } from '../../src/live/scoreboard.js';
@@ -273,6 +280,79 @@ describe('demo verify-slot', () => {
     expect(loaded.some((g) => g.id === check?.id)).toBe(false);
     expect(loaded.some((g) => g.id === gameId)).toBe(true);
     await purgeCheckGame(db, log, { id: check?.id ?? '', providerGameId: checkId() });
+    expect(await checkRows()).toEqual({ games: 0, slots: 0, replay: null });
+  }, 120_000);
+
+  it('refuses off the dev stack, a check id, and an id of no known recording (before touching anything)', async () => {
+    await expect(verifySlot(db, log, slot.providerGameId, { devStackOnly: false })).rejects.toThrow(
+      /runs on the dev stack only/,
+    );
+    await expect(
+      verifySlot(db, log, `check-${slot.providerGameId}`, { devStackOnly: true }),
+    ).rejects.toThrow(/is a check game/);
+    await expect(
+      verifySlot(db, log, 'replay-deadbeef-202701102300', { devStackOnly: true }),
+    ).rejects.toBeInstanceOf(VerifyRefusedError);
+    expect(await checkRows()).toEqual({ games: 0, slots: 0, replay: null });
+    // The CLI says so too: MODE=demo with a session URL that is not the dev stack, on a database
+    // marked demo (so the environment rule lets it through and verify-slot's own refusal speaks).
+    await markEnvironment(db, 'demo', 'integration test');
+    const mixed = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', 'src/bin/demo.ts', 'verify-slot', '--slot', slot.providerGameId],
+      {
+        cwd: new URL('../../', import.meta.url).pathname,
+        env: {
+          ...process.env,
+          SPORTRADAR_BASE_URL: 'http://127.0.0.1:8790',
+          LOG_LEVEL: 'error',
+          // DATABASE_URL stays the dev stack; the session URL is not, so devStackOnly is false.
+          DATABASE_SESSION_URL: 'postgresql://postgres:postgres@db.example.invalid:5432/postgres',
+        },
+        encoding: 'utf8',
+      },
+    );
+    await db`delete from ingest.environment`;
+    expect(mixed.status).toBe(65);
+    expect(mixed.stderr).toMatch(/verify-slot refused: verify-slot runs on the dev stack only/);
+  }, 120_000);
+
+  it('purgeCheckGame never takes a real slot game, whatever id string the caller passes', async () => {
+    await expect(
+      purgeCheckGame(db, log, { id: gameId, providerGameId: `check-${slot.providerGameId}` }),
+    ).rejects.toBeInstanceOf(CheckPurgeRefusedError);
+    const [g] = await db<
+      { n: number }[]
+    >`select count(*)::int as n from public.games where id = ${gameId}`;
+    expect(g?.n).toBe(1);
+  });
+
+  it('a concurrent verify of the same slot is refused (exit 65 path), and a worker start leaves a verify run alone', async () => {
+    const kept = await verifySlot(db, log, slot.providerGameId, { devStackOnly: true, keep: true });
+    expect(kept.ok).toBe(true);
+    // The kept check game with a run still running = another verify-slot in progress.
+    const busy = await startRun(db, {
+      kind: 'replay',
+      league: 'wnba',
+      gameId: kept.checkGameId,
+      source: 'fixture',
+      meta: { verifySlot: slot.providerGameId },
+    });
+    await expect(verifySlot(db, log, slot.providerGameId, { devStackOnly: true })).rejects.toThrow(
+      /still running.*another verify-slot of this slot is running/,
+    );
+    // A demo worker (re)start's orphan cleanup does not abort it ...
+    const aborted = await abortOrphanedRuns(db, log);
+    expect(aborted).not.toContain(busy.id);
+    const [r] = await db<
+      { status: string }[]
+    >`select status from ingest.ingestion_runs where id = ${busy.id}`;
+    expect(r?.status).toBe('running');
+    await endRun(db, busy.id, 'ok');
+    await purgeCheckGame(db, log, {
+      id: kept.checkGameId,
+      providerGameId: kept.checkProviderGameId,
+    });
     expect(await checkRows()).toEqual({ games: 0, slots: 0, replay: null });
   }, 120_000);
 

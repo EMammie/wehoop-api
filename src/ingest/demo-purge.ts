@@ -188,11 +188,20 @@ async function purgeOneGame(
   } = {};
   try {
     await db.begin(async (tx) => {
-      const [g] = await tx<{ replay: string | null; league: string }[]>`
-          select replay, league::text as league
+      const [g] = await tx<{ replay: string | null; league: string; providerGameId: string }[]>`
+          select replay, league::text as league, provider_game_id as "providerGameId"
           from public.games where id = ${c.id} for update`;
-      if (!g || g.replay === null) {
+      if (!g || g.replay === null || g.providerGameId !== c.providerGameId) {
         outcome.skipped = { ...ids(c), reason: 'changed since selection' };
+        return;
+      }
+      // Discarding unpublished outbox rows is for check games only, decided on the locked row
+      // itself, never on the caller's string (review round 3): a real slot game is never taken.
+      if (o.discardOutbox && !g.providerGameId.startsWith(CHECK_ID_PREFIX)) {
+        outcome.skipped = {
+          ...ids(c),
+          reason: `refused: ${g.providerGameId} is not a check game (outbox rows are discarded only for check- games)`,
+        };
         return;
       }
       const [ob] = await tx<{ pending: number; dead: number }[]>`
@@ -308,11 +317,15 @@ export async function purgeCheckGame(
   c: { id: string; providerGameId: string },
 ): Promise<PurgedGame> {
   if (!c.providerGameId.startsWith(CHECK_ID_PREFIX))
-    throw new Error(`${c.providerGameId} is not a check game`);
+    throw new CheckPurgeRefusedError(`${c.providerGameId} is not a check game`);
   const out = await purgeOneGame(db, log, c, { dryRun: false, discardOutbox: true });
-  if (!out.purged) throw new Error(`check game not purged: ${out.skipped?.reason ?? 'unknown'}`);
+  if (!out.purged)
+    throw new CheckPurgeRefusedError(`check game not purged: ${out.skipped?.reason ?? 'unknown'}`);
   return out.purged;
 }
+
+/** A check game that could not be purged (not a check game on the locked row, or a run running). */
+export class CheckPurgeRefusedError extends Error {}
 
 /** Provider id prefix of a verify-slot check game: `check-replay-<rec8>-<yyyymmddHHMM>`. */
 export const CHECK_ID_PREFIX = 'check-';

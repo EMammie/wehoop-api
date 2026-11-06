@@ -52,8 +52,9 @@ import { lockDestination } from '../providers/sportradar/destination-guard.js';
  *     The polling-only comparison (demo-verify.ts): replay the closed slot's shifted documents
  *     in-process into a check game `check-<slot id>` and compare the canonical state (events,
  *     periods, score, status, team and player stats). PASS exit 0, FAIL exit 1 with the first
- *     differences, refused (not closed, unknown) exit 65. No ingester lock: safe next to
- *     `demo run`. The check game is purged afterwards unless --keep.
+ *     differences, refused (not closed, unknown, not the dev stack) exit 65. DEV STACK ONLY (its
+ *     check game would reach a hosted demo's testers). No ingester lock: safe next to `demo run`
+ *     there. The check game is purged afterwards unless --keep.
  *   pnpm demo epoch --speed N [--lead 12] [--league wnba]
  *     Print the --epoch that puts a compressed clock --lead demo minutes before the next slot
  *     (the restart rehearsal starts there; every process of it must use the same value).
@@ -212,12 +213,15 @@ async function main() {
   if (cmd === 'verify-slot') {
     if (!args.slot) usage('verify-slot needs --slot <replay slot id>');
     try {
-      // Quiet: a periodic self-check prints its verdict, not one log line per replayed document.
+      // Quiet: a check prints its verdict, not one log line per replayed document.
       const quiet = createLogger({
         level:
           config.logLevel === 'debug' || config.logLevel === 'trace' ? config.logLevel : 'warn',
       });
-      const v = await verifySlot(db, quiet, args.slot ?? '', { keep: args.keep });
+      const v = await verifySlot(db, quiet, args.slot ?? '', {
+        keep: args.keep,
+        devStackOnly: config.devStackOnly,
+      });
       const what = `${v.compared.events} events, ${v.compared.periods} periods, ${v.compared.teamStats} team and ${v.compared.playerStats} player stat lines, score, status`;
       console.log(
         `verify-slot ${v.slotGameId}: ${v.ok ? 'PASS' : 'FAIL'} (${what}) against a polling-only replay of the same shifted slot, check game ${v.checkProviderGameId} ${v.kept ? `kept (${v.checkGameId})` : 'purged'}`,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalGame, differences } from '../../../src/ingest/demo-verify.js';
+import { canonicalGame, comparableProblem, differences } from '../../../src/ingest/demo-verify.js';
 import type { Snapshot } from '../../../src/model/snapshot.js';
 
 /** verify-slot's comparison (demo-verify.ts): what is compared, what is deliberately not. */
@@ -82,5 +82,15 @@ describe('verify-slot comparison', () => {
       '.eventCount: 2 != 1',
       '.events: length 2 != 1',
     ]);
+  });
+});
+
+describe('verify-slot refuses a meaningless comparison', () => {
+  it('the check game must be a different game, and the slot must have plays', () => {
+    expect(comparableProblem({ slotGameId: 'a', checkGameId: 'b', events: 408 })).toBeNull();
+    expect(comparableProblem({ slotGameId: 'a', checkGameId: 'a', events: 408 })).toMatch(
+      /landed on the slot game itself/,
+    );
+    expect(comparableProblem({ slotGameId: 'a', checkGameId: 'b', events: 0 })).toMatch(/no plays/);
   });
 });

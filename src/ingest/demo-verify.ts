@@ -16,7 +16,7 @@ import {
   SYNTHETIC_ROTATION,
   slotRecording,
 } from '../providers/sportradar/demo-host.js';
-import { CHECK_ID_PREFIX, purgeCheckGame } from './demo-purge.js';
+import { CHECK_ID_PREFIX, CheckPurgeRefusedError, purgeCheckGame } from './demo-purge.js';
 import { GameWatcher, replayRecording } from './game-watcher.js';
 import { endRun, startRun } from './runs.js';
 
@@ -38,11 +38,18 @@ import { endRun, startRun } from './runs.js';
  *
  * The check game is labelled like every demo game: its provenance row (the slot's, under the check
  * id) is written before the replay creates it, so the label and provenance invariants hold. It is
- * purged with every dependent row afterwards (outbox rows discarded: nobody subscribes to it)
- * unless `--keep`. No ingester lock: the check game has its own provider id, row and generation,
- * applyChanges serializes per game row, the demo scheduler never watches a `check-` game and the
- * demo host never lists one, so it runs safely alongside `pnpm demo run`. While it exists (seconds,
- * or until purged with --keep) it is visible in v_schedule as a second replay of the slot.
+ * purged with every dependent row afterwards (outbox rows discarded) unless `--keep`.
+ *
+ * DEV STACK ONLY (review round 3): while the check game exists it is a real game row of the
+ * database, so on a hosted demo it would reach testers: a second replay of the slot in v_schedule,
+ * a delta in every `league:*:scores` message, and about 1,000 broadcasts on `game:<check uuid>`
+ * sharing Realtime's rate limit with the live replay. It refuses unless both connection strings
+ * are the dev stack (`config.devStackOnly`). There, and only there, it runs safely alongside
+ * `pnpm demo run` without the ingester lock: the check game has its own provider id, row and
+ * generation, applyChanges serializes per game row, the demo scheduler never watches a `check-`
+ * game, the demo host never lists one, and the worker's orphan cleanup leaves the verify run
+ * (meta `verifySlot`) alone. Hosted verification is a follow-up (docs/DEPLOY.md): fetch the demo
+ * game over HTTP and replay into the local dev stack, so no check row lands in the demo project.
  */
 export class VerifyRefusedError extends Error {}
 
@@ -111,12 +118,37 @@ export function differences(a: unknown, b: unknown, max = 10, path = ''): string
   return out;
 }
 
+/** The comparison is meaningful only between two distinct games with plays (pure; tested). */
+export function comparableProblem(c: {
+  slotGameId: string;
+  checkGameId: string;
+  events: number;
+}): string | null {
+  if (c.checkGameId === c.slotGameId)
+    return 'the check replay landed on the slot game itself; refusing to compare (and to purge) it';
+  if (c.events === 0) return 'the slot game has no plays; nothing to compare';
+  return null;
+}
+
 export async function verifySlot(
   db: Db,
   log: Logger,
   slotGameId: string,
-  opts: { keep?: boolean; maxDiffs?: number } = {},
+  opts: { keep?: boolean; maxDiffs?: number; devStackOnly: boolean },
 ): Promise<VerifyResult> {
+  if (!opts.devStackOnly)
+    throw new VerifyRefusedError(
+      "verify-slot runs on the dev stack only (DATABASE_URL and DATABASE_SESSION_URL at 127.0.0.1:54322): its check game would reach a hosted demo's testers (v_schedule, league scores, ~1,000 broadcasts). Hosted verification is a planned follow-up (docs/DEPLOY.md)",
+    );
+  if (slotGameId.startsWith(CHECK_ID_PREFIX))
+    throw new VerifyRefusedError(`${slotGameId} is a check game; pass the slot id (replay-...)`);
+  // The league comes from the slot id's recording (rec8), never from whatever row matches the id.
+  const rec8 = /^replay-([0-9a-f]{8})-\d{12}$/.exec(slotGameId)?.[1];
+  const slotLeague = [...RECORDED_ROTATION, ...SYNTHETIC_ROTATION].find(
+    (e) => e.rec8 === rec8,
+  )?.league;
+  if (!slotLeague)
+    throw new VerifyRefusedError(`${slotGameId} is not a slot id of a known recording`);
   const [row] = await db<SlotRow[]>`
     select g.id, g.league::text as league, g.status::text as status,
            s.recording_id as "recordingId", s.fixture_path as "fixturePath", s.fixture_sha256 as sha,
@@ -124,7 +156,7 @@ export async function verifySlot(
            s.slot_tip_off as "slotTipOff", s.shift_ms::text as "shiftMs"
     from public.games g
     join ingest.replay_slots s on s.league = g.league and s.provider_game_id = g.provider_game_id
-    where g.provider_game_id = ${slotGameId}`;
+    where g.league = ${slotLeague} and g.provider_game_id = ${slotGameId}`;
   if (!row) throw new VerifyRefusedError(`${slotGameId}: no demo game with provenance`);
   if (row.status !== 'closed')
     throw new VerifyRefusedError(`${slotGameId} is ${row.status}; verify-slot needs a closed slot`);
@@ -147,7 +179,7 @@ export async function verifySlot(
   const league = LeagueCodeSchema.parse(row.league);
   const [existing] = await db<{ id: string }[]>`
     select id from public.games where league = ${league} and provider_game_id = ${checkId}`;
-  if (existing) await purgeCheckGame(db, log, { id: existing.id, providerGameId: checkId });
+  if (existing) await purgeCheck(db, log, existing.id, checkId);
   // The check game's provenance first, so the trigger labels it at creation (0014).
   await db`
     insert into ingest.replay_slots
@@ -200,11 +232,18 @@ export async function verifySlot(
     rmSync(dir, { recursive: true, force: true });
   }
 
+  const same = comparableProblem({ slotGameId: row.id, checkGameId, events: 1 });
+  if (same) throw new VerifyRefusedError(same);
   const demo = await loadSnapshot(db, row.id);
   const check = await loadSnapshot(db, checkGameId);
   if (!demo || !check) throw new Error('snapshot missing');
   const a = canonicalGame(demo);
   const b = canonicalGame(check);
+  const empty = comparableProblem({ slotGameId: row.id, checkGameId, events: a.eventCount });
+  if (empty) {
+    if (!opts.keep) await purgeCheck(db, log, checkGameId, checkId);
+    throw new VerifyRefusedError(empty);
+  }
   const diffs = differences(a, b, opts.maxDiffs ?? 10);
   const result: VerifyResult = {
     ok: diffs.length === 0,
@@ -220,6 +259,18 @@ export async function verifySlot(
     },
     kept: opts.keep === true,
   };
-  if (!opts.keep) await purgeCheckGame(db, log, { id: checkGameId, providerGameId: checkId });
+  if (!opts.keep) await purgeCheck(db, log, checkGameId, checkId);
   return result;
+}
+
+/** purgeCheckGame, with a refusal (a concurrent verify of the same slot) mapped to exit 65. */
+async function purgeCheck(db: Db, log: Logger, id: string, providerGameId: string) {
+  try {
+    await purgeCheckGame(db, log, { id, providerGameId });
+  } catch (err) {
+    if (!(err instanceof CheckPurgeRefusedError)) throw err;
+    throw new VerifyRefusedError(
+      `${err.message}${/still running/.test(err.message) ? ' (another verify-slot of this slot is running?)' : ''}`,
+    );
+  }
 }

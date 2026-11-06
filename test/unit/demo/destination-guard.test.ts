@@ -210,6 +210,21 @@ describe('MODE=demo configuration', () => {
     expect(message.trim().split('\n')).toHaveLength(3); // header + the two demo problems
   });
 
+  it('0.0.0.0 and a private address are refused with the demo message alone (isDemoHostUrl is the only gate in MODE=demo)', () => {
+    for (const url of ['http://0.0.0.0:8790', 'http://10.0.0.1:8790']) {
+      let message = '';
+      try {
+        demoConfig({ SPORTRADAR_BASE_URL: url });
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message, url).toMatch(
+        /MODE=demo needs SPORTRADAR_BASE_URL on a loopback host over http with an explicit port/,
+      );
+      expect(message.trim().split('\n'), url).toHaveLength(2);
+    }
+  });
+
   it('refuses api.sportradar.com, an unset base URL, and anything but http://<loopback>:<port>', () => {
     expect(() => demoConfig({ SPORTRADAR_BASE_URL: 'https://api.sportradar.com' })).toThrow(
       /MODE=demo needs SPORTRADAR_BASE_URL = the in-process demo host/,
@@ -222,6 +237,9 @@ describe('MODE=demo configuration', () => {
       'http://127.0.0.1',
       'http://127.0.0.1:8790/wnba',
       'http://0.0.0.0:8790', // would bind every interface
+      'http://10.0.0.1:8790', // a private address is not loopback
+      'http://192.168.1.10:8790',
+      'http://127.0.0.2:8790', // only 127.0.0.1 / localhost / ::1
     ]) {
       expect(() => demoConfig({ SPORTRADAR_BASE_URL: url }), url).toThrow(/MODE=demo/);
     }

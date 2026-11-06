@@ -100,12 +100,27 @@ export async function openWorkerRuntime(o: OpenRuntimeOptions): Promise<WorkerRu
   const scoreboard = new ScoreboardSender({ transport, log, source: new DbScoreboardSource(db) });
   if (o.scores) scoreboard.start();
 
+  const orphanedIds = await abortOrphanedRuns(db, log);
+  return { db, session, transport, publisher, pulse, scoreboard, fault, orphanedIds };
+}
+
+/**
+ * Called by the new lock holder: any root run still marked running belongs to a worker that died
+ * (kill -9 never reaches endRun); mark it, its sub-runs and its reservations aborted / released.
+ * Returns the aborted root runs. A `pnpm demo verify-slot` replay (meta `verifySlot`) is not a
+ * lock holder's run and is left alone.
+ */
+export async function abortOrphanedRuns(db: Db, log: Logger): Promise<number[]> {
   // This process holds the single-ingester lock, so any root run still marked running belongs
   // to a worker that died (kill -9 never reaches endRun). Close them before opening ours.
   const orphaned = await db<{ id: string }[]>`
     update ingest.ingestion_runs set status = 'aborted', ended_at = now(),
       error = coalesce(error, 'worker died; marked aborted by the next lock holder')
-    where status = 'running' and kind in ('replay', 'watch_game') returning id::text`;
+    where status = 'running' and kind in ('replay', 'watch_game')
+      -- A \`pnpm demo verify-slot\` replay belongs to that CLI, not to a dead lock holder: it
+      -- takes no lock, so a worker (re)start must not abort it (demo-verify.ts).
+      and not (meta ? 'verifySlot')
+    returning id::text`;
   const orphanedIds = orphaned.map((r) => Number(r.id));
   // Their push_stream / backfill sub-runs died with them (and any sub-run whose parent is no longer running).
   const orphanedSubRuns = await db<{ id: string }[]>`
@@ -129,7 +144,7 @@ export async function openWorkerRuntime(o: OpenRuntimeOptions): Promise<WorkerRu
         'released orphaned reservations',
       );
   }
-  return { db, session, transport, publisher, pulse, scoreboard, fault, orphanedIds };
+  return orphanedIds;
 }
 
 export interface RunSchedulerOptions {

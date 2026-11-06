@@ -377,11 +377,22 @@ restarted watch re-reads documents (logged stale, never written twice). In the v
 this rehearsal `last_seq` was 999 for the restarted demo game, 1022 for an uninterrupted demo
 replay and 1233 for the polling-only replay, with events, periods, score and status equal. A play inserted and
 retracted between two REST reconciliations is never observed by the push path, so it has no
-`deleted_at` row there. `verify-slot` takes no ingester lock (the check game has its own provider
-id, row and generation; the demo scheduler never watches a `check-` game and the host never lists
-one), so it can run next to `demo run`, e.g. as the hosted demo's periodic self-check; while the
-check game exists (seconds) `v_schedule` shows it as a second replay of the slot. It is purged with
-every dependent row afterwards unless `--keep`; it refuses a slot that is not `closed` (exit 65).
+`deleted_at` row there. `verify-slot` is a **dev-stack rehearsal tool**: it refuses (exit 65)
+unless DATABASE_URL and DATABASE_SESSION_URL are both the dev stack, because its check game is a
+real game row while it exists: on a hosted demo it would reach testers as a second replay of the
+slot in `v_schedule`, a delta in every `league:*:scores` message, and about 1,000 broadcasts on
+`game:<check uuid>` sharing Realtime's rate limit with the live replay. On the dev stack it takes no
+ingester lock and runs safely next to `demo run` (the check game has its own provider id, row and
+generation; the demo scheduler never watches a `check-` game, the host never lists one, and a
+worker's orphan cleanup leaves the verify run, meta `verifySlot`, alone). The check game is purged with
+every dependent row afterwards unless `--keep`; it refuses a slot that is not `closed`, a `check-`
+id and a concurrent verify of the same slot (exit 65).
+
+**Follow-up (not built): hosted verification.** `pnpm demo verify-slot --against <demo API URL>`
+would fetch the closed demo game's snapshot over HTTP from the hosted demo API and replay the slot
+into the LOCAL dev stack for the comparison, so no check row ever lands in the demo project; the
+hosted demo's periodic self-check would run that from outside, never inside the demo project.
+
 It prints one verdict line (plus the first differences on FAIL) at `LOG_LEVEL=info` or above; `debug`
 (what the dev `.env` sets) also shows the replay's per-document log. On the dev stack it takes about
 5 s for the WNBA slot.
