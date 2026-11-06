@@ -107,6 +107,11 @@ async function main() {
     }
   }
   const config = loadConfig(env);
+  if (config.mode === 'demo') {
+    // The demo environment is driven by `pnpm demo` (its own host, scheduler and cleanup).
+    console.error('pnpm trial does not run in MODE=demo; use `pnpm demo init|run|purge`');
+    process.exit(64);
+  }
   const log = createLogger({ level: config.logLevel });
   const league = LeagueCodeSchema.parse(args.league);
   const adapter = adapterFor(league);

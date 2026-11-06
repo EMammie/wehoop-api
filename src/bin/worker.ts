@@ -4,6 +4,7 @@ import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { createSessionDb, tryAcquireWorkerLock } from '../db/session-client.js';
 import { TRIAL_PROFILES, type TrialProfile } from '../ingest/cadence.js';
+import { assertEnvironment, EnvironmentRefusedError } from '../ingest/environment.js';
 import { createFaultInjector } from '../ingest/fault.js';
 import {
   GameWatcher,
@@ -167,7 +168,23 @@ async function main() {
     process.exit(64);
   }
 
+  if (config.mode === 'demo') {
+    // The demo worker runs inside `pnpm demo run`, next to the host it is locked to.
+    log.error(
+      'MODE=demo runs through `pnpm demo run` (the demo host + this scheduler, one process)',
+    );
+    process.exit(64);
+  }
   const db = createDb(config.db.url);
+  // Rev 4.15 (4): a production worker never ingests into a database marked demo.
+  try {
+    await assertEnvironment(db, config);
+  } catch (err) {
+    if (!(err instanceof EnvironmentRefusedError)) throw err;
+    log.error(err.message);
+    await db.end({ timeout: 2 });
+    process.exit(65);
+  }
   let shuttingDown = false;
   let stopRequested = false;
   /**

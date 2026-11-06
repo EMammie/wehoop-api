@@ -1,7 +1,11 @@
 import { z } from 'zod';
 import { type FaultSpec, parseFault } from './ingest/fault.js';
 
-const Mode = z.enum(['sim', 'trial', 'production']);
+/**
+ * `demo` (plan rev 4.15, M5 B4): the production scheduler against the in-process demo host
+ * (`pnpm demo run`), never a Sportradar key, never another destination.
+ */
+const Mode = z.enum(['sim', 'trial', 'production', 'demo']);
 export type Mode = z.infer<typeof Mode>;
 
 const emptyToUndefined = (v: unknown) => (v === '' ? undefined : v);
@@ -25,6 +29,24 @@ export function isLoopbackHost(host: string): boolean {
 export function isLoopbackUrl(url: string): boolean {
   try {
     return isLoopbackHost(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** The in-process demo host shape: `http://<loopback>:<port>` with nothing after the origin. */
+export function isDemoHostUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      u.protocol === 'http:' &&
+      isLoopbackHost(u.hostname) &&
+      u.port !== '' &&
+      (u.pathname === '/' || u.pathname === '') &&
+      u.search === '' &&
+      u.username === '' &&
+      u.password === ''
+    );
   } catch {
     return false;
   }
@@ -161,8 +183,34 @@ export function loadConfig(source: Record<string, string | undefined> = process.
         `DATABASE_SESSION_URL is required when MODE=${e.MODE} (advisory lock + LISTEN need a session-mode connection)`,
       );
     }
-    if (!e.SPORTRADAR_WNBA_KEY && !e.SPORTRADAR_NCAAWB_KEY && !e.SPORTRADAR_UNRIVALED_KEY) {
+    if (
+      e.MODE !== 'demo' &&
+      !e.SPORTRADAR_WNBA_KEY &&
+      !e.SPORTRADAR_NCAAWB_KEY &&
+      !e.SPORTRADAR_UNRIVALED_KEY
+    ) {
       problems.push(`at least one SPORTRADAR_*_KEY is required when MODE=${e.MODE}`);
+    }
+  }
+  // Demo mode (rev 4.15 (4)): no credential, one destination. A key in the environment means the
+  // process was pointed at the wrong configuration; refusing is the only safe answer.
+  if (e.MODE === 'demo') {
+    const set = (
+      ['SPORTRADAR_WNBA_KEY', 'SPORTRADAR_NCAAWB_KEY', 'SPORTRADAR_UNRIVALED_KEY'] as const
+    ).filter((k) => e[k] !== undefined);
+    if (set.length > 0) {
+      problems.push(
+        `MODE=demo refuses to start with a Sportradar key set (${set.join(', ')}): the demo replays committed recordings and needs no credential`,
+      );
+    }
+    if (e.SPORTRADAR_BASE_URL === SPORTRADAR_DEFAULT_BASE_URL) {
+      problems.push(
+        'MODE=demo needs SPORTRADAR_BASE_URL = the in-process demo host (http://127.0.0.1:<port>, `pnpm demo run` sets it); never api.sportradar.com',
+      );
+    } else if (!isDemoHostUrl(e.SPORTRADAR_BASE_URL)) {
+      problems.push(
+        'MODE=demo needs SPORTRADAR_BASE_URL on a loopback host over http with an explicit port and no path (the in-process demo host)',
+      );
     }
   }
   if (e.MODE === 'production' && e.WEHOOP_FAULT) {

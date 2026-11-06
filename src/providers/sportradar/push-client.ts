@@ -7,6 +7,7 @@ import {
 } from '../../ingest/quota-guard.js';
 import type { LeagueCode } from '../../leagues/codes.js';
 import type { Logger } from '../../logger.js';
+import { assertDestination } from './destination-guard.js';
 import { claimSlot, type RateLimiter, SlotClaimTimeoutError } from './rate-limiter.js';
 import {
   type PushClockMessage,
@@ -126,6 +127,11 @@ export interface PushStreamDeps {
   sleep?: (ms: number) => Promise<void>;
   /** The database clock (tests stub it); default `select now()` when the stream has a database. */
   dbNow?: () => Promise<Date>;
+  /**
+   * Demo mode (rev 4.15): the only origin the stream may connect to. Defaults to the process-wide
+   * lock (`lockDestination`); unset outside demo mode.
+   */
+  allowedOrigin?: string;
 }
 
 /**
@@ -181,6 +187,13 @@ export class PushStream {
         'rate-limited sources must claim slots from ingest.provider_rate_slots (rateLimiterFor(product, { db }))',
       );
     }
+    // Refused at construction, before any I/O (the watch fails instead of a stream retrying a
+    // destination it may never use); loop() checks again before its first claim.
+    assertDestination(
+      deps.resolver.resolvePush(deps.feed, deps.params ?? {}).url,
+      deps.log,
+      deps.allowedOrigin,
+    );
     this.product = deps.product ?? deps.league;
     this.state = {
       feed: deps.feed,
@@ -252,6 +265,13 @@ export class PushStream {
   private async loop(): Promise<void> {
     const { log, feed } = this.deps;
     const { url, headers } = this.deps.resolver.resolvePush(feed, this.deps.params ?? {});
+    try {
+      assertDestination(url, log, this.deps.allowedOrigin);
+    } catch (err) {
+      this.state.lastError = (err as Error).message.slice(0, 500);
+      this.setStatus('stopped');
+      return;
+    }
     const source = this.deps.resolver.source;
     const limited = needsRateLimit(source);
     const fetchImpl = this.deps.fetchImpl ?? fetch;
