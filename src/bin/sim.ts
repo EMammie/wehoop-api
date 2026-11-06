@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { applyChanges } from '../ingest/apply-changes.js';
+import { environmentRefusal } from '../ingest/environment.js';
 import {
   appendRecordedDocument,
   compactRecording,
@@ -289,6 +290,13 @@ async function main() {
     if (!providerEventId) throw new Error('--mutate-event <id> or --delete-event <id> is required');
     const log = createLogger({ level: config.logLevel });
     const db = createDb(config.db.url, { max: 2 });
+    // Rev 4.15 review: a database marked demo is written only by MODE=demo.
+    const refused = await environmentRefusal(db, config);
+    if (refused) {
+      console.error(refused);
+      await db.end({ timeout: 2 });
+      process.exit(65);
+    }
     const [g] = await db<
       { id: string; league: 'wnba' | 'ncaawb' | 'unrivaled'; watchRunId: string | null }[]
     >`

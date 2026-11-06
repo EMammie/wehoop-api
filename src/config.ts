@@ -152,6 +152,11 @@ export interface Config {
   quotaOverrides: Record<string, { limit30d: number; reserve: number }>;
   /** True when DATABASE_URL (or the session URL) is the dev/integration stack (127.0.0.1:54322). */
   devStackDb: boolean;
+  /**
+   * True only when BOTH DATABASE_URL and the session URL are the dev stack: the bar for the
+   * demo-mode exemption (rev 4.15 (4)), so one dev-stack URL cannot carry a cloud database along.
+   */
+  devStackOnly: boolean;
   /** True when calls go to a loopback stand-in host (`pnpm sim serve`), never to api.sportradar.com. */
   rehearsal: boolean;
   api: { port: number; adminBearerToken?: string; baseUrl: string };
@@ -277,6 +282,7 @@ export function loadConfig(source: Record<string, string | undefined> = process.
       ...(e.QUOTA_UNRIVALED ? { unrivaled: e.QUOTA_UNRIVALED } : {}),
     },
     devStackDb,
+    devStackOnly: isDevStackUrl(e.DATABASE_URL) && isDevStackUrl(sessionUrl),
     rehearsal,
     api: {
       port: e.PORT,

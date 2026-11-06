@@ -3,7 +3,11 @@ import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { TRIAL_PROFILES, type TrialProfile } from '../ingest/cadence.js';
-import { assertEnvironment, EnvironmentRefusedError } from '../ingest/environment.js';
+import {
+  assertEnvironment,
+  EnvironmentRefusedError,
+  markProductionOnStart,
+} from '../ingest/environment.js';
 import {
   GameWatcher,
   HttpDocumentSource,
@@ -169,9 +173,11 @@ async function main() {
   }
 
   const db = createDb(config.db.url);
-  // Rev 4.15 (4): a production worker never ingests into a database marked demo.
+  // Rev 4.15 (4): only MODE=demo writes to a database marked demo; a production worker marks an
+  // unmarked non-dev database `production` before the lock work, so `pnpm demo init` refuses it.
   try {
     await assertEnvironment(db, config);
+    await markProductionOnStart(db, config, log);
   } catch (err) {
     if (!(err instanceof EnvironmentRefusedError)) throw err;
     log.error(err.message);

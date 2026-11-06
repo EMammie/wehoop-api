@@ -94,6 +94,12 @@ without being able to ingest:
   each call before it claims a slot or sends, so nothing reaches Sportradar;
 - expect `schedule poll failed` (a quota refusal) in the worker log every hour. No game is
   discovered, so no watch starts and `/health` stays free of `watch_without_provider_calls`.
+- expect, on the first start against the (unmarked, migration 0014) cloud database, the warning
+  `database was unmarked; marked production (pnpm demo init now refuses it)`: the production
+  worker writes `ingest.environment = production` before it takes the lock (rev 4.15 review), so an
+  empty production project can never be turned into the demo by a mis-pointed `pnpm demo init`
+  (which also refuses any database with quota-counted calls or an operator-verified limit).
+  Every non-demo mode (production, trial, sim) refuses a database marked `demo`.
 
 What it proves: the image boots on Fly, the worker takes the lock over the cloud connection,
 `/health` is clean, and a restart re-acquires the lock. What it does not prove: resuming a watched

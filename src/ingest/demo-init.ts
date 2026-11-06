@@ -14,7 +14,11 @@ import { fixturePath, SEED_EPOCH, SEED_MANIFEST } from './seed-manifest.js';
  * `pnpm demo init` (plan rev 4.15 (4)): turn a fresh database into the demo
  * environment.
  *   1. Refuse unless the database holds no game or is already marked `demo`
- *      (a database with real games is not made a demo by accident).
+ *      (a database with real games is not made a demo by accident); refuse a
+ *      database marked anything else, one with quota-counted provider calls, or
+ *      one with an operator-verified limit that is not the demo row (an empty
+ *      production project after the quiet deploy, which the production worker
+ *      also marks `production` at start).
  *   2. Mark it `demo` (`ingest.environment`); refused when it is marked
  *      anything else.
  *   3. Synthetic product limits: every product gets a large, verified
@@ -40,6 +44,31 @@ const GAME_CREATING_FEEDS: ReadonlySet<ReferenceFeed> = new Set([
   'tournament_schedule',
 ]);
 
+/**
+ * Whether a database may become the demo environment (pure; unit-tested). A database already
+ * marked `demo` is re-initialized without these checks (its rows are the demo's own).
+ *   - marked anything else: refused;
+ *   - quota-counted provider calls, or an operator-verified limit that is not the demo row: a real
+ *     deployment, even an empty one (the quiet deploy); marking it demo would overwrite its limits;
+ *   - any game: refused (a database with real games is not made a demo by accident).
+ */
+export function demoInitProblem(s: {
+  kind: string | null;
+  games: number;
+  countedCalls: number;
+  verifiedProducts: readonly string[];
+}): string | null {
+  if (s.kind === 'demo') return null;
+  if (s.kind !== null) return `demo init refuses a database marked ${s.kind}`;
+  if (s.countedCalls > 0 || s.verifiedProducts.length > 0) {
+    return `demo init refuses a database that looks like a real deployment: ${s.countedCalls} quota-counted provider call(s), operator-verified limits for [${s.verifiedProducts.join(', ')}]`;
+  }
+  if (s.games > 0) {
+    return `demo init needs an empty database or one already marked demo; this one holds ${s.games} game(s) and is unmarked`;
+  }
+  return null;
+}
+
 export interface DemoInitResult {
   marked: 'demo';
   quotas: Array<{ product: string; limit30d: number; reserve: number; verified: boolean }>;
@@ -55,12 +84,18 @@ export async function demoInit(
   const leagues: LeagueCode[] = opts.leagues ?? ['wnba', 'ncaawb', 'unrivaled'];
   const kind = await readEnvironment(db);
   if (kind !== 'demo') {
-    const [g] = await db<{ n: number }[]>`select count(*)::int as n from public.games`;
-    if ((g?.n ?? 0) > 0) {
-      throw new EnvironmentRefusedError(
-        `demo init needs an empty database or one already marked demo; this one holds ${g?.n} game(s) and is ${kind === null ? 'unmarked' : `marked ${kind}`}`,
-      );
-    }
+    const [state] = await db<{ games: number; counted: number; verified: string[] }[]>`
+      select (select count(*)::int from public.games) as games,
+             (select count(*)::int from ingest.provider_calls where quota_counted) as counted,
+             coalesce((select array_agg(product order by product) from ingest.product_quotas
+                       where verified_at is not null and note is distinct from ${DEMO_QUOTA_NOTE}), '{}') as verified`;
+    const problem = demoInitProblem({
+      kind,
+      games: state?.games ?? 0,
+      countedCalls: state?.counted ?? 0,
+      verifiedProducts: state?.verified ?? [],
+    });
+    if (problem) throw new EnvironmentRefusedError(problem);
   }
   await markEnvironment(db, 'demo', 'pnpm demo init');
 

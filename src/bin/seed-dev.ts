@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { isDevStackUrl, loadConfig } from '../config.js';
 import { createDb, type Db } from '../db/client.js';
 import { createSessionDb, tryAcquireWorkerLock } from '../db/session-client.js';
+import { environmentRefusal } from '../ingest/environment.js';
 import { GameWatcher, replayRecording } from '../ingest/game-watcher.js';
 import { ReferenceIngester } from '../ingest/reference.js';
 import { endRun, startRun } from '../ingest/runs.js';
@@ -116,6 +117,13 @@ async function main() {
   // publisher's per-batch backoff warnings while 2,000 rows drain are noise here.
   const log = createLogger({ level: args.verbose ? 'info' : 'error' });
   const db = createDb(config.db.url);
+  // Rev 4.15 review: a database marked demo is written only by MODE=demo.
+  const refused = await environmentRefusal(db, config);
+  if (refused) {
+    console.error(refused);
+    await db.end({ timeout: 2 });
+    process.exit(65);
+  }
   let lost = false;
   const session = createSessionDb(config.db.sessionUrl, () => {
     lost = true;

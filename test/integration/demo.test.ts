@@ -10,7 +10,9 @@ import { purgeReplayGames } from '../../src/ingest/demo-purge.js';
 import {
   assertEnvironment,
   EnvironmentRefusedError,
+  environmentRefusal,
   markEnvironment,
+  markProductionOnStart,
   readEnvironment,
 } from '../../src/ingest/environment.js';
 import { GameWatcher, replayRecording } from '../../src/ingest/game-watcher.js';
@@ -279,38 +281,87 @@ describe('demo purge', () => {
 });
 
 describe('environment marker', () => {
-  const production = (): Pick<Config, 'mode' | 'devStackDb' | 'db'> => ({
-    mode: 'production',
-    devStackDb: false,
+  const as = (
+    mode: Config['mode'],
+    devStack: boolean,
+  ): Pick<Config, 'mode' | 'devStackDb' | 'devStackOnly' | 'db'> => ({
+    mode,
+    devStackDb: devStack,
+    devStackOnly: devStack,
     db: config.db,
   });
 
-  it('demo runs on the unmarked dev stack; production refuses a demo database; demo refuses a production one', async () => {
+  it('only MODE=demo writes to a demo database; demo needs the dev stack or the marker; one row at most', async () => {
     expect(await readEnvironment(db)).toBeNull();
     await expect(assertEnvironment(db, config)).resolves.toBeNull();
-    await expect(assertEnvironment(db, production())).resolves.toBeNull();
+    await expect(assertEnvironment(db, as('demo', false))).rejects.toThrow(/unmarked/);
+    for (const mode of ['production', 'trial', 'sim'] as const)
+      await expect(assertEnvironment(db, as(mode, false))).resolves.toBeNull();
     await markEnvironment(db, 'demo', 'integration test');
     await expect(assertEnvironment(db, config)).resolves.toBe('demo');
-    await expect(assertEnvironment(db, { ...config, devStackDb: false })).resolves.toBe('demo');
-    await expect(assertEnvironment(db, production())).rejects.toThrow(
-      /MODE=production refuses .*marked demo/,
-    );
+    await expect(assertEnvironment(db, as('demo', false))).resolves.toBe('demo');
+    for (const mode of ['production', 'trial', 'sim'] as const) {
+      await expect(assertEnvironment(db, as(mode, false))).rejects.toThrow(
+        new RegExp(`MODE=${mode} refuses .*marked demo`),
+      );
+      // The CLIs' wrapper returns the same refusal as a message (exit 65 there).
+      expect(await environmentRefusal(db, as(mode, true))).toMatch(/marked demo/);
+    }
     await expect(markEnvironment(db, 'production', 'x')).rejects.toBeInstanceOf(
       EnvironmentRefusedError,
     );
     await db`delete from ingest.environment`;
     await markEnvironment(db, 'production', 'integration test');
-    await expect(assertEnvironment(db, config)).rejects.toThrow(
-      /MODE=demo runs only on the dev stack or a database marked demo/,
-    );
-    await expect(assertEnvironment(db, { ...config, devStackDb: false })).rejects.toBeInstanceOf(
+    await expect(assertEnvironment(db, config)).rejects.toThrow(/marked production/);
+    await expect(assertEnvironment(db, as('demo', false))).rejects.toBeInstanceOf(
       EnvironmentRefusedError,
     );
     await db`delete from ingest.environment`;
-    // Only one row can exist.
     await db`insert into ingest.environment (kind) values ('dev')`;
     await expect(db`insert into ingest.environment (kind) values ('demo')`).rejects.toThrow();
     await db`delete from ingest.environment`;
+  });
+
+  it('the production worker marks an unmarked non-dev database production at start, never the dev stack or a marked one', async () => {
+    await expect(markProductionOnStart(db, as('production', true), log)).resolves.toBeNull();
+    expect(await readEnvironment(db)).toBeNull();
+    await expect(markProductionOnStart(db, as('trial', false), log)).resolves.toBeNull();
+    expect(await readEnvironment(db)).toBeNull();
+    try {
+      await expect(markProductionOnStart(db, as('production', false), log)).resolves.toBe(
+        'production',
+      );
+      expect(await readEnvironment(db)).toBe('production');
+      // From then on demo init refuses it, even when it is empty.
+      await expect(demoInit(db, log)).rejects.toThrow(/refuses a database marked production/);
+      await expect(markProductionOnStart(db, as('production', false), log)).resolves.toBe(
+        'production',
+      );
+    } finally {
+      await db`delete from ingest.environment`;
+    }
+  });
+
+  it('demo init refuses what looks like a real deployment (a quota-counted call, a verified non-demo limit)', async () => {
+    const [call] = await db<{ id: string }[]>`
+      insert into ingest.provider_calls (source, product, league, feed, url, status, duration_ms, bytes, quota_counted)
+      values ('trial', 'wnba', 'wnba', 'pbp', 'https://api.sportradar.com/x', 200, 1, 1, true)
+      returning id::text`;
+    try {
+      await expect(demoInit(db, log)).rejects.toThrow(
+        /looks like a real deployment: \d+ quota-counted/,
+      );
+    } finally {
+      await db`delete from ingest.provider_calls where id = ${call?.id ?? '0'}`;
+    }
+    await db`insert into ingest.product_quotas (product, limit_30d, qps, reserve, note, verified_at)
+             values ('demo-init-verified', 1000, 1, 100, 'console 2026-11-06', now())`;
+    try {
+      await expect(demoInit(db, log)).rejects.toThrow(/demo-init-verified/);
+    } finally {
+      await db`delete from ingest.product_quotas where product = 'demo-init-verified'`;
+    }
+    expect(await readEnvironment(db)).toBeNull();
   });
 
   it('demo init refuses a database with games unless it is marked demo; then marks, writes the synthetic limits and loads references idempotently', async () => {
@@ -327,8 +378,9 @@ describe('environment marker', () => {
         venue: null,
         broadcasts: null,
       });
+    // Refused while unmarked: by the games, or earlier by other tests' counted calls / verified limits.
     await expect(demoInit(db, log)).rejects.toThrow(
-      /needs an empty database or one already marked demo/,
+      /needs an empty database or one already marked demo|looks like a real deployment/,
     );
     expect(await readEnvironment(db)).toBeNull();
 

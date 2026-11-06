@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { budgetFor, TRIAL_PROFILES, type TrialProfile } from '../ingest/cadence.js';
+import { environmentRefusal } from '../ingest/environment.js';
 import { runPreflight } from '../ingest/preflight.js';
 import { QuotaGuard, QuotaRefusedError } from '../ingest/quota-guard.js';
 import {
@@ -127,6 +128,13 @@ async function main() {
   };
 
   const db = createDb(config.db.url);
+  // Rev 4.15 review: a database marked demo is written only by MODE=demo.
+  const refused = await environmentRefusal(db, config);
+  if (refused) {
+    console.error(refused);
+    await db.end({ timeout: 2 });
+    process.exit(65);
+  }
   if (cmd === 'lag') {
     if (!args.record) usage('--record <file.jsonl> is required');
     const lines = readFileSync(args.record ?? '', 'utf8').split('\n');
