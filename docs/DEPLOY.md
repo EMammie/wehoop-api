@@ -96,9 +96,10 @@ What it proves: the image boots on Fly, the worker takes the lock over the cloud
 `/health` is clean, and a restart re-acquires the lock. What it does not prove: resuming a watched
 game after a restart on Fly (covered locally by the rehearsal below and
 `test/integration/scheduler-resume.test.ts`) and the production scheduler end to end, which waits
-for a production key. Plan rev 4.15 (B4) adds a demo host that runs the scheduler continuously
-against committed recordings on Fly; once it exists the restart check is repeated with a game
-mid-watch.
+for a production key. Plan rev 4.15 (B4) adds a separate demo environment (its own Fly app and
+Supabase project, demo configuration of the same code) that runs the scheduler continuously
+against committed recordings; its acceptance includes the restart check with a game mid-watch.
+Switching to production never depends on the demo: it selects this app and its own project.
 
 Cost: two shared-cpu-1x machines (512 MB worker, 256 MB api), roughly $5 a month (estimate, not
 checked against current Fly pricing); `fly scale count api=0 worker=0` stops both.
