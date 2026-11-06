@@ -14,11 +14,14 @@ import {
   DEFAULT_INTERVAL_MS,
   demoClock,
   epochFor,
+  listingHorizonMs,
   loadRecording,
   PgProvenanceStore,
   parseSlotId,
+  RECORDED_ROTATION,
   rotationFor,
   SLOT_ORIGIN_MS,
+  SYNTHETIC_ROTATION,
   slotAt,
   slotRecording,
   startDemoHost,
@@ -201,7 +204,16 @@ async function main() {
   if (cmd === 'purge') {
     if (!args.all && !args['older-than']) usage('purge needs --older-than <7d|ISO> or --all');
     const olderThan = args.all ? null : parseClosedBefore(args['older-than'] ?? '');
-    const out = await purgeReplayGames(db, log, { olderThan, dryRun: args['dry-run'] });
+    // Every recording a deploy may have rotated (not just this one's), so a slot of an older
+    // rotation is never purged while a host could still list or serve it.
+    const known = await Promise.all(
+      [...RECORDED_ROTATION, ...SYNTHETIC_ROTATION].map((e) => loadRecording(e)),
+    );
+    const out = await purgeReplayGames(db, log, {
+      olderThan,
+      dryRun: args['dry-run'],
+      listingHorizonMs: listingHorizonMs(known),
+    });
     const verb = out.dryRun ? 'would purge' : 'purged';
     for (const g of out.purged) {
       const parts = Object.entries(g.deleted)
@@ -212,7 +224,7 @@ async function main() {
     for (const s of out.skipped)
       console.log(`skipped ${s.providerGameId} (${s.gameId}): ${s.reason}`);
     console.log(
-      `demo purge${out.dryRun ? ' --dry-run' : ''}: ${out.candidates} closed replay game(s) ${olderThan ? `quiet since ${olderThan.toISOString()}` : '(--all)'}, ${out.purged.length} ${verb}, ${out.skipped.length} skipped, ${out.orphanSlots} provenance row(s) without a game ${out.dryRun ? 'would be ' : ''}removed${isDevStackUrl(config.db.url) ? ' [dev stack]' : ''}`,
+      `demo purge${out.dryRun ? ' --dry-run' : ''}: ${out.candidates} replay game(s) past the listing horizon (${Math.round(listingHorizonMs(known) / 60_000)} min) ${olderThan ? `closed and quiet, or never closed, since ${olderThan.toISOString()}` : '(--all)'}, ${out.purged.length} ${verb}, ${out.skipped.length} skipped, ${out.orphanSlots} provenance row(s) without a game ${out.dryRun ? 'would be ' : ''}removed${isDevStackUrl(config.db.url) ? ' [dev stack]' : ''}`,
     );
     await db.end({ timeout: 2 });
     return;
@@ -233,6 +245,23 @@ async function main() {
   const lockWaitMs = (intArg('lock-wait', args['lock-wait'], 1) ?? 60) * 1000;
   const drainTimeoutMs = (intArg('drain-timeout', args['drain-timeout'], 1) ?? 60) * 1000;
 
+  // Signals first (review 1, item 13): a stop during the lock wait or the host start is honoured.
+  let stopRequested = false;
+  let stoppedBy: string | null = null;
+  let wakeIdle: (() => void) | null = null;
+  let drainDeadline = Number.POSITIVE_INFINITY;
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      if (stoppedBy) {
+        drainDeadline = Math.min(drainDeadline, Date.now() + 3_000);
+        return;
+      }
+      stopRequested = true;
+      stoppedBy = signal;
+      log.warn({ signal }, 'stop requested; finishing the in-flight documents, then draining');
+      wakeIdle?.();
+    });
+  }
   let shuttingDown = false;
   const rt = await openWorkerRuntime({
     db,
@@ -251,6 +280,12 @@ async function main() {
     shuttingDown = true;
     process.exit(2);
   }
+  if (stopRequested) {
+    shuttingDown = true;
+    await rt.session.end({ timeout: 2 });
+    await db.end({ timeout: 2 });
+    process.exit(0);
+  }
   let host: Awaited<ReturnType<typeof startDemoHost>>;
   try {
     host = await startDemoHost({
@@ -267,26 +302,13 @@ async function main() {
     shuttingDown = true;
     process.exit(1);
   }
-  // Provenance of today's and tomorrow's slots up front (the host also writes it on demand).
-  for (const s of host.slotsNow()) await host.ensureProvenance(s);
+  // Provenance of the listed slots up front (the host also writes it on demand). A conflicting row
+  // (a fixture changed under an existing id) is that slot's problem, answered 409 by the host,
+  // never the process's: a crash here would only make Fly restart into the same conflict.
+  const upfront = await host.ensureListed();
+  for (const c of upfront.conflicts) log.error({ providerGameId: c.providerGameId }, c.message);
   console.log(`DEMO_HOST=${host.url}`);
 
-  let stopRequested = false;
-  let stoppedBy: string | null = null;
-  let wakeIdle: (() => void) | null = null;
-  let drainDeadline = Number.POSITIVE_INFINITY;
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    process.on(signal, () => {
-      if (stoppedBy) {
-        drainDeadline = Math.min(drainDeadline, Date.now() + 3_000);
-        return;
-      }
-      stopRequested = true;
-      stoppedBy = signal;
-      log.warn({ signal }, 'stop requested; finishing the in-flight documents, then draining');
-      wakeIdle?.();
-    });
-  }
   const scheduled = [...new Set(rotation.map((e) => e.league))];
   let outcome: Awaited<ReturnType<typeof runScheduler>>;
   try {

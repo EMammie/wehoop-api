@@ -9,10 +9,17 @@ import type { Logger } from '../logger.js';
  * `last_seq` first, under the game row lock, because the append-only trigger
  * (0001) refuses any delete at or above the floor.
  *
- * A game is eligible when it is labelled `replay`, `closed`, and quiet since
- * `olderThan` (its newest change, or its row update, is older; null = every
- * closed replay game, `--all`). A game with unpublished (pending or dead)
- * outbox rows is skipped: subscribers have not seen those changes.
+ * A game is eligible when it is labelled `replay`, its slot is past the host's
+ * listing horizon (tip-off older than now - `listingHorizonMs`, whatever
+ * `olderThan` says, `--all` included: the host could otherwise still list it
+ * and a resuming watch still serve it), no run of its tree is `running`, and
+ * either it is `closed` and quiet since `olderThan` (its newest change, or its
+ * row update, is older), or it never closed and its tip-off is older than
+ * `olderThan` (a replay orphaned by a host outage or by a rotation, interval or
+ * league change in a later deploy, whose documents now answer 404 forever).
+ * `olderThan` null (`--all`) drops the age condition. A game with unpublished
+ * (pending or dead) outbox rows is skipped: subscribers have not seen those
+ * changes.
  *
  * Order, per foreign key (0001, 0002, 0009, 0013):
  *   broadcast_outbox -> game_changes (play_event_id references play_events,
@@ -29,14 +36,17 @@ import type { Logger } from '../logger.js';
  * runs (`game_id` null) are shared by many games and never deleted here.
  *
  * Provenance rows whose game was never created (a slot listed, never watched)
- * and whose tip-off is older than `olderThan` are removed as well.
+ * and whose tip-off is older than both cutoffs are removed as well.
  */
 export interface PurgeOptions {
   /** Quiet since (newest change or row update older than this); null = every closed replay game. */
   olderThan: Date | null;
   dryRun: boolean;
+  /** The host's listing horizon (demo-host.ts `listingHorizonMs`); always applied. */
+  listingHorizonMs: number;
   /** Restrict to these games (tests). */
   gameIds?: string[];
+  now?: () => Date;
 }
 
 export interface PurgedGame {
@@ -59,14 +69,20 @@ export async function purgeReplayGames(
   log: Logger,
   opts: PurgeOptions,
 ): Promise<PurgeResult> {
+  const now = (opts.now ?? (() => new Date()))();
+  const listedUntil = new Date(now.getTime() - opts.listingHorizonMs);
+  const quiet = (cutoff: Date) =>
+    db`coalesce((select max(c.created_at) from public.game_changes c where c.game_id = g.id), g.updated_at) < ${cutoff}`;
   const candidates = await db<{ id: string; providerGameId: string }[]>`
     select g.id, g.provider_game_id as "providerGameId"
     from public.games g
-    where g.replay is not null and g.status = 'closed'
+    where g.replay is not null
+      and g.scheduled_at < ${listedUntil}
       and ${
         opts.olderThan === null
           ? db`true`
-          : db`coalesce((select max(c.created_at) from public.game_changes c where c.game_id = g.id), g.updated_at) < ${opts.olderThan}`
+          : db`((g.status = 'closed' and ${quiet(opts.olderThan)})
+                or (g.status <> 'closed' and g.scheduled_at < ${opts.olderThan}))`
       }
       and ${opts.gameIds ? db`g.id = any(${opts.gameIds}::uuid[])` : db`true`}
     order by g.scheduled_at, g.id`;
@@ -82,10 +98,10 @@ export async function purgeReplayGames(
     // A dry run counts inside a transaction it rolls back, so the numbers are what a real run deletes.
     try {
       await db.begin(async (tx) => {
-        const [g] = await tx<{ status: string; replay: string | null; league: string }[]>`
-          select status::text as status, replay, league::text as league
+        const [g] = await tx<{ replay: string | null; league: string }[]>`
+          select replay, league::text as league
           from public.games where id = ${c.id} for update`;
-        if (g?.status !== 'closed' || g.replay === null) {
+        if (!g || g.replay === null) {
           result.skipped.push({ ...ids(c), reason: 'changed since selection' });
           return;
         }
@@ -104,7 +120,7 @@ export async function purgeReplayGames(
           });
           return;
         }
-        const runs = await tx<{ id: string; depth: number; kept: boolean }[]>`
+        const runs = await tx<{ id: string; depth: number; kept: boolean; running: boolean }[]>`
           with recursive tree as (
             select r.id, 0 as depth from ingest.ingestion_runs r where r.game_id = ${c.id}
             union
@@ -112,8 +128,15 @@ export async function purgeReplayGames(
           )
           select t.id::text, max(t.depth)::int as depth,
                  (exists (select 1 from ingest.player_merges m where m.run_id = t.id)
-                  or exists (select 1 from ingest.player_merge_holds h where h.run_id = t.id)) as kept
-          from tree t group by t.id`;
+                  or exists (select 1 from ingest.player_merge_holds h where h.run_id = t.id)) as kept,
+                 bool_or(r.status = 'running') as running
+          from tree t join ingest.ingestion_runs r on r.id = t.id group by t.id`;
+        // A watch (or a sub-run of one) still running is writing this game: never delete under it.
+        const running = runs.filter((r) => r.running).map((r) => r.id);
+        if (running.length > 0) {
+          result.skipped.push({ ...ids(c), reason: `run(s) still running: ${running.join(', ')}` });
+          return;
+        }
         const runIds = runs.map((r) => r.id);
         // A kept run keeps its ancestors too (parent_run_id is RESTRICT).
         const keep = new Set<string>();
@@ -185,8 +208,9 @@ export async function purgeReplayGames(
       if (!(err instanceof DryRunRollback)) throw err;
     }
   }
-  if (opts.olderThan !== null || opts.gameIds === undefined) {
-    const cutoff = opts.olderThan ?? new Date();
+  if (opts.gameIds === undefined) {
+    const cutoff =
+      opts.olderThan === null || opts.olderThan > listedUntil ? listedUntil : opts.olderThan;
     const orphan = opts.dryRun
       ? await db<{ n: number }[]>`
           select count(*)::int as n from ingest.replay_slots s

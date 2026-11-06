@@ -277,6 +277,86 @@ describe('the host', () => {
     expect((await get(host, `${base}/games/${n}/pbp.json`)).status).toBe(404);
   });
 
+  it('lists a slot only until its closed document is served (a late first start never creates a finished slot)', async () => {
+    const c = manualClock(tip + 2 * H);
+    const host = await startDemoHost({
+      rotation: wnbaRotation,
+      clock: c.clock,
+      provenance: new MemoryProvenanceStore(),
+      minSpacingMs: 0,
+      log,
+    });
+    hosts.push(host);
+    const ids = async () =>
+      (
+        JSON.parse((await get(host, `${base}/games/2026/11/06/schedule.json`)).text) as {
+          games: Array<{ id: string }>;
+        }
+      ).games.map((g) => g.id);
+    expect(await ids()).toContain(slot.providerGameId); // in progress at +2 h
+    c.set(tip + wnba.endOffsetMs - 1);
+    expect(await ids()).toContain(slot.providerGameId);
+    c.set(tip + wnba.endOffsetMs);
+    expect(await ids()).not.toContain(slot.providerGameId); // closed: no longer listed
+    // ... but its documents are still served (a resuming watch finishes it).
+    const pbp = await get(host, `${base}/games/${slot.providerGameId}/pbp.json`);
+    expect(JSON.parse(pbp.text).status).toBe('closed');
+  });
+
+  it('a provenance conflict is collected per slot (409 for that slot), never thrown; a deleted row is written again', async () => {
+    const c = manualClock(tip - 60 * MIN);
+    const store = new MemoryProvenanceStore();
+    let ensures = 0;
+    const counting = {
+      ensure: (row: Parameters<MemoryProvenanceStore['ensure']>[0]) => {
+        ensures++;
+        return store.ensure(row);
+      },
+    };
+    // A row already there for this slot with another fixture hash (a fixture changed under the id).
+    await store.ensure({
+      league: 'wnba',
+      providerGameId: slot.providerGameId,
+      recordingId: wnba.entry.recordingId,
+      fixturePath: wnba.entry.fixture,
+      fixtureSha256: '0'.repeat(64),
+      provenance: 'recorded',
+      recordedGameId: wnba.recordedGameId,
+      recordedTipOff: new Date(wnba.recordedTipOffMs),
+      slotTipOff: new Date(tip),
+      shiftMs: tip - wnba.recordedTipOffMs,
+    });
+    const host = await startDemoHost({
+      rotation: wnbaRotation,
+      clock: c.clock,
+      provenance: counting,
+      minSpacingMs: 0,
+      log,
+    });
+    hosts.push(host);
+    const listed = host.slotsNow();
+    const out = await host.ensureListed();
+    expect(out.conflicts.map((x) => x.providerGameId)).toEqual([slot.providerGameId]);
+    expect(out.written).toBe(listed.length - 1);
+    expect((await get(host, `${base}/games/${slot.providerGameId}/pbp.json`)).status).toBe(409);
+    // The league's schedule still answers, without the conflicting slot.
+    const day = await get(host, `${base}/games/2026/11/06/schedule.json`);
+    expect(day.status).toBe(200);
+    expect(JSON.parse(day.text).games.map((g: { id: string }) => g.id)).not.toContain(
+      slot.providerGameId,
+    );
+    // Another slot: every request re-checks; a row deleted meanwhile is written again.
+    const other = listed.find((x) => x.providerGameId !== slot.providerGameId);
+    if (!other) throw new Error('no other slot listed');
+    store.rows.delete(other.providerGameId);
+    const before = ensures;
+    expect((await get(host, `${base}/games/${other.providerGameId}/summary.json`)).status).toBe(
+      200,
+    );
+    expect(ensures).toBe(before + 1);
+    expect(store.rows.get(other.providerGameId)?.provenance).toBe('recorded');
+  });
+
   it("streams a slot's push lines after the moment of connection, shifted and renamed", async () => {
     const speed = 600;
     const wallNow = Date.now();

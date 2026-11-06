@@ -17,7 +17,7 @@ import {
 } from '../../src/ingest/environment.js';
 import { GameWatcher, replayRecording } from '../../src/ingest/game-watcher.js';
 import { QuotaGuard } from '../../src/ingest/quota-guard.js';
-import { startRun } from '../../src/ingest/runs.js';
+import { endRun, startRun } from '../../src/ingest/runs.js';
 import { planDay } from '../../src/ingest/trial-mode.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
 import { buildPulse } from '../../src/live/pulse.js';
@@ -26,6 +26,7 @@ import { ScheduleRowSchema } from '../../src/model/views.js';
 import {
   DEFAULT_INTERVAL_MS,
   type DemoHost,
+  listingHorizonMs,
   PgProvenanceStore,
   rotationFor,
   SLOT_ORIGIN_MS,
@@ -54,7 +55,7 @@ const slot = slotAt(
   rotation,
   DEFAULT_INTERVAL_MS,
 );
-const now = TIP - 60 * 60_000;
+let now = TIP - 60 * 60_000;
 let host: DemoHost;
 let config: Config;
 let gameId = '';
@@ -149,6 +150,7 @@ describe('demo label', () => {
       maxDocs: null,
     });
     expect(out.status).toBe('closed');
+    await endRun(db, run.id, 'ok');
     expect(watcher.gameId).toBe(gameId);
 
     // As a client receives it: JSON (timestamps as strings), then the contract's Zod row.
@@ -193,10 +195,23 @@ async function dependents(id: string, runIds: string[]) {
   return c ?? {};
 }
 
+/** Purge as the CLI does, at a demo moment two days after the slot (past the listing horizon). */
+function purge(over: Partial<Parameters<typeof purgeReplayGames>[2]> & { gameIds: string[] }) {
+  return purgeReplayGames(db, log, {
+    olderThan: null,
+    dryRun: false,
+    listingHorizonMs: listingHorizonMs([...host.recordings.values()]),
+    now: () => new Date(TIP + 2 * 86_400_000),
+    ...over,
+  });
+}
+
 async function purgeAll(ids: string[]) {
   await db`update ingest.broadcast_outbox set published_at = coalesce(published_at, now()), dead_at = null
            where game_id = any(${ids}::uuid[])`;
-  await purgeReplayGames(db, log, { olderThan: null, dryRun: false, gameIds: ids });
+  await db`update ingest.ingestion_runs set status = 'aborted', ended_at = now()
+           where status = 'running' and game_id = any(${ids}::uuid[])`;
+  await purge({ gameIds: ids });
 }
 
 const fail = (): never => {
@@ -232,11 +247,7 @@ describe('demo purge', () => {
     for (const [table, n] of Object.entries(before)) expect(n, table).toBeGreaterThan(0);
 
     // No publisher ran: every outbox row is pending, so the game is skipped and nothing changes.
-    const skipped = await purgeReplayGames(db, log, {
-      olderThan: null,
-      dryRun: false,
-      gameIds: [gameId],
-    });
+    const skipped = await purge({ gameIds: [gameId] });
     expect(skipped.purged).toEqual([]);
     expect(skipped.skipped).toEqual([
       expect.objectContaining({
@@ -246,26 +257,27 @@ describe('demo purge', () => {
     ]);
     expect(await dependents(gameId, runIds)).toEqual(before);
 
-    // Published (what the publisher does), quiet-since cutoff in the past: not yet eligible.
+    // Published (what the publisher does); the backfill sub-run above is still `running`: skipped.
     await db`update ingest.broadcast_outbox set published_at = now() where game_id = ${gameId}`;
-    const young = await purgeReplayGames(db, log, {
-      olderThan: new Date(Date.now() - 7 * 86_400_000),
-      dryRun: false,
+    const busy = await purge({ gameIds: [gameId] });
+    expect(busy.skipped).toEqual([
+      expect.objectContaining({ gameId, reason: `run(s) still running: ${sub.id}` }),
+    ]);
+    await endRun(db, sub.id, 'ok');
+    // Inside the listing horizon (the host could still list or serve the slot): not a candidate,
+    // even with --all.
+    const listed = await purge({ gameIds: [gameId], now: () => new Date(TIP + 3 * 3_600_000) });
+    expect(listed.candidates).toBe(0);
+    // Closed but not quiet since the cutoff: not yet eligible.
+    const young = await purge({
       gameIds: [gameId],
+      olderThan: new Date(Date.now() - 7 * 86_400_000),
     });
     expect(young.candidates).toBe(0);
     // A dry run reports exactly what a real run deletes and deletes nothing.
-    const dry = await purgeReplayGames(db, log, {
-      olderThan: null,
-      dryRun: true,
-      gameIds: [gameId],
-    });
+    const dry = await purge({ gameIds: [gameId], dryRun: true });
     expect(await dependents(gameId, runIds)).toEqual(before);
-    const real = await purgeReplayGames(db, log, {
-      olderThan: null,
-      dryRun: false,
-      gameIds: [gameId],
-    });
+    const real = await purge({ gameIds: [gameId] });
     expect(real.purged).toHaveLength(1);
     expect(real.purged[0]?.deleted).toEqual(dry.purged[0]?.deleted);
     expect(real.purged[0]?.deleted).toMatchObject({
@@ -277,6 +289,30 @@ describe('demo purge', () => {
     });
     const after = await dependents(gameId, runIds);
     for (const [table, n] of Object.entries(after)) expect(n, table).toBe(0);
+
+    // The host lists the slot again (its window, on its clock): the provenance is upserted again
+    // before the listing, so the recreated game is labelled, never a bare replay- id.
+    now = TIP - 60 * 60_000;
+    const guard = new QuotaGuard({ db, log });
+    const again = await planDay(
+      { db, log, config, adapter: wnbaAdapter, guard },
+      { date: '2027-01-10' },
+    );
+    const recreated = again.games.find((g) => g.providerGameId === slot.providerGameId);
+    if (!recreated) throw new Error('slot not listed again');
+    const [label] = await db<{ replay: string | null; status: string }[]>`
+      select replay, status::text as status from public.games where id = ${recreated.id}`;
+    expect(label).toEqual({ replay: 'recorded', status: 'created' });
+    // A replay game that never closed (listed, never watched) is purged once its tip-off is past
+    // the cutoff, whatever its status: a host outage or a rotation change leaves such games.
+    const neverClosed = await purge({
+      gameIds: [recreated.id],
+      olderThan: new Date(TIP + 86_400_000),
+    });
+    expect(neverClosed.purged.map((g) => g.gameId)).toEqual([recreated.id]);
+    const [gone] = await db<{ n: number }[]>`
+      select count(*)::int as n from public.games where id = ${recreated.id}`;
+    expect(gone?.n).toBe(0);
   }, 120_000);
 });
 

@@ -313,11 +313,11 @@ What the demo host serves:
 
 | | |
 |---|---|
-| Rotation | one slot every `--interval` (default 180 min) on a fixed grid (`SLOT_ORIGIN` 2026-01-01 00:00 ET + k x interval), today and tomorrow (US Eastern), alternating `fixtures/wnba/sim-93ee7c68-replay.compact.jsonl.gz` and `fixtures/ncaawb/sim-d9b71fe0-replay.compact.jsonl.gz` (`recorded`); `--include-synthetic` adds `fixtures/unrivaled/docs-838316ea-replay.jsonl` (`synthetic`). Each league's daily schedule lists only its own slots; a slot whose replay ended (closed + 30 min) is no longer listed, so a host started mid-day never creates that morning's slots as 0-0 games. |
+| Rotation | one slot every `--interval` (default 180 min) on a fixed grid (`SLOT_ORIGIN` 2026-01-01 00:00 ET + k x interval), today and tomorrow (US Eastern), alternating `fixtures/wnba/sim-93ee7c68-replay.compact.jsonl.gz` and `fixtures/ncaawb/sim-d9b71fe0-replay.compact.jsonl.gz` (`recorded`); `--include-synthetic` adds `fixtures/unrivaled/docs-838316ea-replay.jsonl` (`synthetic`). Each league's daily schedule lists only its own slots, and a slot only until its `closed` document is served: a host started mid-day never creates that morning's finished slots as closed 0-0 games, while a game listed earlier is resumed from the database (the scheduler loads games, not listings) and its documents stay served. |
 | Identity | `replay-<rec8>-<yyyymmddHHMM>` (tip-off in UTC), from the recording and the slot only. |
 | Timeline | every ISO timestamp shifted by slot tip-off - recorded tip-off (the recording's `scheduled`), recorded game id replaced; a document is served from tip-off + (its request time - the recording's request/game-clock lead - recorded tip-off), so no served revision is later than the moment it is served (WNBA plays begin about 16 min after the tip-off, as in the recorded game; NCAAWB about 3 min). Before the first document: the first (pregame) one; after the last: `closed`. A restarted host serves the same documents at the same moments. |
 | Spans | WNBA 140 min, NCAAWB 127 min (first document to `closed`); the host refuses an interval at or below the longest span, or below the served windows' footprint (153 min for the default rotation). |
-| Provenance | `ingest.replay_slots` (recording id, fixture path + sha256, recorded game id and tip-off, slot tip-off, shift), upserted before a slot appears in any document; a different existing row is refused (409). Migration 0014's trigger labels the game row `games.replay` from it when the schedule ingest creates the game. |
+| Provenance | `ingest.replay_slots` (recording id, fixture path + sha256, recorded game id and tip-off, slot tip-off, shift), upserted (re-checked on every request, never cached) before a slot appears in any document; a different existing row is refused: that slot answers 409 and is left out of its league's listing, the process logs it and carries on. Migration 0014's trigger labels the game row `games.replay` from it when the schedule ingest creates the game. |
 | Label | `replay` (`recorded` / `synthetic` / null) on `v_schedule`, the snapshot's `game`, every `pulse` and every `league:*:scores` delta; generated into Contracts (`ReplayKind`). |
 | Calls | source `rehearsal` (rate-limited, guarded, logged in `provider_calls`, never quota-counted); the host answers 401 without a key header (the demo resolver sends a placeholder) and 429 on two calls of one product within 1 s. |
 
@@ -360,10 +360,15 @@ SPORTRADAR_WNBA_KEY=x pnpm demo run; echo exit=$?                               
 SPORTRADAR_BASE_URL=https://api.sportradar.com pnpm demo run; echo exit=$?      # refused: exit 65
 ```
 
-Cleanup: `pnpm demo purge --older-than 7d [--dry-run]` (or `--all`) deletes closed replay games
-quiet for that long with every dependent row, one transaction per game, in foreign-key order
-(`src/ingest/demo-purge.ts`), skips a game with unpublished or dead outbox rows, and prints what it
-did. Demo databases and the dev stack only. Besides the retention job it is the only code that
+Cleanup: `pnpm demo purge --older-than 7d [--dry-run]` (or `--all`) deletes, with every dependent
+row, one transaction per game, in foreign-key order (`src/ingest/demo-purge.ts`): closed replay
+games quiet for that long, and replay games that never closed whose tip-off is that old. Whatever
+the flags, it never touches a slot inside the listing horizon (the latest `closed` moment of any
+known recording plus 30 min after its tip-off, about 3 h 6 min) and skips a game with a `running`
+run or with unpublished or dead outbox rows; it prints what it did. A rotation, `--interval` or
+`--league` change in a later deploy orphans the slots already listed under the old grid (their ids
+no longer parse on the new one, so their documents answer 404 and they never close): purge removes
+them once they are older than the cutoff. Demo databases and the dev stack only. Besides the retention job it is the only code that
 deletes `game_changes`. Switching to production selects the production app and project; it never
 depends on a purge.
 

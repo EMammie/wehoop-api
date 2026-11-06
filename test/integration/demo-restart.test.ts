@@ -149,7 +149,13 @@ beforeAll(async () => {
   const [prev] = await db<{ id: string }[]>`
     select id from public.games where league = 'wnba' and provider_game_id = ${slot.providerGameId}`;
   if (prev)
-    await purgeReplayGames(db, silentLog, { olderThan: null, dryRun: false, gameIds: [prev.id] });
+    await purgeReplayGames(db, silentLog, {
+      olderThan: null,
+      dryRun: false,
+      gameIds: [prev.id],
+      listingHorizonMs: 0,
+      now: () => new Date(slot.tipOffMs + 2 * 86_400_000),
+    });
 });
 afterAll(async () => {
   for (const c of children) if (c.exitCode === null) c.kill('SIGKILL');

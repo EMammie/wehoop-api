@@ -455,3 +455,12 @@ where g.replay is not null
   and not exists (select 1 from ingest.replay_slots s
                   where s.league = g.league and s.provider_game_id = g.provider_game_id
                     and s.provenance = g.replay);
+
+-- check: replay_ids_are_always_labelled | expect: 0
+-- Rev 4.15 review: a game whose provider id has the demo slot shape was created from the demo
+-- host, whose provenance row precedes every listing; an unlabelled one means it was created
+-- without that row (the purge / re-list race the host's re-check closes).
+select count(*)
+from public.games g
+where g.provider_game_id ~ '^replay-[0-9a-f]{8}-[0-9]{12}$'
+  and g.replay is null;

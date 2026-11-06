@@ -63,8 +63,11 @@ import { SummaryDocumentSchema } from './schemas/summary.js';
 /** The grid's origin: 2026-01-01 00:00 US Eastern (EST). Slots are ORIGIN + k * interval. */
 export const SLOT_ORIGIN_MS = Date.UTC(2026, 0, 1, 5, 0, 0);
 export const DEFAULT_INTERVAL_MS = 3 * 3_600_000;
-/** A finished slot stays in the schedule listings this long after its `closed` document. */
-export const LISTING_GRACE_MS = 30 * 60_000;
+/**
+ * `pnpm demo purge` never touches a slot younger than its replay's end plus this margin: the host
+ * could still list it or serve a resuming watch (listingHorizonMs).
+ */
+export const PURGE_MARGIN_MS = 30 * 60_000;
 
 export interface RotationEntry {
   league: LeagueCode;
@@ -405,6 +408,14 @@ export function assertIntervalFits(recordings: readonly LoadedRecording[], inter
   }
 }
 
+/**
+ * How long after its tip-off a slot of these recordings may still be listed or served to a live
+ * watch: the latest `closed` moment plus PURGE_MARGIN_MS. Purge only deletes older games.
+ */
+export function listingHorizonMs(recordings: readonly LoadedRecording[]): number {
+  return Math.max(...recordings.map((r) => r.endOffsetMs)) + PURGE_MARGIN_MS;
+}
+
 /** The shift a slot applies to its recording's timestamps. */
 export function shiftFor(rec: LoadedRecording, slot: Slot): number {
   return slot.tipOffMs - rec.recordedTipOffMs;
@@ -566,6 +577,14 @@ export interface DemoHost {
   slotsNow(): Slot[];
   /** Upsert one slot's provenance (also done before any document naming it). */
   ensureProvenance(slot: Slot): Promise<void>;
+  /**
+   * Upsert the provenance of every listed slot. A ProvenanceConflictError is collected per slot
+   * (that slot answers 409), never thrown; any other error is.
+   */
+  ensureListed(): Promise<{
+    written: number;
+    conflicts: Array<{ providerGameId: string; message: string }>;
+  }>;
   close(): Promise<void>;
 }
 
@@ -603,25 +622,28 @@ export async function startDemoHost(opts: DemoHostOptions): Promise<DemoHost> {
   const minSpacingMs = opts.minSpacingMs ?? 1000;
   const heartbeatMs = opts.heartbeatMs ?? 5000;
   const lastAccepted = new Map<string, number>();
-  const written = new Map<string, Promise<void>>();
+  // In-flight writes are shared; a finished one is not remembered, so every request re-checks
+  // (a purge or any other delete of the row is repaired before the slot is served again, and a
+  // game can never be created unlabelled). The upsert is idempotent and cheap.
+  const inFlight = new Map<string, Promise<void>>();
   const ensureProvenance = (slot: Slot): Promise<void> => {
-    let p = written.get(slot.providerGameId);
+    let p = inFlight.get(slot.providerGameId);
     if (!p) {
-      p = opts.provenance.ensure(provenanceRow(recOf(slot), slot)).then(() => {
-        stats.provenanceRows++;
-      });
-      // A failed write is retried by the next request.
-      p.catch(() => written.delete(slot.providerGameId));
-      written.set(slot.providerGameId, p);
+      p = opts.provenance
+        .ensure(provenanceRow(recOf(slot), slot))
+        .then(() => {
+          stats.provenanceRows++;
+        })
+        .finally(() => inFlight.delete(slot.providerGameId));
+      inFlight.set(slot.providerGameId, p);
     }
     return p;
   };
-  // A slot whose replay ended (closed, plus a grace) before now is no longer listed: a host
-  // started at 15:00 must not create that morning's slots as closed 0-0 games through the
-  // schedule. Deterministic in time like everything else; a game already ingested keeps its row,
-  // and its documents stay served for a watch that resumes late.
-  const listable = (slot: Slot) =>
-    clock.now() <= slot.tipOffMs + recOf(slot).endOffsetMs + LISTING_GRACE_MS;
+  // Review round 1 (item 10): a slot is listed only until its `closed` document is served. A host
+  // started after that never creates the slot (it would be a closed 0-0 game); a game listed
+  // earlier keeps its row and is resumed from the database (the scheduler loads games, not
+  // listings), and its documents stay served for a watch that resumes late.
+  const listable = (slot: Slot) => clock.now() < slot.tipOffMs + recOf(slot).endOffsetMs;
   const slotsNow = () =>
     slotsOn(todayAndTomorrow(clock.now()), rotation, intervalMs, clock.now()).filter(listable);
 
@@ -813,7 +835,21 @@ export async function startDemoHost(opts: DemoHostOptions): Promise<DemoHost> {
         clock.now(),
       ).filter((s) => s.entry.league === league && listable(s));
       // Provenance first: the schedule ingest creates the game rows the trigger labels.
-      Promise.all(listed.map(ensureProvenance)).then(() => {
+      // A slot whose provenance conflicts is left out of the listing (its own feeds answer 409);
+      // it must not take the league's whole schedule down.
+      Promise.all(
+        listed.map((slot) =>
+          ensureProvenance(slot).then(
+            () => slot,
+            (err) => {
+              if (!(err instanceof ProvenanceConflictError)) throw err;
+              opts.log?.error({ providerGameId: slot.providerGameId }, err.message);
+              return null;
+            },
+          ),
+        ),
+      ).then((ok) => {
+        const games = ok.filter((x): x is Slot => x !== null);
         const first =
           recordings.get(listed[0]?.entry.rec8 ?? '') ??
           [...recordings.values()].find((r) => r.entry.league === league);
@@ -824,7 +860,7 @@ export async function startDemoHost(opts: DemoHostOptions): Promise<DemoHost> {
         send(200, {
           ...header,
           ...(daily ? { date: dates[0] } : {}),
-          games: listed.map(scheduleEntry),
+          games: games.map(scheduleEntry),
         });
       }, fail);
       return;
@@ -859,6 +895,20 @@ export async function startDemoHost(opts: DemoHostOptions): Promise<DemoHost> {
     stats,
     slotsNow,
     ensureProvenance,
+    async ensureListed() {
+      let written = 0;
+      const conflicts: Array<{ providerGameId: string; message: string }> = [];
+      for (const slot of slotsNow()) {
+        try {
+          await ensureProvenance(slot);
+          written++;
+        } catch (err) {
+          if (!(err instanceof ProvenanceConflictError)) throw err;
+          conflicts.push({ providerGameId: slot.providerGameId, message: err.message });
+        }
+      }
+      return { written, conflicts };
+    },
     close: () =>
       new Promise<void>((resolve, reject) => {
         for (const r of openPush) r.destroy();
