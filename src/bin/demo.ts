@@ -212,7 +212,12 @@ async function main() {
   if (cmd === 'verify-slot') {
     if (!args.slot) usage('verify-slot needs --slot <replay slot id>');
     try {
-      const v = await verifySlot(db, log, args.slot ?? '', { keep: args.keep });
+      // Quiet: a periodic self-check prints its verdict, not one log line per replayed document.
+      const quiet = createLogger({
+        level:
+          config.logLevel === 'debug' || config.logLevel === 'trace' ? config.logLevel : 'warn',
+      });
+      const v = await verifySlot(db, quiet, args.slot ?? '', { keep: args.keep });
       const what = `${v.compared.events} events, ${v.compared.periods} periods, ${v.compared.teamStats} team and ${v.compared.playerStats} player stat lines, score, status`;
       console.log(
         `verify-slot ${v.slotGameId}: ${v.ok ? 'PASS' : 'FAIL'} (${what}) against a polling-only replay of the same shifted slot, check game ${v.checkProviderGameId} ${v.kept ? `kept (${v.checkGameId})` : 'purged'}`,
