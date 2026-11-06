@@ -18,6 +18,9 @@ rehearsal the validator can run against the dev stack today.
 | `api` | `node src/bin/api.js` | Hono: `/health`, `/v1/games/:id/snapshot`, `/v1/games/:id/changes`, `/v1/players/:id`, `/v1/admin/quota`. Fly's HTTP check hits `/health` every 15 s. |
 | `worker` (exactly one machine) | `node src/bin/worker.js` | Takes the single-ingester advisory lock on the **session** connection (exits 2 if another holds it; Fly restarts it, so two workers can never ingest at once), drains the outbox on start / NOTIFY / 30 s, sends pulses and (with the scheduler, or `--scores`) the `league:*:scores` scoreboard, and in `MODE=production` runs the scheduler (`src/ingest/scheduler.ts`): daily schedule for today + tomorrow per league with a key (06:00 ET, hourly inside game windows), a coverage-aware watch for every game within 10 min of tip-off, **push mode** (events + WNBA clock streams, REST pbp + summary every 5 min as reconciliation, backfill on every stream reconnect) where the league offers push events and the game has play-by-play coverage. |
 
+The demo environment (`fly.demo.toml`, app `wehoop-demo`, NOT deployed) runs the same `api`
+group and a `worker` group of `node src/bin/demo.js run` (section "Demo environment" below).
+
 The image is one multi-stage build (`Dockerfile`): `pnpm install --frozen-lockfile`, `tsc` to
 `dist/`, `pnpm prune --prod`, runtime `node:22-alpine` as user `node` with `dist/src` copied to
 `/app/src`. Verified locally on 2026-10-18: `pnpm build` produces `dist/src/bin/{api,worker,
@@ -288,6 +291,104 @@ in the 2026-10-18 restart rehearsal, with correctly spaced recorded slots, so
 were given their own single-caller limiter for that reason and keep it. Since M3 `d34931a` the claims
 of one limiter are chained in call order, which also covers two scheduler watches of one product in
 one process.
+
+## Demo environment (plan rev 4.15, M5 B4)
+
+Until production keys exist, TestFlight runs against a **separate demo environment**: the same
+code with demo configuration, in its own Supabase project and its own Fly app (`wehoop-demo`,
+`fly.demo.toml`). One worker process (`pnpm demo run`, `src/bin/demo.ts`) runs the demo host
+(`src/providers/sportradar/demo-host.ts`) on loopback and the production scheduler against it.
+Nothing here needs, accepts or reaches a Sportradar key: `MODE=demo` refuses to start with any
+`SPORTRADAR_*_KEY` set, and `SportradarHttp` / `PushStream` refuse, before any network I/O, every
+request whose origin is not the demo host (`DestinationRefusedError`). It does **not** establish
+real-provider push availability or latency.
+
+What the demo host serves:
+
+| | |
+|---|---|
+| Rotation | one slot every `--interval` (default 180 min) on a fixed grid (`SLOT_ORIGIN` 2026-01-01 00:00 ET + k x interval), today and tomorrow (US Eastern), alternating `fixtures/wnba/sim-93ee7c68-replay.compact.jsonl.gz` and `fixtures/ncaawb/sim-d9b71fe0-replay.compact.jsonl.gz` (`recorded`); `--include-synthetic` adds `fixtures/unrivaled/docs-838316ea-replay.jsonl` (`synthetic`). Each league's daily schedule lists only its own slots; a slot whose replay ended (closed + 30 min) is no longer listed, so a host started mid-day never creates that morning's slots as 0-0 games. |
+| Identity | `replay-<rec8>-<yyyymmddHHMM>` (tip-off in UTC), from the recording and the slot only. |
+| Timeline | every ISO timestamp shifted by slot tip-off - recorded tip-off (the recording's `scheduled`), recorded game id replaced; a document is served from tip-off + (its request time - the recording's request/game-clock lead - recorded tip-off), so no served revision is later than the moment it is served (WNBA plays begin about 16 min after the tip-off, as in the recorded game; NCAAWB about 3 min). Before the first document: the first (pregame) one; after the last: `closed`. A restarted host serves the same documents at the same moments. |
+| Spans | WNBA 140 min, NCAAWB 127 min (first document to `closed`); the host refuses an interval at or below the longest span, or below the served windows' footprint (153 min for the default rotation). |
+| Provenance | `ingest.replay_slots` (recording id, fixture path + sha256, recorded game id and tip-off, slot tip-off, shift), upserted before a slot appears in any document; a different existing row is refused (409). Migration 0014's trigger labels the game row `games.replay` from it when the schedule ingest creates the game. |
+| Label | `replay` (`recorded` / `synthetic` / null) on `v_schedule`, the snapshot's `game`, every `pulse` and every `league:*:scores` delta; generated into Contracts (`ReplayKind`). |
+| Calls | source `rehearsal` (rate-limited, guarded, logged in `provider_calls`, never quota-counted); the host answers 401 without a key header (the demo resolver sends a placeholder) and 429 on two calls of one product within 1 s. |
+
+### Local rehearsal on the dev stack (runnable today)
+
+```
+pnpm supabase db reset                       # 0014 applied; the dev stack is regenerable
+set -a; source .env; set +a                  # MODE=sim in .env is overridden: pnpm demo is always MODE=demo
+pnpm demo init                               # marks the database demo, synthetic limits, reference fixtures (exit 65 if it holds games)
+pnpm demo run                                # real time: one replay every 3 h; Ctrl-C drains and exits 0
+curl -s 127.0.0.1:8790/_demo/status          # listed slots, their status, host counters (no key)
+```
+
+Restart-continuity rehearsal at compressed speed (about 3 minutes; the automated version is
+`test/integration/demo-restart.test.ts`):
+
+```
+E=$(pnpm -s demo epoch --speed 60 --lead 12 --league wnba | sed -n 's/^DEMO_EPOCH=//p')
+pnpm demo run --league wnba --speed 60 --epoch "$E" > demo1.log 2>&1 &   # note WORKER_PID=, DEMO_HOST=
+# the next WNBA slot's id: the line "next slot ..." printed by `demo epoch`, or /_demo/status
+pnpm subscribe --game <games.id of that slot> --record sub.jsonl &        # connected throughout
+#   ... once v_schedule shows it inprogress with plays:
+kill -9 <WORKER_PID>
+pnpm demo run --league wnba --speed 60 --epoch "$E" > demo2.log 2>&1 &   # SAME --speed and --epoch
+#   ... when the game is closed and the last watch_game run of it is `ok`: kill -TERM <new WORKER_PID>
+pnpm demo export-slot --league wnba --slot <slot id> --game-id test-poll-<n> --out poll.jsonl
+pnpm dev:worker --mode sim --league wnba --replay-file poll.jsonl --pace 0   # the same shifted slot, polling-only
+pnpm dump-game --league wnba --provider-game-id <slot id> > demo.json
+pnpm dump-game --league wnba --provider-game-id test-poll-<n> > poll.json
+diff demo.json poll.json                     # expect only the providerGameId line to differ
+pnpm invariants
+```
+
+No-traffic check (every provider call of the demo is on the demo host and uncounted):
+
+```
+docker exec supabase_db_wehoop-api psql -U postgres -Atc "select count(*) from ingest.provider_calls where url not like 'http://127.0.0.1:8790/%' and run_id in (select id from ingest.ingestion_runs where game_id in (select id from public.games where replay is not null))"   # expect 0
+docker exec supabase_db_wehoop-api psql -U postgres -Atc "select count(*) from ingest.provider_calls where quota_counted and source = 'rehearsal'"   # expect 0
+SPORTRADAR_WNBA_KEY=x pnpm demo run; echo exit=$?                               # refused: exit 65
+SPORTRADAR_BASE_URL=https://api.sportradar.com pnpm demo run; echo exit=$?      # refused: exit 65
+```
+
+Cleanup: `pnpm demo purge --older-than 7d [--dry-run]` (or `--all`) deletes closed replay games
+quiet for that long with every dependent row, one transaction per game, in foreign-key order
+(`src/ingest/demo-purge.ts`), skips a game with unpublished or dead outbox rows, and prints what it
+did. Demo databases and the dev stack only. Besides the retention job it is the only code that
+deletes `game_changes`. Switching to production selects the production app and project; it never
+depends on a purge.
+
+### Hosted demo (NOT RUN; waits on the owner's go and a demo Supabase project)
+
+Every command below needs a cloud project or Fly and has **not** been run.
+
+```
+# 1. Its own Supabase project (never the production one), migrations 0001..0014:
+supabase link --project-ref <demo-ref> && supabase db push                       # NOT RUN
+# 2. Mark it demo and load the reference fixtures, from a machine with the demo project's URLs:
+DATABASE_URL=<demo session/direct URL> DATABASE_SESSION_URL=<demo direct URL> \
+  SUPABASE_URL=<demo url> SUPABASE_SERVICE_ROLE_KEY=<demo key> pnpm demo init     # NOT RUN
+# 3. Its own Fly app (fly.demo.toml: MODE=demo and SPORTRADAR_BASE_URL in [env]; worker = node src/bin/demo.js run):
+fly apps create wehoop-demo --org personal                                       # NOT RUN
+fly secrets set -a wehoop-demo DATABASE_URL=... DATABASE_SESSION_URL=... \
+  SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... ADMIN_BEARER_TOKEN=...          # NOT RUN (no SPORTRADAR_* secret, ever)
+fly deploy -c fly.demo.toml                                                      # NOT RUN (builds the Dockerfile `demo` target, fixtures included)
+fly scale count worker=1 -a wehoop-demo                                          # NOT RUN
+# 4. Weekly cleanup (cron or by hand, against the demo project only):
+pnpm demo purge --older-than 7d                                                  # NOT RUN
+```
+
+The demo worker refuses a database that is neither the dev stack nor marked `demo`; the
+production worker (`MODE=production`) refuses a database marked `demo`.
+
+Known limits: at `--speed` > 1 the scheduler's complete-to-closed resume bounds compare the
+compressed clock with `game_changes.created_at` (wall clock), so a restart during a compressed
+`complete` phase may not resume the watch (real time, the hosted case, is unaffected). The
+Unrivaled replay's docs-sample revisions are stamped after its synthetic request times, so its
+served revisions lie in the future (it is `synthetic` and off by default).
 
 ## Alerts (`GET /health`)
 

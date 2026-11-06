@@ -99,3 +99,13 @@ captured responses and describe 2022–2024 seasons.
 | `docs-seasonal-stats-6e0c5edc.json` | `ncaawb-seasonal-statistics` | team + player season lines |
 | `docs-tournament-list-2022-PST.json` | `ncaawb-tournament-list` | three tournaments |
 | `docs-tournament-schedule-c4903014.json` | `ncaawb-tournament-schedule` | Final Four games with `seed` and `source` |
+
+## Demo rotation (M5 B4, plan rev 4.15)
+
+`sim-d9b71fe0-replay.compact.jsonl.gz` is the second recording of the demo rotation
+(`src/providers/sportradar/demo-host.ts`), labelled `recorded`, unchanged on disk: timestamps
+shifted by slot tip-off - `2026-02-18T23:30:00+00:00`, game id `2e36b340-9277-4b99-af20-b7ff7e86640e`
+replaced by `replay-d9b71fe0-<yyyymmddHHMM>`; first document served at +3.0 min, `closed` at
++129.9 min. Span (first document to `closed`): 126.8 min. NCAAWB has no push streams, so a demo
+NCAAWB slot is watched by REST polling (`full` profile). The `extended` relabelled copy is not in
+the rotation.

@@ -40,6 +40,7 @@ pnpm health check [--url http://127.0.0.1:3000]   # external monitor probe of /h
 pnpm gen:swift [--out <dir>] [--check]   # emit the iOS Contracts module from the Zod schemas (src/contracts/registry.ts) into generated/swift (committed); --check exits 1 on drift (CI)
 pnpm seed:dev [--league <code>]... [--force] [--dry-run]   # load every committed fixture of the three leagues into the DEV stack through the normal ingest paths (M5 B2; src/ingest/seed-manifest.ts); a reseed changes nothing; refuses any other database
 pnpm golden --out <dir>      # capture the golden JSON the app's TestSupport decodes (snapshots, /changes pages, pulses, view rows, players) from the seeded DEV stack; every body is Zod-parsed first (M5 S1; the app runs it via scripts/sync-goldens.sh)
+pnpm demo init | run [--interval 180] [--include-synthetic] [--league <code>]... [--speed N --epoch ISO] | purge --older-than 7d|--all [--dry-run] | epoch --speed N [--lead 12] | export-slot --slot <id> --out <file>   # demo environment (M5 B4, rev 4.15): MODE=demo, no Sportradar key, the demo host (rotation of recorded replays, replay-<rec8>-<slot> ids) + the production scheduler in one process; dev stack or a database marked demo only (docs/DEPLOY.md "Demo environment")
 ```
 
 `tsx` loads no `.env`: the plain `pnpm trial` / `dev:worker` / `dev:api` / `sim` / `invariants` / `outbox` / `retention` scripts read only exported shell variables (`pnpm health` reads only `API_BASE_URL`/`PORT`). The `*:live` / `*:rehearsal` scripts are `node --env-file=.env --env-file=.env.<name> --import tsx src/bin/<x>.ts`.
@@ -65,7 +66,7 @@ Rules: the later file overrides the earlier; **exported shell variables override
 5. **`game_changes` is append-only.** Code never updates or deletes rows. Retention is a separate job that moves `games.retained_from_seq`.
 6. **One `GameChange` schema** (`src/model/game-change.ts`) for Broadcast, `/changes`, and storage. Equality is tested on decoded objects, never JSON bytes.
 7. **No `any`.** `tsc --noEmit` and Biome must be green before any handoff.
-8. **Simulation and fixture calls never count toward quota.** `provider_calls.quota_counted` is true only for `trial` and `production`.
+8. **Simulation and fixture calls never count toward quota.** `provider_calls.quota_counted` is true only for `trial` and `production` (rehearsal and demo calls are source `rehearsal`).
 9. **Secrets only via env.** Never in code, fixtures, or devlog. `.env.example` lists every variable.
 10. **Clients can only read.** No RLS write policies for `anon`/`authenticated`, no Realtime insert policy, `ingest` schema never exposed.
 11. **Lowercase snake_case in SQL**, `timestamptz` for time, `text` not `varchar`, index every FK.

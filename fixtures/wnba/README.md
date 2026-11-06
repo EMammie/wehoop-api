@@ -104,3 +104,15 @@ captured responses.
 | `docs-hierarchy.json` | `wnba-league-hierarchy` | `conferences[] > teams[]` with colors and venue |
 | `docs-seasonal-stats-6f017f37.json` | `wnba-seasonal-statistics` | team + player season lines |
 | `docs-identity-replay.jsonl` | replay file: the Boston profile, then the hierarchy. The profile is a real docs sample; the three-id example it is part of is **partly synthetic** because its Unrivaled half is hand-assembled (`fixtures/unrivaled/README.md`) | `pnpm dev:worker --mode sim --league wnba --replay-file fixtures/wnba/docs-identity-replay.jsonl --pace 0` |
+
+## Demo rotation (M5 B4, plan rev 4.15)
+
+`sim-93ee7c68-replay.compact.jsonl.gz` is one of the two recordings the demo host
+(`src/providers/sportradar/demo-host.ts`, `pnpm demo run`) replays, labelled `recorded`. Nothing in
+the file is changed: each slot serves its documents with every ISO timestamp shifted by slot
+tip-off - `2026-06-30T23:00:00+00:00` (the recording's `scheduled`) and the game id
+`40bea3f6-68c0-4f3b-96fa-336dfb7a9034` replaced by `replay-93ee7c68-<yyyymmddHHMM>`, on the slot's
+own clock: the request times (2026-10-14) are mapped onto the game clock by the smallest gap
+between a pbp request and its newest event revision (152,089 min), so the first document is
+served 16.2 min after the slot's tip-off and `closed` at +155.7 min. Span (first document to
+`closed`): 139.5 min. Its sha256 is stored per slot in `ingest.replay_slots`.
