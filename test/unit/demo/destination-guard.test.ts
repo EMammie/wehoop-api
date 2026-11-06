@@ -1,3 +1,4 @@
+import { createServer, type Server } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { type Config, loadConfig } from '../../../src/config.js';
@@ -206,6 +207,7 @@ describe('MODE=demo configuration', () => {
       'https://127.0.0.1:8790',
       'http://127.0.0.1',
       'http://127.0.0.1:8790/wnba',
+      'http://0.0.0.0:8790', // would bind every interface
     ]) {
       expect(() => demoConfig({ SPORTRADAR_BASE_URL: url }), url).toThrow(/MODE=demo/);
     }
@@ -214,5 +216,96 @@ describe('MODE=demo configuration', () => {
   it('still needs the service-role key and a session URL (it publishes and holds the lock)', () => {
     const { SUPABASE_SERVICE_ROLE_KEY: _k, DATABASE_SESSION_URL: _s, ...bare } = demoEnv;
     expect(() => loadConfig(bare)).toThrow(/SUPABASE_SERVICE_ROLE_KEY[\s\S]*DATABASE_SESSION_URL/);
+  });
+});
+
+describe('demo host URL normalization', () => {
+  it('strips a trailing slash so the resolver never builds //wnba', () => {
+    const c = demoConfig({ SPORTRADAR_BASE_URL: `${DEMO}/` });
+    expect(c.sportradar.baseUrl).toBe(DEMO);
+    const r = createResolver(c, 'wnba');
+    expect(r.resolve('pbp', { gameId: 'g' }).url).toBe(
+      `${DEMO}/wnba/production/v8/en/games/g/pbp.json`,
+    );
+    for (const ok of ['http://localhost:8790', 'http://[::1]:8790'])
+      expect(() => demoConfig({ SPORTRADAR_BASE_URL: ok }), ok).not.toThrow();
+  });
+});
+
+describe('a redirect cannot leave the locked destination', () => {
+  const servers: Server[] = [];
+  afterEach(async () => {
+    for (const s of servers.splice(0)) {
+      s.closeAllConnections();
+      await new Promise<void>((r) => s.close(() => r()));
+    }
+  });
+  const listen = (handler: Parameters<typeof createServer>[1]) =>
+    new Promise<string>((resolve) => {
+      const s = createServer(handler);
+      servers.push(s);
+      s.listen(0, '127.0.0.1', () => {
+        const a = s.address();
+        resolve(`http://127.0.0.1:${typeof a === 'object' && a ? a.port : 0}`);
+      });
+    });
+
+  async function hosts() {
+    let elsewhere = 0;
+    const other = await listen((_req, res) => {
+      elsewhere++;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    const demo = await listen((_req, res) => {
+      res.writeHead(302, { location: `${other}/stolen` });
+      res.end();
+    });
+    return { demo, other, elsewhere: () => elsewhere };
+  }
+
+  it('SportradarHttp: a 302 to another origin fails the request; nothing reaches the other host', async () => {
+    const h = await hosts();
+    // Control: without a lock, fetch follows the redirect (so the test can see a leak).
+    const free = new SportradarHttp({
+      db: null,
+      log,
+      league: 'wnba',
+      runId: null,
+      resolver: simResolver(`${h.demo}/wnba/x.json`),
+    });
+    await free.getJson('pbp', z.unknown());
+    expect(h.elsewhere()).toBe(1);
+    lockDestination(h.demo);
+    const guarded = new SportradarHttp({
+      db: null,
+      log,
+      league: 'wnba',
+      runId: null,
+      resolver: simResolver(`${h.demo}/wnba/x.json`),
+    });
+    await expect(guarded.getJson('pbp', z.unknown())).rejects.toThrow();
+    expect(h.elsewhere()).toBe(1);
+  });
+
+  it('PushStream: a 302 to another origin is a failed attempt; nothing reaches the other host', async () => {
+    const h = await hosts();
+    lockDestination(h.demo);
+    const stream = new PushStream({
+      db: null,
+      log,
+      resolver: pushResolver(`${h.demo}/wnba/production/stream/en/events/subscribe`),
+      league: 'wnba',
+      runId: null,
+      feed: 'push_events',
+      onLine: () => undefined,
+      attemptBudget: { remaining: 2 },
+      backoffMinMs: 10,
+      backoffMaxMs: 20,
+    });
+    await stream.start();
+    expect(stream.state.attempts).toBe(2);
+    expect(stream.state.connections).toBe(0);
+    expect(h.elsewhere()).toBe(0);
   });
 });

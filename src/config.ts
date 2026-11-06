@@ -34,13 +34,17 @@ export function isLoopbackUrl(url: string): boolean {
   }
 }
 
-/** The in-process demo host shape: `http://<loopback>:<port>` with nothing after the origin. */
+/**
+ * The in-process demo host shape: `http://<127.0.0.1 | localhost | ::1>:<port>` with nothing after
+ * the origin. Not 0.0.0.0: the demo host binds the configured hostname, and 0.0.0.0 would expose it
+ * on every interface.
+ */
 export function isDemoHostUrl(url: string): boolean {
   try {
     const u = new URL(url);
     return (
       u.protocol === 'http:' &&
-      isLoopbackHost(u.hostname) &&
+      ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) &&
       u.port !== '' &&
       (u.pathname === '/' || u.pathname === '') &&
       u.search === '' &&
@@ -110,7 +114,14 @@ const EnvSchema = z.object({
   SPORTRADAR_UNRIVALED_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
   SPORTRADAR_ACCESS_LEVEL: z.enum(['trial', 'production']).default('trial'),
   SPORTRADAR_PLAYBACK_URL: z.url().default('https://playback.sportradar.com'),
-  SPORTRADAR_BASE_URL: z.preprocess(emptyToUndefined, z.url().default(SPORTRADAR_DEFAULT_BASE_URL)),
+  // Trailing slashes stripped: resolvers append `/{league}/...` (a `/` would make `//wnba` 404).
+  SPORTRADAR_BASE_URL: z.preprocess(
+    emptyToUndefined,
+    z
+      .url()
+      .default(SPORTRADAR_DEFAULT_BASE_URL)
+      .transform((u) => u.replace(/\/+$/, '')),
+  ),
   QUOTA_WNBA: QuotaOverride,
   QUOTA_NCAAWB: QuotaOverride,
   QUOTA_UNRIVALED: QuotaOverride,

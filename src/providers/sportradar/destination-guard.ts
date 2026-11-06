@@ -53,12 +53,25 @@ export function lockedDestination(): string | null {
   return locked;
 }
 
+/** The origin requests are restricted to (`allowed` overrides the process lock), or null. */
+export function activeDestination(allowed?: string | null): string | null {
+  return allowed === undefined || allowed === null ? locked : originOf(allowed);
+}
+
+/**
+ * Fetch options for a guarded request: with a destination in force, a redirect is an error, so a
+ * 3xx from the allowed host can never carry the request to another origin (review 1, item 12).
+ */
+export function redirectPolicy(allowed?: string | null): { redirect?: 'error' } {
+  return activeDestination(allowed) === null ? {} : { redirect: 'error' };
+}
+
 /**
  * Throw DestinationRefusedError (and log it) when a lock is in place and `url` is elsewhere.
  * `allowed` overrides the process lock (unit tests); null/undefined = use the lock.
  */
 export function assertDestination(url: string, log?: Logger, allowed?: string | null): void {
-  const allowedOrigin = allowed === undefined || allowed === null ? locked : originOf(allowed);
+  const allowedOrigin = activeDestination(allowed);
   if (allowedOrigin === null) return;
   const origin = originOf(url);
   if (origin === allowedOrigin) return;

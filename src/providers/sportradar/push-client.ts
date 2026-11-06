@@ -7,7 +7,7 @@ import {
 } from '../../ingest/quota-guard.js';
 import type { LeagueCode } from '../../leagues/codes.js';
 import type { Logger } from '../../logger.js';
-import { assertDestination } from './destination-guard.js';
+import { assertDestination, redirectPolicy } from './destination-guard.js';
 import { claimSlot, type RateLimiter, SlotClaimTimeoutError } from './rate-limiter.js';
 import {
   type PushClockMessage,
@@ -322,6 +322,7 @@ export class PushStream {
         const res = await fetchImpl(url, {
           headers: { accept: 'application/json', ...headers },
           signal: controller.signal,
+          ...redirectPolicy(this.deps.allowedOrigin),
         });
         status = res.status;
         // Only a reconnect needs the moment (one database round trip per reconnect).

@@ -8,7 +8,7 @@ import {
 } from '../../ingest/quota-guard.js';
 import type { LeagueCode } from '../../leagues/codes.js';
 import type { Logger } from '../../logger.js';
-import { assertDestination } from './destination-guard.js';
+import { assertDestination, redirectPolicy } from './destination-guard.js';
 import type { RateLimiter } from './rate-limiter.js';
 import { type Feed, type FeedParams, redactUrl, type UrlResolver } from './urls.js';
 
@@ -139,6 +139,7 @@ export class SportradarHttp {
       const res = await fetchImpl(url, {
         headers: { accept: 'application/json', ...headers },
         signal: AbortSignal.timeout(this.deps.timeoutMs ?? 20_000),
+        ...redirectPolicy(this.deps.allowedOrigin),
       });
       status = res.status;
       text = await res.text();

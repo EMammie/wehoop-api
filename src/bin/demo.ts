@@ -294,7 +294,7 @@ async function main() {
       clock,
       provenance: new PgProvenanceStore(db),
       port,
-      host: new URL(config.sportradar.baseUrl).hostname,
+      host: new URL(config.sportradar.baseUrl).hostname.replace(/^\[(.*)\]$/, '$1'),
       log,
     });
   } catch (err) {
