@@ -263,6 +263,7 @@ describe('outbox publisher', () => {
       status: 'inprogress',
       clock: nd.gameView?.clock,
       observedAt: T0.toISOString(),
+      replay: null,
     });
     expect(pulse?.clockAsOf).toBe(T0.toISOString());
   });

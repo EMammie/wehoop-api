@@ -305,3 +305,39 @@ public enum ChangeType: Codable, Hashable, Sendable {
         try container.encode(rawValue)
     }
 }
+
+/// games.replay: a demo replay (recorded | synthetic); null for a real game (rev 4.15)
+public enum ReplayKind: Codable, Hashable, Sendable {
+    case recorded
+    case synthetic
+    /// A value this build does not know (plan rev 4.11 (5)): kept and shown as such, never dropped.
+    case unknown(String)
+
+    /// Every value this build knows, in backend order.
+    public static let known: [ReplayKind] = [.recorded, .synthetic]
+
+    public init(rawValue: String) {
+        switch rawValue {
+        case "recorded": self = .recorded
+        case "synthetic": self = .synthetic
+        default: self = .unknown(rawValue)
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .recorded: "recorded"
+        case .synthetic: "synthetic"
+        case .unknown(let raw): raw
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        self.init(rawValue: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { LeagueCodeSchema } from '../leagues/codes.js';
 import { GameStatusSchema, PeriodTypeSchema } from './live-event.js';
+import { ReplayKindSchema } from './replay.js';
 
 /**
  * Rows of the PostgREST views (plan §5): what a client receives from
@@ -69,6 +70,8 @@ export const ScheduleRowSchema = z.object({
   stats_final_at: ts.nullable(),
   observed_at: ts.nullable(),
   updated_at: ts,
+  /** `games.replay` (0014): `recorded` | `synthetic` for a demo replay, null for a real game. */
+  replay: ReplayKindSchema.nullable(),
 });
 export type ScheduleRow = z.infer<typeof ScheduleRowSchema>;
 

@@ -42,6 +42,7 @@ public struct ScheduleRow: Codable, Hashable, Sendable {
     public let statsFinalAt: String?
     public let observedAt: String?
     public let updatedAt: String
+    public let replay: ReplayKind?
 
     public init(
         id: String,
@@ -81,7 +82,8 @@ public struct ScheduleRow: Codable, Hashable, Sendable {
         retainedFromSeq: Int,
         statsFinalAt: String?,
         observedAt: String?,
-        updatedAt: String
+        updatedAt: String,
+        replay: ReplayKind?
     ) {
         self.id = id
         self.league = league
@@ -121,6 +123,7 @@ public struct ScheduleRow: Codable, Hashable, Sendable {
         self.statsFinalAt = statsFinalAt
         self.observedAt = observedAt
         self.updatedAt = updatedAt
+        self.replay = replay
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -162,6 +165,7 @@ public struct ScheduleRow: Codable, Hashable, Sendable {
         case statsFinalAt = "stats_final_at"
         case observedAt = "observed_at"
         case updatedAt = "updated_at"
+        case replay
     }
 }
 

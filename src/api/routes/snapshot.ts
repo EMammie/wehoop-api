@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { GameStatus, PeriodType } from '../../model/live-event.js';
+import type { ReplayKind } from '../../model/replay.js';
 import { type Snapshot, SnapshotSchema } from '../../model/snapshot.js';
 import type { AppEnv } from '../server.js';
 
@@ -53,6 +54,7 @@ export async function loadSnapshot(
         clockAsOf: Date | null;
         observedAt: Date | null;
         elamTargetScore: number | null;
+        replay: ReplayKind | null;
         lastSeq: string;
         retainedFromSeq: string;
         serverTime: Date;
@@ -62,7 +64,7 @@ export async function loadSnapshot(
              home_points as "homePoints", away_points as "awayPoints", current_period as "currentPeriod",
              period_type as "periodType", current_period_sequence as "currentPeriodSequence",
              clock, clock_decimal as "clockDecimal", clock_running as "clockRunning", clock_as_of as "clockAsOf",
-             observed_at as "observedAt", elam_target_score as "elamTargetScore",
+             observed_at as "observedAt", elam_target_score as "elamTargetScore", replay,
              last_seq::text as "lastSeq", retained_from_seq::text as "retainedFromSeq",
              now() as "serverTime"
       from public.games where id = ${gameId}`;
@@ -154,6 +156,7 @@ export async function loadSnapshot(
         clockAsOf: g.clockAsOf ? g.clockAsOf.toISOString() : null,
         observedAt: g.observedAt ? g.observedAt.toISOString() : null,
         elamTargetScore: g.elamTargetScore,
+        replay: g.replay,
       },
       periods: periods.map((p) => ({
         number: p.number,

@@ -11,6 +11,7 @@ public struct ScoreboardDelta: Codable, Hashable, Sendable {
     public let clock: String?
     public let latestSeq: Int
     public let observedAt: String?
+    public let replay: ReplayKind?
 
     public init(
         gameId: String,
@@ -19,7 +20,8 @@ public struct ScoreboardDelta: Codable, Hashable, Sendable {
         period: PeriodRef?,
         clock: String?,
         latestSeq: Int,
-        observedAt: String?
+        observedAt: String?,
+        replay: ReplayKind?
     ) {
         self.gameId = gameId
         self.score = score
@@ -28,6 +30,7 @@ public struct ScoreboardDelta: Codable, Hashable, Sendable {
         self.clock = clock
         self.latestSeq = latestSeq
         self.observedAt = observedAt
+        self.replay = replay
     }
 }
 

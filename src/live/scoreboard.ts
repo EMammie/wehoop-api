@@ -2,6 +2,7 @@ import type { Db } from '../db/client.js';
 import type { LeagueCode } from '../leagues/codes.js';
 import type { Logger } from '../logger.js';
 import type { GameStatus, PeriodType } from '../model/live-event.js';
+import type { ReplayKind } from '../model/replay.js';
 import {
   leagueScoresChannel,
   type ScoreboardDelta,
@@ -42,13 +43,14 @@ export class DbScoreboardSource implements ScoreboardSource {
         clock: string | null;
         lastSeq: string;
         observedAt: Date | null;
+        replay: ReplayKind | null;
         changedAt: Date;
       }[]
     >`
       select id as "gameId", league, home_points as home, away_points as away, status,
              current_period as "periodNumber", period_type as "periodType",
              current_period_sequence as "periodSequence", clock, last_seq::text as "lastSeq",
-             observed_at as "observedAt", updated_at as "changedAt"
+             observed_at as "observedAt", replay, updated_at as "changedAt"
       from public.games
       where ${
         since === null
@@ -75,6 +77,7 @@ export class DbScoreboardSource implements ScoreboardSource {
       clock: r.clock,
       latestSeq: Number(r.lastSeq),
       observedAt: r.observedAt ? r.observedAt.toISOString() : null,
+      replay: r.replay,
       changedAt: r.changedAt,
     }));
   }

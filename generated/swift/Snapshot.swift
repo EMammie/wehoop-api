@@ -53,6 +53,7 @@ public struct Snapshot: Codable, Hashable, Sendable {
         public let clockAsOf: String?
         public let observedAt: String?
         public let elamTargetScore: Int?
+        public let replay: ReplayKind?
 
         public init(
             id: String,
@@ -70,7 +71,8 @@ public struct Snapshot: Codable, Hashable, Sendable {
             clockRunning: Bool?,
             clockAsOf: String?,
             observedAt: String?,
-            elamTargetScore: Int?
+            elamTargetScore: Int?,
+            replay: ReplayKind?
         ) {
             self.id = id
             self.league = league
@@ -88,6 +90,7 @@ public struct Snapshot: Codable, Hashable, Sendable {
             self.clockAsOf = clockAsOf
             self.observedAt = observedAt
             self.elamTargetScore = elamTargetScore
+            self.replay = replay
         }
     }
 

@@ -14,6 +14,7 @@ public struct Pulse: Codable, Hashable, Sendable {
     public let clockRunning: Bool?
     public let clockAsOf: String?
     public let observedAt: String
+    public let replay: ReplayKind?
 
     public init(
         v: Int,
@@ -25,7 +26,8 @@ public struct Pulse: Codable, Hashable, Sendable {
         clockDecimal: String?,
         clockRunning: Bool?,
         clockAsOf: String?,
-        observedAt: String
+        observedAt: String,
+        replay: ReplayKind?
     ) {
         self.v = v
         self.type = type
@@ -37,5 +39,6 @@ public struct Pulse: Codable, Hashable, Sendable {
         self.clockRunning = clockRunning
         self.clockAsOf = clockAsOf
         self.observedAt = observedAt
+        self.replay = replay
     }
 }

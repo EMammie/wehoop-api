@@ -82,13 +82,28 @@ describe('view rows match the Zod contract', () => {
             labels.map((r) => r.l),
           );
         } else if (z.kind === 'enum' && c.udt_name === 'text') {
-          // A closed set over a text column (v_leaders.category): the labels the view's
-          // definition enumerates and the Zod entries must be the same set.
-          const [def] = await sql<{ d: string }[]>`
-            select pg_get_viewdef(${`public.${view}`}::regclass) as d`;
-          const literals = new Set(
-            [...(def?.d ?? '').matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1] as string),
+          // A closed set over a text column. A pass-through column closed by a CHECK on its base
+          // table (v_schedule.replay: games.replay, 0014) takes the constraint's labels; otherwise
+          // (v_leaders.category) the labels the view's definition enumerates. Either way the
+          // labels and the Zod entries must be the same set.
+          const checks = await sql<{ d: string }[]>`
+            select pg_get_constraintdef(k.oid) as d
+            from information_schema.view_column_usage u
+            join pg_constraint k on k.conrelid = format('%I.%I', u.table_schema, u.table_name)::regclass
+            where u.view_schema = 'public' and u.view_name = ${view} and u.column_name = ${c.column_name}
+              and k.contype = 'c' and pg_get_constraintdef(k.oid) like ${`%(${c.column_name} %`}`;
+          let literals = new Set(
+            checks.flatMap((k) =>
+              [...k.d.matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1] as string),
+            ),
           );
+          if (literals.size === 0) {
+            const [def] = await sql<{ d: string }[]>`
+              select pg_get_viewdef(${`public.${view}`}::regclass) as d`;
+            literals = new Set(
+              [...(def?.d ?? '').matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1] as string),
+            );
+          }
           expect([...literals].sort(), `${view}.${c.column_name} labels`).toEqual(
             [...(z.entries ?? [])].sort(),
           );

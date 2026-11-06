@@ -21,6 +21,7 @@ import {
   ShotLocationSchema,
 } from '../model/live-event.js';
 import { PulseSchema } from '../model/pulse.js';
+import { ReplayKindSchema } from '../model/replay.js';
 import { ScoreboardDeltaSchema, ScoreboardSchema } from '../model/scoreboard.js';
 import { ChangesPageSchema, SnapshotSchema } from '../model/snapshot.js';
 import {
@@ -59,6 +60,12 @@ export const CONTRACTS: readonly ContractEntry[] = [
   { name: 'PeriodType', schema: PeriodTypeSchema, file: 'Codes', doc: 'game_periods.type' },
   { name: 'GameStatus', schema: GameStatusSchema, file: 'Codes', doc: 'games.status' },
   { name: 'ChangeType', schema: ChangeTypeSchema, file: 'Codes', doc: 'game_changes.change_type' },
+  {
+    name: 'ReplayKind',
+    schema: ReplayKindSchema,
+    file: 'Codes',
+    doc: 'games.replay: a demo replay (recorded | synthetic); null for a real game (rev 4.15)',
+  },
 
   // Live event bodies
   {

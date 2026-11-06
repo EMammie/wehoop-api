@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { GameChangeSchema, StatsPlayerBodySchema, StatsTeamBodySchema } from './game-change.js';
 import { GameStatusSchema, LiveEventSchema, PeriodRefSchema, ScoreSchema } from './live-event.js';
+import { ReplayKindSchema } from './replay.js';
 
 /**
  * GET /v1/games/:id/snapshot (plan §5). Produced from ONE REPEATABLE READ
@@ -24,6 +25,8 @@ export const SnapshotSchema = z.object({
     clockAsOf: z.iso.datetime({ offset: true }).nullable(),
     observedAt: z.iso.datetime({ offset: true }).nullable(),
     elamTargetScore: z.int().positive().nullable(),
+    /** `games.replay`: a demo replay (rev 4.15), null for a real game. */
+    replay: ReplayKindSchema.nullable(),
   }),
   periods: z.array(PeriodRefSchema.extend({ score: ScoreSchema })),
   /** The same provider-keyed bodies the stats_* changes carry, so a fold reproduces the snapshot. */
