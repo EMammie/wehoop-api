@@ -12,6 +12,7 @@
     "test:int": "VITEST_INTEGRATION=1 vitest run",
     "invariants": "tsx src/bin/invariants.ts",
     "dev:api": "tsx watch src/bin/api.ts",
+    "api": "tsx src/bin/api.ts",
     "dev:worker": "tsx src/bin/worker.ts",
     "sim": "tsx src/bin/sim.ts",
     "subscribe": "tsx src/bin/subscribe.ts",

@@ -235,7 +235,7 @@ export function loadConfig(source: Record<string, string | undefined> = process.
   if (e.MODE === 'production' && e.SPORTRADAR_ACCESS_LEVEL !== 'production') {
     problems.push('SPORTRADAR_ACCESS_LEVEL must be "production" when MODE=production');
   }
-  if (e.SPORTRADAR_BASE_URL !== SPORTRADAR_DEFAULT_BASE_URL) {
+  if (e.SPORTRADAR_BASE_URL !== SPORTRADAR_DEFAULT_BASE_URL && e.MODE !== 'demo') {
     if (e.MODE === 'production') {
       problems.push(
         `SPORTRADAR_BASE_URL must be ${SPORTRADAR_DEFAULT_BASE_URL} when MODE=production (the override exists for local rehearsal servers only)`,
@@ -260,7 +260,14 @@ export function loadConfig(source: Record<string, string | undefined> = process.
   // rehearsal (loopback SPORTRADAR_BASE_URL) spends nothing and is exempt.
   const rehearsal = e.SPORTRADAR_BASE_URL !== SPORTRADAR_DEFAULT_BASE_URL;
   const devStackDb = isDevStackUrl(e.DATABASE_URL) || isDevStackUrl(sessionUrl);
-  if (e.MODE !== 'sim' && !rehearsal && devStackDb && e.TRIAL_ALLOW_DEV_DB !== '1') {
+  // MODE=demo spends nothing whatever its base URL; its own rules above say what is wrong.
+  if (
+    e.MODE !== 'sim' &&
+    e.MODE !== 'demo' &&
+    !rehearsal &&
+    devStackDb &&
+    e.TRIAL_ALLOW_DEV_DB !== '1'
+  ) {
     problems.push(
       `DATABASE_URL points at the dev/integration stack (${describeDbUrl(e.DATABASE_URL)}) while MODE=${e.MODE} would spend real quota: \`supabase db reset\` and \`pnpm test:int\` erase that database, and with it the quota ledger (provider_calls, reservations, verified limits, rate slots) while Sportradar still counts every call. Point DATABASE_URL / DATABASE_SESSION_URL / SUPABASE_* at the persistent trial stack (\`pnpm trial:db start\`, port 55322, see .env.example) or set TRIAL_ALLOW_DEV_DB=1 to accept the loss`,
     );

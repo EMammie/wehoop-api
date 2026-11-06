@@ -459,8 +459,9 @@ where g.replay is not null
 -- check: replay_ids_are_always_labelled | expect: 0
 -- Rev 4.15 review: a game whose provider id has the demo slot shape was created from the demo
 -- host, whose provenance row precedes every listing; an unlabelled one means it was created
--- without that row (the purge / re-list race the host's re-check closes).
+-- without that row (the purge / re-list race the host's re-check closes). `check-replay-...` is a
+-- `pnpm demo verify-slot` check game, labelled the same way (its provenance row precedes it).
 select count(*)
 from public.games g
-where g.provider_game_id ~ '^replay-[0-9a-f]{8}-[0-9]{12}$'
+where g.provider_game_id ~ '^(check-)?replay-[0-9a-f]{8}-[0-9]{12}$'
   and g.replay is null;

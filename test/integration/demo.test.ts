@@ -7,7 +7,7 @@ import { loadSnapshot } from '../../src/api/routes/snapshot.js';
 import { type Config, loadConfig } from '../../src/config.js';
 import { ensureGame } from '../../src/ingest/apply-changes.js';
 import { DEMO_QUOTA_LIMIT, demoInit } from '../../src/ingest/demo-init.js';
-import { demoMaintenance, purgeReplayGames } from '../../src/ingest/demo-purge.js';
+import { demoMaintenance, purgeCheckGame, purgeReplayGames } from '../../src/ingest/demo-purge.js';
 import {
   assertEnvironment,
   EnvironmentRefusedError,
@@ -19,6 +19,7 @@ import {
 import { GameWatcher, replayRecording } from '../../src/ingest/game-watcher.js';
 import { QuotaGuard } from '../../src/ingest/quota-guard.js';
 import { endRun, startRun } from '../../src/ingest/runs.js';
+import { loadSchedulerGames } from '../../src/ingest/scheduler.js';
 import { planDay } from '../../src/ingest/trial-mode.js';
 import { wnbaAdapter } from '../../src/leagues/wnba/adapter.js';
 import { buildPulse } from '../../src/live/pulse.js';
@@ -219,6 +220,78 @@ const fail = (): never => {
   throw new Error('missing');
 };
 
+describe('demo verify-slot', () => {
+  const cli = (args: string[]) =>
+    spawnSync(process.execPath, ['--import', 'tsx', 'src/bin/demo.ts', 'verify-slot', ...args], {
+      cwd: new URL('../../', import.meta.url).pathname,
+      env: { ...process.env, SPORTRADAR_BASE_URL: 'http://127.0.0.1:8790', LOG_LEVEL: 'error' },
+      encoding: 'utf8',
+    });
+  const checkId = () => `check-${slot.providerGameId}`;
+  const checkRows = async () => {
+    const [r] = await db<{ games: number; slots: number; replay: string | null }[]>`
+      select (select count(*)::int from public.games where provider_game_id = ${checkId()}) as games,
+             (select count(*)::int from ingest.replay_slots where provider_game_id = ${checkId()}) as slots,
+             (select replay from public.games where provider_game_id = ${checkId()}) as replay`;
+    return r;
+  };
+
+  it('PASS on the closed slot: replays it polling-only into a labelled check game, compares, purges it', async () => {
+    expect(gameId).not.toBe('');
+    const out = cli(['--slot', slot.providerGameId]);
+    expect(out.status, out.stderr).toBe(0);
+    expect(out.stdout).toMatch(
+      new RegExp(
+        `verify-slot ${slot.providerGameId}: PASS \\(\\d+ events, \\d+ periods, 2 team and \\d+ player stat lines, score, status\\)`,
+      ),
+    );
+    expect(out.stdout).toMatch(/purged/);
+    expect(await checkRows()).toEqual({ games: 0, slots: 0, replay: null });
+  }, 120_000);
+
+  it('--keep leaves the check game labelled with its own provenance (the label invariants hold)', async () => {
+    const out = cli(['--slot', slot.providerGameId, '--keep']);
+    expect(out.status, out.stderr).toBe(0);
+    expect(await checkRows()).toEqual({ games: 1, slots: 1, replay: 'recorded' });
+    const [unlabelled] = await db<{ n: number }[]>`
+      select count(*)::int as n from public.games
+      where provider_game_id ~ '^(check-)?replay-[0-9a-f]{8}-[0-9]{12}$' and replay is null`;
+    expect(unlabelled?.n).toBe(0);
+    // A rerun replaces the kept check game; the scheduler never loads a check game.
+    const [check] = await db<{ id: string }[]>`
+      select id from public.games where provider_game_id = ${checkId()}`;
+    const loaded = await loadSchedulerGames(
+      db,
+      'wnba',
+      {
+        from: new Date(TIP - 86_400_000),
+        to: new Date(TIP + 86_400_000),
+        completeFrom: new Date(0),
+      },
+      { replayOnly: true },
+    );
+    expect(loaded.some((g) => g.id === check?.id)).toBe(false);
+    expect(loaded.some((g) => g.id === gameId)).toBe(true);
+    await purgeCheckGame(db, log, { id: check?.id ?? '', providerGameId: checkId() });
+    expect(await checkRows()).toEqual({ games: 0, slots: 0, replay: null });
+  }, 120_000);
+
+  it('refuses a slot that is not closed, and an unknown one (exit 65)', async () => {
+    const [open] = await db<{ id: string }[]>`
+      select provider_game_id as id from public.games
+      where replay is not null and status <> 'closed' and provider_game_id like 'replay-93ee7c68-20270110%'
+      limit 1`;
+    if (open) {
+      const out = cli(['--slot', open.id]);
+      expect(out.status).toBe(65);
+      expect(out.stderr).toMatch(/verify-slot needs a closed slot/);
+    }
+    const unknown = cli(['--slot', 'replay-93ee7c68-209901010500']);
+    expect(unknown.status).toBe(65);
+    expect(unknown.stderr).toMatch(/no demo game with provenance/);
+  }, 120_000);
+});
+
 describe('demo purge', () => {
   it('skips a game with unpublished outbox rows, then deletes the game and every dependent row in one transaction', async () => {
     expect(gameId).not.toBe('');
@@ -269,12 +342,18 @@ describe('demo purge', () => {
     // even with --all.
     const listed = await purge({ gameIds: [gameId], now: () => new Date(TIP + 3 * 3_600_000) });
     expect(listed.candidates).toBe(0);
+    expect(listed.leftAlone).toEqual([
+      expect.objectContaining({ gameId, reason: 'inside the listing horizon' }),
+    ]);
     // Closed but not quiet since the cutoff: not yet eligible.
     const young = await purge({
       gameIds: [gameId],
       olderThan: new Date(Date.now() - 7 * 86_400_000),
     });
     expect(young.candidates).toBe(0);
+    expect(young.leftAlone).toEqual([
+      expect.objectContaining({ gameId, reason: 'closed, not quiet since the cutoff' }),
+    ]);
     // A dry run reports exactly what a real run deletes and deletes nothing.
     const dry = await purge({ gameIds: [gameId], dryRun: true });
     expect(await dependents(gameId, runIds)).toEqual(before);
@@ -313,6 +392,9 @@ describe('demo purge', () => {
       now: () => new Date(TIP + 20 * 3_600_000),
     });
     expect(resumable.candidates).toBe(0);
+    expect(resumable.leftAlone).toEqual([
+      expect.objectContaining({ gameId: recreated.id, reason: 'inside the 30 h resume window' }),
+    ]);
     const neverClosed = await purge({
       gameIds: [recreated.id],
       olderThan: new Date(TIP + 86_400_000),

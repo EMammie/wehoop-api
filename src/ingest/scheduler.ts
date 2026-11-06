@@ -245,7 +245,9 @@ export interface GameRange {
  * watched (for its final) like a resumed one.
  *
  * `replayOnly` (demo mode, rev 4.15): only games labelled `games.replay`; the demo host has no
- * documents for any other game, so watching one would only fail and retry.
+ * documents for any other game, so watching one would only fail and retry. `pnpm demo verify-slot`
+ * check games (`check-replay-...`, labelled too) are never watched: the host has no documents for
+ * them and their only writer is the verify run.
  */
 export async function loadSchedulerGames(
   db: Db,
@@ -266,7 +268,7 @@ export async function loadSchedulerGames(
            ) end as "completedAt"
     from public.games g
     where g.league = ${league}
-      and ${opts.replayOnly ? db`g.replay is not null` : db`true`}
+      and ${opts.replayOnly ? db`g.replay is not null and g.provider_game_id not like 'check-%'` : db`true`}
       and (g.scheduled_at between ${range.from} and ${range.to}
            or (g.status = 'complete' and g.scheduled_at between ${range.completeFrom} and ${range.to}))
     order by g.scheduled_at, g.id`;

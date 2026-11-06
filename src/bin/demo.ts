@@ -5,6 +5,7 @@ import { isDevStackUrl, loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { demoInit } from '../ingest/demo-init.js';
 import { purgeReplayGames } from '../ingest/demo-purge.js';
+import { VerifyRefusedError, verifySlot } from '../ingest/demo-verify.js';
 import { assertEnvironment, EnvironmentRefusedError } from '../ingest/environment.js';
 import { parseClosedBefore } from '../ingest/retention.js';
 import { openWorkerRuntime, runScheduler } from '../ingest/worker-runtime.js';
@@ -47,6 +48,12 @@ import { lockDestination } from '../providers/sportradar/destination-guard.js';
  *   pnpm demo purge --older-than 7d | --all [--dry-run]
  *     Delete closed replay games quiet for that long with every dependent row (demo-purge.ts).
  *     Demo databases and the dev stack only.
+ *   pnpm demo verify-slot --slot <replay slot id> [--keep]
+ *     The polling-only comparison (demo-verify.ts): replay the closed slot's shifted documents
+ *     in-process into a check game `check-<slot id>` and compare the canonical state (events,
+ *     periods, score, status, team and player stats). PASS exit 0, FAIL exit 1 with the first
+ *     differences, refused (not closed, unknown) exit 65. No ingester lock: safe next to
+ *     `demo run`. The check game is purged afterwards unless --keep.
  *   pnpm demo epoch --speed N [--lead 12] [--league wnba]
  *     Print the --epoch that puts a compressed clock --lead demo minutes before the next slot
  *     (the restart rehearsal starts there; every process of it must use the same value).
@@ -77,6 +84,7 @@ async function main() {
       'game-id': { type: 'string' },
       out: { type: 'string' },
       lead: { type: 'string' },
+      keep: { type: 'boolean', default: false },
     },
     allowPositionals: true,
     strict: true,
@@ -141,8 +149,8 @@ async function main() {
     );
     return;
   }
-  if (cmd !== 'run' && cmd !== 'init' && cmd !== 'purge') {
-    usage('usage: pnpm demo run|init|purge|epoch|export-slot (see src/bin/demo.ts)');
+  if (cmd !== 'run' && cmd !== 'init' && cmd !== 'purge' && cmd !== 'verify-slot') {
+    usage('usage: pnpm demo run|init|purge|verify-slot|epoch|export-slot (see src/bin/demo.ts)');
   }
 
   // `pnpm demo` is demo mode by definition, whatever MODE the shell exported (.env says sim).
@@ -201,6 +209,25 @@ async function main() {
     process.exit(65);
   }
 
+  if (cmd === 'verify-slot') {
+    if (!args.slot) usage('verify-slot needs --slot <replay slot id>');
+    try {
+      const v = await verifySlot(db, log, args.slot ?? '', { keep: args.keep });
+      const what = `${v.compared.events} events, ${v.compared.periods} periods, ${v.compared.teamStats} team and ${v.compared.playerStats} player stat lines, score, status`;
+      console.log(
+        `verify-slot ${v.slotGameId}: ${v.ok ? 'PASS' : 'FAIL'} (${what}) against a polling-only replay of the same shifted slot, check game ${v.checkProviderGameId} ${v.kept ? `kept (${v.checkGameId})` : 'purged'}`,
+      );
+      for (const d of v.differences) console.log(`  differs: ${d}`);
+      await db.end({ timeout: 2 });
+      process.exit(v.ok ? 0 : 1);
+    } catch (err) {
+      if (!(err instanceof VerifyRefusedError)) throw err;
+      console.error(`verify-slot refused: ${err.message}`);
+      await db.end({ timeout: 2 });
+      process.exit(65);
+    }
+  }
+
   if (cmd === 'purge') {
     if (!args.all && !args['older-than']) usage('purge needs --older-than <7d|ISO> or --all');
     const olderThan = args.all ? null : parseClosedBefore(args['older-than'] ?? '');
@@ -223,8 +250,20 @@ async function main() {
     }
     for (const s of out.skipped)
       console.log(`skipped ${s.providerGameId} (${s.gameId}): ${s.reason}`);
+    // Every replay game left alone, grouped by the rule that kept it (in-transaction skips too).
+    const kept = new Map<string, string[]>();
+    const group = (reason: string) => reason.replace(/\s*\(.*$/, '').replace(/: .*$/, '');
+    for (const g of [...out.leftAlone, ...out.skipped]) {
+      const list = kept.get(group(g.reason)) ?? [];
+      list.push(g.providerGameId);
+      kept.set(group(g.reason), list);
+    }
+    for (const [reason, list] of kept)
+      console.log(
+        `left alone ${String(list.length).padStart(4)}  ${reason}: ${list.slice(0, 5).join(', ')}${list.length > 5 ? ', ...' : ''}`,
+      );
     console.log(
-      `demo purge${out.dryRun ? ' --dry-run' : ''}: ${out.candidates} replay game(s) past the listing horizon (${Math.round(listingHorizonMs(known) / 60_000)} min) ${olderThan ? `closed and quiet, or never closed, since ${olderThan.toISOString()}` : '(--all)'}, ${out.purged.length} ${verb}, ${out.skipped.length} skipped, ${out.orphanSlots} provenance row(s) without a game ${out.dryRun ? 'would be ' : ''}removed${isDevStackUrl(config.db.url) ? ' [dev stack]' : ''}`,
+      `demo purge${out.dryRun ? ' --dry-run' : ''}: ${out.candidates} replay game(s) past the listing horizon (${Math.round(listingHorizonMs(known) / 60_000)} min) ${olderThan ? `closed and quiet, or never closed, since ${olderThan.toISOString()}` : '(--all)'}, ${out.purged.length} ${verb}, ${out.skipped.length + out.leftAlone.length} left alone, ${out.orphanSlots} provenance row(s) without a game ${out.dryRun ? 'would be ' : ''}removed${isDevStackUrl(config.db.url) ? ' [dev stack]' : ''}`,
     );
     await db.end({ timeout: 2 });
     return;

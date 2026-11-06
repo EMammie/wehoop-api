@@ -196,6 +196,20 @@ describe('MODE=demo configuration', () => {
       );
   });
 
+  it('reports only the demo problems (not the trial ledger message) for api.sportradar.com on the dev stack', () => {
+    let message = '';
+    try {
+      demoConfig({ SPORTRADAR_BASE_URL: 'https://api.sportradar.com', SPORTRADAR_WNBA_KEY: 'k' });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/MODE=demo refuses to start with a Sportradar key set/);
+    expect(message).toMatch(/MODE=demo needs SPORTRADAR_BASE_URL/);
+    expect(message).not.toMatch(/would spend real quota/);
+    expect(message).not.toMatch(/may only point at a loopback host/);
+    expect(message.trim().split('\n')).toHaveLength(3); // header + the two demo problems
+  });
+
   it('refuses api.sportradar.com, an unset base URL, and anything but http://<loopback>:<port>', () => {
     expect(() => demoConfig({ SPORTRADAR_BASE_URL: 'https://api.sportradar.com' })).toThrow(
       /MODE=demo needs SPORTRADAR_BASE_URL = the in-process demo host/,
