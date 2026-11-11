@@ -431,9 +431,16 @@ them once they are older than the cutoff. Demo databases and the dev stack only.
 deletes `game_changes`. Switching to production selects the production app and project; it never
 depends on a purge.
 
-### Hosted demo (NOT RUN; waits on the owner's go and a demo Supabase project)
+### Hosted demo (deployed 2026-11-11: Supabase `wehoop-demo` + Fly app `wehoop-demo`, https://wehoop-demo.fly.dev)
 
-Every command below needs a cloud project or Fly and has **not** been run.
+Steps 1-3 ran on 2026-11-11 on the owner's go (evidence: Wehoop `devlog/evidence/M5.md`, "B4 hosted
+demo"). Differences from the commands below: `demo init` ran from a Mac through the session pooler
+for both URLs (the direct host is IPv6-only); the secrets came from `~/wehoop-demo.env` via
+`fly secrets import` (no SPORTRADAR_* line); `fly deploy -c fly.demo.toml --ha=false`. Step 4 (weekly
+purge) has not run. **Known issue**: the compact fixtures sample summaries sparser than pbp, so the
+demo host can serve a summary minutes older than the pbp it just served, and a score scored in
+between flickers down and back (`status` changes 57-28 -> 55-28 -> 57-28 on the first hosted slot);
+the recording itself has no lagging summary, and the M3 live runs show no such flicker.
 
 ```
 # 1. Its own Supabase project (never the production one), migrations 0001..0014:
