@@ -86,14 +86,14 @@ export const RECORDED_ROTATION: readonly RotationEntry[] = [
     league: 'wnba',
     recordingId: '93ee7c68-28d8-4ae8-b54a-974a551aa1f6',
     rec8: '93ee7c68',
-    fixture: 'fixtures/wnba/sim-93ee7c68-replay.compact.jsonl.gz',
+    fixture: 'fixtures/wnba/sim-93ee7c68-replay.demo.jsonl.gz',
     provenance: 'recorded',
   },
   {
     league: 'ncaawb',
     recordingId: 'd9b71fe0-0cbf-11f1-bf29-5913e6df42d2',
     rec8: 'd9b71fe0',
-    fixture: 'fixtures/ncaawb/sim-d9b71fe0-replay.compact.jsonl.gz',
+    fixture: 'fixtures/ncaawb/sim-d9b71fe0-replay.demo.jsonl.gz',
     provenance: 'recorded',
   },
 ];

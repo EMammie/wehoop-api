@@ -9,15 +9,20 @@ const FIXTURES = join(import.meta.dirname, '../../../fixtures');
 /**
  * Fixture files `pnpm seed:dev` does not list because they are not documents to
  * load on their own: moments cut from a replay the manifest does load, push
- * stream samples (no REST document), and documents a listed replay file already
- * carries byte-identical. A new fixture must land in the manifest or here.
+ * stream samples (no REST document), documents a listed replay file already
+ * carries byte-identical, and the demo rotation's aligned re-samples (`*.demo.jsonl.gz`,
+ * the same game as the compact replay, served only by the demo host). A new fixture
+ * must land in the manifest or here.
  */
 const NOT_SEEDED_DIRECTLY: Record<string, (file: string) => boolean> = {
   wnba: (f) =>
     /^sim-93ee7c68-(pbp|summary|boxscore)-.*\.json$/.test(f) || // moments of the compact replay
     /^sim-93ee7c68-push-.*-sample\.json$/.test(f) || // push samples, not REST documents
-    f === 'docs-player-profile-boston.json', // in docs-identity-replay.jsonl
-  ncaawb: (f) => /^sim-d9b71fe0-(pbp|summary|boxscore)-.*\.json$/.test(f),
+    f === 'docs-player-profile-boston.json' || // in docs-identity-replay.jsonl
+    f === 'sim-93ee7c68-replay.demo.jsonl.gz', // demo rotation only (same game as the compact)
+  ncaawb: (f) =>
+    /^sim-d9b71fe0-(pbp|summary|boxscore)-.*\.json$/.test(f) ||
+    f === 'sim-d9b71fe0-replay.demo.jsonl.gz', // demo rotation only (same game as the compact)
   unrivaled: (f) =>
     /^docs-838316ea-(pbp|summary|boxscore)-.*\.json$/.test(f) || // in docs-838316ea-replay.jsonl
     f === 'docs-player-profile-collier.json' || // in docs-838316ea-replay.jsonl
