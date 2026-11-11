@@ -51,25 +51,44 @@ const warnings: string[] = [];
 const log = new Proxy(silentLog, {
   get(target, prop, receiver) {
     if (prop === 'warn')
-      return (_o: unknown, msg?: string) => {
-        if (msg) warnings.push(msg);
+      return (o: unknown, msg?: string) => {
+        if (msg)
+          warnings.push(msg.startsWith('replay slot not') ? `${msg} ${JSON.stringify(o)}` : msg);
       };
     return Reflect.get(target, prop, receiver);
   },
 }) as Logger;
 
+/**
+ * Remove the test's games WITH their provenance rows. The watcher here runs without a publisher,
+ * so its outbox rows stay unpublished and purge would skip those games (leaving them labelled
+ * with no provenance row, which `replay_games_have_matching_provenance` catches): they are marked
+ * published first. A provenance row is deleted directly only for a slot that has no game row.
+ */
 async function clean() {
   const games = await db<{ id: string }[]>`
     select id from public.games where league = 'wnba' and provider_game_id in ${db(ids)}`;
-  if (games.length)
-    await purgeReplayGames(db, silentLog, {
+  if (games.length) {
+    const gameIds = games.map((g) => g.id);
+    await db`update ingest.broadcast_outbox set published_at = now()
+             where game_id in ${db(gameIds)} and published_at is null`;
+    const out = await purgeReplayGames(db, silentLog, {
       olderThan: null,
       dryRun: false,
-      gameIds: games.map((g) => g.id),
+      gameIds,
       listingHorizonMs: 0,
       now: () => new Date(TIP + 30 * 86_400_000),
     });
-  await db`delete from ingest.replay_slots where league = 'wnba' and provider_game_id in ${db(ids)}`;
+    expect(out.purged.map((p) => p.gameId).sort()).toEqual([...gameIds].sort());
+  }
+  await db`delete from ingest.replay_slots s
+           where s.league = 'wnba' and s.provider_game_id in ${db(ids)}
+             and not exists (select 1 from public.games g
+                             where g.league = s.league and g.provider_game_id = s.provider_game_id)`;
+  const [left] = await db<{ games: number; slots: number }[]>`
+    select (select count(*)::int from public.games where provider_game_id in ${db(ids)}) as games,
+           (select count(*)::int from ingest.replay_slots where provider_game_id in ${db(ids)}) as slots`;
+  expect(left).toEqual({ games: 0, slots: 0 });
 }
 const shaOf = async (id: string) =>
   (
@@ -133,7 +152,10 @@ describe('re-pointing unplayed replay slots to a new fixture', () => {
       log: silentLog,
     });
     const compactSha = old.recordings.get('93ee7c68')?.sha256 ?? '';
-    for (const s of [A, B, C, D]) await old.ensureProvenance(s);
+    // The old host's own slots (same ids and tip-offs, its rotation entry: the compact file).
+    const asOld = (s: Slot) => slotAt(s.k, COMPACT, DEFAULT_INTERVAL_MS);
+    for (const s of [A, B, C, D]) await old.ensureProvenance(asOld(s));
+    expect((await shaOf(A.providerGameId))?.path).toBe(COMPACT[0]?.fixture);
     await playFirst(old, A, 60);
     await playFirst(old, C, 3);
     await old.close();
@@ -172,7 +194,7 @@ describe('re-pointing unplayed replay slots to a new fixture', () => {
       expect((await pbp(A)).status).toBe(409);
       expect((await shaOf(A.providerGameId))?.sha).toBe(compactSha);
       // B (no game row) and C (pregame game row, last_seq may be > 0): re-pointed, served.
-      expect((await pbp(B)).status).toBe(200);
+      expect((await pbp(B)).status, warnings.join(' | ')).toBe(200);
       expect((await pbp(C)).status).toBe(200);
       expect(await shaOf(B.providerGameId)).toEqual({ sha: demoSha, path: demoEntry.fixture });
       expect(await shaOf(C.providerGameId)).toEqual({ sha: demoSha, path: demoEntry.fixture });
