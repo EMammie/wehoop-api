@@ -237,10 +237,10 @@ async function main() {
     sessionId = args.session ?? null;
     if (!sessionId && !args['new-session']) {
       const [prev] = await db<{ id: string; sessionId: string | null }[]>`
-        select id::text, meta->>'sessionId' as "sessionId" from ingest.ingestion_runs
-        where kind = 'replay' and source = 'simulation' and id = any(${orphanedIds})
-          and meta->>'recordingId' = ${args.recording}
-        order by id desc limit 1`;
+        select r.id::text, r.meta->>'sessionId' as "sessionId" from ingest.ingestion_runs r
+        where r.kind = 'replay' and r.source = 'simulation' and r.id = any(${orphanedIds})
+          and r.meta->>'recordingId' = ${args.recording}
+        order by r.id desc limit 1`;
       if (prev?.sessionId) {
         sessionId = prev.sessionId;
         log.warn(
