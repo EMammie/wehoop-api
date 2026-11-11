@@ -179,7 +179,17 @@ describe('checkServed', () => {
       summary: [tv(0, 55), tv(10, 57), tv(20, 0, 2)],
       push_clock: [tv(0, 55), tv(10, null), tv(20, 0, 2)],
     });
-    expect(r).toEqual({ instants: 3, disagreements: [], drops: [] });
+    expect(r).toEqual({ instants: 3, disagreements: [], drops: [], phaseRegressions: [] });
+  });
+
+  it('finds a phase served behind the furthest one (a period back, closed then complete)', () => {
+    const r = checkServed({
+      pbp: [tv(0, 10, 2), tv(10, 12, 1), tv(20, 90, 4, 'closed'), tv(30, 90, 4, 'complete')],
+    });
+    expect(r.phaseRegressions).toEqual([
+      { at: 10, source: 'pbp', from: 'inprogress p2', to: 'inprogress p1' },
+      { at: 30, source: 'pbp', from: 'closed p4', to: 'complete p4' },
+    ]);
   });
 
   it('counts a genuine correction once', () => {

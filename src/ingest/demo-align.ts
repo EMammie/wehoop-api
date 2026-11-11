@@ -318,7 +318,22 @@ export interface ServedCheck {
   disagreements: Array<{ at: number; views: Record<string, string> }>;
   /** Same-period score decreases against the highest score served so far in that period. */
   drops: ServedDrop[];
+  /**
+   * A view behind the furthest phase served so far: a lower period sequence, or a less final
+   * status (`complete` after `closed`, `inprogress` after `complete`, pregame after play).
+   */
+  phaseRegressions: Array<{ at: number; source: string; from: string; to: string }>;
 }
+
+/** Order of finality; a status outside it (delayed, postponed, ...) is not ranked. */
+const STATUS_RANK: Record<string, number> = {
+  scheduled: 0,
+  created: 0,
+  inprogress: 1,
+  halftime: 1,
+  complete: 2,
+  closed: 3,
+};
 
 export const timedViewOf = (at: number, k: ViewKey): TimedView => ({
   at,
@@ -336,7 +351,8 @@ export const timedViewOf = (at: number, k: ViewKey): TimedView => ({
  * source changes: (1) every pair of sources must agree, else a poller could read them in an
  * order that lowers the score; (2) no source may serve a lower score in the same period than
  * the highest served before (a drop is recorded once: the running high resets to the lower view,
- * so a genuine provider correction counts once and a flicker counts every time it comes back).
+ * so a genuine provider correction counts once and a flicker counts every time it comes back);
+ * (3) no source may serve a phase behind the furthest served before (period sequence, finality).
  */
 export function checkServed(sources: Record<string, readonly TimedView[]>): ServedCheck {
   const names = Object.keys(sources);
@@ -349,6 +365,12 @@ export function checkServed(sources: Record<string, readonly TimedView[]>): Serv
   const drops: ServedDrop[] = [];
   let period: number | null | undefined;
   let high = { home: -1, away: -1 };
+  const phaseRegressions: ServedCheck['phaseRegressions'] = [];
+  const furthest: { periodSeq: number | null; rank: number; status: string | null } = {
+    periodSeq: null,
+    rank: -1,
+    status: null,
+  };
   const next = names.map(() => 0);
   for (const at of instants) {
     names.forEach((_, s) => {
@@ -372,6 +394,25 @@ export function checkServed(sources: Record<string, readonly TimedView[]>): Serv
       });
     }
     for (const { name, v } of present) {
+      const rank = v.status === null ? undefined : STATUS_RANK[v.status];
+      const behind =
+        (v.periodSeq !== null && furthest.periodSeq !== null && v.periodSeq < furthest.periodSeq) ||
+        (rank !== undefined && rank < furthest.rank);
+      if (behind) {
+        phaseRegressions.push({
+          at,
+          source: name,
+          from: `${furthest.status} p${furthest.periodSeq}`,
+          to: `${v.status} p${v.periodSeq}`,
+        });
+      } else {
+        if (v.periodSeq !== null && (furthest.periodSeq ?? -1) <= v.periodSeq)
+          furthest.periodSeq = v.periodSeq;
+        if (rank !== undefined && rank >= furthest.rank) {
+          furthest.rank = rank;
+          furthest.status = v.status;
+        }
+      }
       if (v.periodSeq !== period) {
         period = v.periodSeq;
         high = { home: v.home ?? -1, away: v.away ?? -1 };
@@ -392,5 +433,5 @@ export function checkServed(sources: Record<string, readonly TimedView[]>): Serv
       }
     }
   }
-  return { instants: instants.length, disagreements, drops };
+  return { instants: instants.length, disagreements, drops, phaseRegressions };
 }

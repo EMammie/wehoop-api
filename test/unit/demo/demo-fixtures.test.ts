@@ -174,22 +174,46 @@ describe.each(RECORDED_ROTATION.map((e) => [e.league, e] as [LeagueCode, Rotatio
       const r = checkServed(servedSources(rec, league));
       expect(r.instants).toBe(expected.groups);
       expect(r.disagreements).toEqual([]);
-      const allowed = RAW_PBP_CORRECTIONS[lg];
-      for (const d of r.drops) {
+      expect(r.phaseRegressions).toEqual([]);
+      // No decrease is served at all: not even the enumerated raw corrections, whose
+      // pre-correction score no group samples (asserted in the next test).
+      expect(r.drops).toEqual([]);
+    });
+
+    it('serves no pre-correction score of an enumerated raw correction (each falls between two groups)', () => {
+      const adapter = adapterFor(league);
+      const pbpViews = rec.docs.pbp.map((d) =>
+        viewKeyOfGameView(gameViewOf(adapter, 'pbp', d.body)),
+      );
+      for (const c of RAW_PBP_CORRECTIONS[lg]) {
+        const served = pbpViews.filter(
+          (v) => v.periodSeq === c.periodSeq && v.home === c.from.home && v.away === c.from.away,
+        );
+        expect(served, c.what).toEqual([]);
+        // ... while the corrected score is served (the game moves on through it).
         expect(
-          allowed.some(
-            (c) =>
-              c.periodSeq === d.periodSeq &&
-              c.from.home === d.from.home &&
-              c.from.away === d.from.away &&
-              c.to.home === d.to.home &&
-              c.to.away === d.to.away,
+          pbpViews.some(
+            (v) => v.periodSeq === c.periodSeq && v.home === c.to.home && v.away === c.to.away,
           ),
+          c.what,
         ).toBe(true);
       }
-      // The NCAAWB correction (99-66 served for 6 s between two groups) is not sampled by any
-      // group, so in fact no decrease is served at all.
-      expect(r.drops).toEqual([]);
+    });
+
+    it('starts with the same first documents as the compact file, whose second documents come after the re-point bound', async () => {
+      // demo-host.ts EnsureOptions: a never-played slot may be re-pointed from the compact file
+      // to this one before tip-off + startOffsetMs, because until then only first documents are
+      // served and they are the same raw lines in both files.
+      const compact = await loadRecording({
+        ...entry,
+        fixture: entry.fixture.replace('.demo.', '.compact.'),
+      });
+      for (const feed of FEEDS) {
+        expect(rec.docs[feed][0]?.body, feed).toEqual(compact.docs[feed][0]?.body);
+        expect(compact.docs[feed][1]?.offsetMs ?? 0, feed).toBeGreaterThan(rec.startOffsetMs);
+        expect(rec.docs[feed][1]?.offsetMs ?? 0, feed).toBeGreaterThan(rec.startOffsetMs);
+      }
+      expect(rec.startOffsetMs).toBeGreaterThan(0); // every slot's bound is after its tip-off
     });
 
     it('the independently sampled compact fixture it replaces DOES flicker (the check is not vacuous)', async () => {
