@@ -318,9 +318,9 @@ What the demo host serves:
 
 | | |
 |---|---|
-| Rotation | one slot every `--interval` (default 180 min) on a fixed grid (`SLOT_ORIGIN` 2026-01-01 00:00 ET + k x interval), today and tomorrow (US Eastern), alternating `fixtures/wnba/sim-93ee7c68-replay.compact.jsonl.gz` and `fixtures/ncaawb/sim-d9b71fe0-replay.compact.jsonl.gz` (`recorded`); `--include-synthetic` adds `fixtures/unrivaled/docs-838316ea-replay.jsonl` (`synthetic`). Each league's daily schedule lists only its own slots, and a slot only until its `closed` document is served: a host started mid-day never creates that morning's finished slots as closed 0-0 games, while a game listed earlier is resumed from the database (the scheduler loads games, not listings) and its documents stay served. |
+| Rotation | one slot every `--interval` (default 180 min) on a fixed grid (`SLOT_ORIGIN` 2026-01-01 00:00 ET + k x interval), today and tomorrow (US Eastern), alternating `fixtures/wnba/sim-93ee7c68-replay.demo.jsonl.gz` and `fixtures/ncaawb/sim-d9b71fe0-replay.demo.jsonl.gz` (`recorded`: the Simulations recordings re-sampled by `pnpm sim align` into groups of pbp + summary + boxscore that agree on the game view and share one request time, fixtures READMEs "Demo fixture"; the M1 `*.compact.jsonl.gz` files, sampled per feed, made the score flicker and are no longer in the rotation); `--include-synthetic` adds `fixtures/unrivaled/docs-838316ea-replay.jsonl` (`synthetic`). Each league's daily schedule lists only its own slots, and a slot only until its `closed` document is served: a host started mid-day never creates that morning's finished slots as closed 0-0 games, while a game listed earlier is resumed from the database (the scheduler loads games, not listings) and its documents stay served. |
 | Identity | `replay-<rec8>-<yyyymmddHHMM>` (tip-off in UTC), from the recording and the slot only. |
-| Timeline | every ISO timestamp shifted by slot tip-off - recorded tip-off (the recording's `scheduled`), recorded game id replaced; a document is served from tip-off + (its request time - the recording's request/game-clock lead - recorded tip-off), so no served revision is later than the moment it is served (WNBA plays begin about 16 min after the tip-off, as in the recorded game; NCAAWB about 3 min). Before the first document: the first (pregame) one; after the last: `closed`. A restarted host serves the same documents at the same moments. |
+| Timeline | every ISO timestamp shifted by slot tip-off - recorded tip-off (the recording's `scheduled`), recorded game id replaced; a document is served from tip-off + (its request time - the recording's request/game-clock lead - recorded tip-off), so no served revision is later than the moment it is served (WNBA plays begin about 16 min after the tip-off, as in the recorded game; NCAAWB about 3 min). Before the first document: the first (pregame) one; after the last: `closed`. A restarted host serves the same documents at the same moments. The three REST feeds change together (one group per moment) and the WNBA push streams are derived from the same pbp documents at the same offsets, so REST and push never serve two game views at once (`test/unit/demo/demo-fixtures.test.ts`). |
 | Spans | WNBA 140 min, NCAAWB 127 min (first document to `closed`); the host refuses an interval at or below the longest span, or below the served windows' footprint (153 min for the default rotation). |
 | Provenance | `ingest.replay_slots` (recording id, fixture path + sha256, recorded game id and tip-off, slot tip-off, shift), upserted (re-checked on every request, never cached) before a slot appears in any document; a different existing row is refused: that slot answers 409 and is left out of its league's listing, the process logs it and carries on. Migration 0014's trigger labels the game row `games.replay` from it when the schedule ingest creates the game. |
 | Label | `replay` (`recorded` / `synthetic` / null) on `v_schedule`, the snapshot's `game`, every `pulse` and every `league:*:scores` delta; generated into Contracts (`ReplayKind`). |
@@ -437,10 +437,29 @@ Steps 1-3 ran on 2026-11-11 on the owner's go (evidence: Wehoop `devlog/evidence
 demo"). Differences from the commands below: `demo init` ran from a Mac through the session pooler
 for both URLs (the direct host is IPv6-only); the secrets came from `~/wehoop-demo.env` via
 `fly secrets import` (no SPORTRADAR_* line); `fly deploy -c fly.demo.toml --ha=false`. Step 4 (weekly
-purge) has not run. **Known issue**: the compact fixtures sample summaries sparser than pbp, so the
-demo host can serve a summary minutes older than the pbp it just served, and a score scored in
-between flickers down and back (`status` changes 57-28 -> 55-28 -> 57-28 on the first hosted slot);
-the recording itself has no lagging summary, and the M3 live runs show no such flicker.
+purge) has not run. **Known issue (fixed in the data, 2026-11-11; NOT yet deployed)**: the compact
+fixtures sampled summaries sparser than pbp, so the demo host served a summary minutes older than
+the pbp it had just served, and a basket scored in between flickered down and back (`status`
+changes 57-28 -> 55-28 -> 57-28 on the first hosted slot; 8 same-period drops on the dev-stack slot
+`replay-93ee7c68-202611070200`). The provider does not do this (the M3 live runs show one genuine
+correction in five games), so the fix is in the demo data, not in the freshness rules: the rotation
+now serves aligned re-samples (`*.demo.jsonl.gz`, `pnpm sim align`), in which every served moment
+shows one game view across pbp, summary, boxscore and push clock. Dev-stack acceptance: one full
+compressed slot per league, 0 same-period score drops among the `status` changes (query below),
+final scores as recorded. **Redeploy note**: `ingest.replay_slots` already holds today's and
+tomorrow's slots with the compact file's sha256, and the host refuses a slot whose stored
+provenance differs (409, left out of the listing), so after the deploy those already-listed slots
+stop being served; slots first listed after the deploy are served from the new files.
+
+```
+q() { docker exec supabase_db_wehoop-api psql -U postgres -Atc "$1"; }   # dev stack; on the demo project use its own psql
+q "with s as (select c.seq, (c.body->'score'->>'home')::int h, (c.body->'score'->>'away')::int a,
+           (c.body->'period'->>'sequence')::int p
+    from public.game_changes c join public.games g on g.id = c.game_id
+    where g.provider_game_id = '$SLOT' and c.change_type = 'status'),
+  x as (select *, lag(h) over w lh, lag(a) over w la, lag(p) over w lp from s window w as (order by seq))
+  select count(*) filter (where p = lp and (h < lh or a < la)) as drops, count(*) as status_changes from x"
+```
 
 ```
 # 1. Its own Supabase project (never the production one), migrations 0001..0014:

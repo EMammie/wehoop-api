@@ -102,10 +102,49 @@ captured responses and describe 2022–2024 seasons.
 
 ## Demo rotation (M5 B4, plan rev 4.15)
 
-`sim-d9b71fe0-replay.compact.jsonl.gz` is the second recording of the demo rotation
-(`src/providers/sportradar/demo-host.ts`), labelled `recorded`, unchanged on disk: timestamps
-shifted by slot tip-off - `2026-02-18T23:30:00+00:00`, game id `2e36b340-9277-4b99-af20-b7ff7e86640e`
-replaced by `replay-d9b71fe0-<yyyymmddHHMM>`; first document served at +3.0 min, `closed` at
-+129.9 min. Span (first document to `closed`): 126.8 min. NCAAWB has no push streams, so a demo
-NCAAWB slot is watched by REST polling (`full` profile). The `extended` relabelled copy is not in
-the rotation.
+`sim-d9b71fe0-replay.demo.jsonl.gz` (below) is the second recording of the demo rotation
+(`src/providers/sportradar/demo-host.ts`), labelled `recorded`: timestamps shifted by slot
+tip-off - `2026-02-18T23:30:00+00:00`, game id `2e36b340-9277-4b99-af20-b7ff7e86640e` replaced by
+`replay-d9b71fe0-<yyyymmddHHMM>`; first document served at +3.1 min, `closed` at +129.9 min. Span
+(first document to `closed`): 126.9 min. NCAAWB has no push streams, so a demo NCAAWB slot is
+watched by REST polling (`full` profile). The `extended` relabelled copy is not in the rotation.
+
+Until 2026-11-11 the rotation served `sim-d9b71fe0-replay.compact.jsonl.gz`, whose feeds are
+sampled on independent strides (64 pbp, 37 summary, 37 boxscore): the host served summaries
+minutes older than the pbp, and the first hosted slot's `status` changes went 57-28 -> 55-28 ->
+57-28 -> 55-28 -> 57-28. The compact file is unchanged and still what M3 evidence, `seed:dev`,
+the goldens and the replay tests use.
+
+## Demo fixture (aligned re-sample, `sim-d9b71fe0-replay.demo.jsonl.gz`)
+
+**Still the Sportradar Simulations recording, only re-sampled with aligned request times**, hence
+labelled `recorded`. Same rule and command as the WNBA one (`fixtures/wnba/README.md`, "Demo
+fixture"; `src/ingest/demo-align.ts`). Raw recording verified before use: 455,957,681 bytes, 3,047
+documents (2,537 pbp / 255 summary / 255 boxscore) as recorded above, sha256
+`bffb23515e209c4e9c8c1425700cecbb2a12aa8b46d887bc3e1a1442dcc1e093`, and `pnpm sim compact` on it
+reproduces the committed compact file byte-identical (sha256 `6a987260…69d8c0`).
+
+```
+pnpm sim align --league ncaawb --in fixtures/ncaawb/sim-d9b71fe0-replay.raw.jsonl \
+  --out fixtures/ncaawb/sim-d9b71fe0-replay.demo.jsonl.gz --every-group 3 --target-mb 4
+```
+
+249 of 255 groups agree across the three feeds; 94 are kept (pregame, every period, halftime,
+`complete`, `closed` 104-68).
+
+Genuine corrections in the raw recording (same-period score decreases in the raw pbp sequence,
+printed by the command above): **one**. Q4 3:15, Michigan State 99-66 -> 98-66 at the pbp
+requested 2026-10-15T01:16:55.907Z (raw line 2,278): Jalyn Brown's "makes regular free throw 2 of
+2" is revised to "misses regular free throw 1 of 1". The 99 stood for two pbp polls (6 s), between
+two groups, so no group samples it: the demo serves 97-66 (recorded 01:16:04) then 98-66
+(01:17:34), no decrease. In raw request order there are 3 further cross-feed decreases of a few seconds, among them a summary at 73-43
+requested right after a pbp at 75-43 (raw line 1,778); none of those lagging documents is in a kept
+group. The served timeline of this file (`test/unit/demo/demo-fixtures.test.ts`, which lists the
+correction above as the only allowed decrease) has 0 moments of disagreement and 0 same-period score
+decreases.
+
+| File | Source | Documents | sha256 |
+|---|---|---|---|
+| `sim-d9b71fe0-replay.demo.jsonl.gz` | `pnpm sim align` of the raw recording as above | 282 documents (94 groups: 94 pbp, 94 summary, 94 boxscore), 2,096,600 bytes | sha256: edc6548afe518bb1d3562465f795adee38a89018fac17aaff6a579da045e2bd9 |
+
+Demo rotation only: `seed:dev`, the goldens and every replay test keep the compact file.

@@ -107,12 +107,70 @@ captured responses.
 
 ## Demo rotation (M5 B4, plan rev 4.15)
 
-`sim-93ee7c68-replay.compact.jsonl.gz` is one of the two recordings the demo host
-(`src/providers/sportradar/demo-host.ts`, `pnpm demo run`) replays, labelled `recorded`. Nothing in
-the file is changed: each slot serves its documents with every ISO timestamp shifted by slot
-tip-off - `2026-06-30T23:00:00+00:00` (the recording's `scheduled`) and the game id
-`40bea3f6-68c0-4f3b-96fa-336dfb7a9034` replaced by `replay-93ee7c68-<yyyymmddHHMM>`, on the slot's
-own clock: the request times (2026-10-14) are mapped onto the game clock by the smallest gap
-between a pbp request and its newest event revision (152,089 min), so the first document is
-served 16.2 min after the slot's tip-off and `closed` at +155.7 min. Span (first document to
-`closed`): 139.5 min. Its sha256 is stored per slot in `ingest.replay_slots`.
+`sim-93ee7c68-replay.demo.jsonl.gz` (below) is one of the two recordings the demo host
+(`src/providers/sportradar/demo-host.ts`, `pnpm demo run`) replays, labelled `recorded`. Each slot
+serves its documents with every ISO timestamp shifted by slot tip-off - `2026-06-30T23:00:00+00:00`
+(the recording's `scheduled`) and the game id `40bea3f6-68c0-4f3b-96fa-336dfb7a9034` replaced by
+`replay-93ee7c68-<yyyymmddHHMM>`, on the slot's own clock: the request times (2026-10-14) are
+mapped onto the game clock by the smallest gap between a pbp request and its newest event revision
+(152,089 min), so the first document is served 16.2 min after the slot's tip-off and `closed` at
++155.7 min. Span (first document to `closed`): 139.5 min. The fixture path and its sha256 are
+stored per slot in `ingest.replay_slots`. The push streams of a demo WNBA slot are derived from the
+same file's pbp documents (`fake-push.ts`, 62 clock lines), at the same offsets.
+
+Until 2026-11-11 the rotation served `sim-93ee7c68-replay.compact.jsonl.gz`. That file samples
+each feed on its own stride (76 pbp, 41 summary, 41 boxscore), so at most moments the host served
+a summary and boxscore minutes older than the pbp, and a watcher reading them in turn wrote the
+score down and back (8 same-period score drops among the `status` changes of the dev-stack slot
+`replay-93ee7c68-202611070200`; measured on the served timeline by
+`test/unit/demo/demo-fixtures.test.ts`: 84 moments at which REST feeds or push clock disagree). The
+compact file is unchanged and still what M1-M4 evidence, `seed:dev`, the goldens and the replay
+tests use.
+
+## Demo fixture (aligned re-sample, `sim-93ee7c68-replay.demo.jsonl.gz`)
+
+**Still the Sportradar Simulations recording, only re-sampled with aligned request times**, hence
+labelled `recorded`. Built from the full raw recording (git-ignored; step 1 of "Replay fixture"),
+verified before use: 1,802,476,345 bytes, 3,350 documents (2,790 pbp / 280 summary / 280
+boxscore) as recorded above, sha256 `daf11da3869b46fb59dc66239a30fb50afdc8fa84473c72f584d913f686c1754`,
+and `pnpm sim compact` on it reproduces the committed compact file byte-identical (sha256
+`7be194ab…481c`).
+
+```
+pnpm sim align --league wnba --in fixtures/wnba/sim-93ee7c68-replay.raw.jsonl \
+  --out fixtures/wnba/sim-93ee7c68-replay.demo.jsonl.gz --every-group 3 --target-mb 4
+```
+
+The rule (`src/ingest/demo-align.ts`, unit-tested in `test/unit/ingest/demo-align.test.ts`):
+
+1. **Groups.** Walking the raw lines in request order, a group closes at the first line at which
+   every game feed has a document requested after the previous group closed; it is the latest
+   pbp, summary and boxscore at that line (the recorder's cycle: every 10th poll, about 30 s).
+2. **Agreement.** A group is eligible only when its three documents give the same game view
+   through the league normalizer (status, current period sequence, home and away points, line
+   score). 262 of 280 groups agree; the 18 others straddle a basket (the feeds update a few
+   seconds apart at the provider) and are dropped.
+3. **Selection** among eligible groups: the first and last; every 3rd (`--every-group`); every
+   group whose phase (status, period) or pbp `deleted_events` set differs from the previous kept
+   one; the last before and the first after every phase change. So pregame, every period,
+   halftime, `complete` and `closed` (93-85) are present.
+4. **Times.** Every document of a kept group gets the group's latest original `requestedAt` and
+   `receivedAt`; the originals are kept on the line as `recordedRequestedAt` / `recordedReceivedAt`
+   (`RecordedDocumentSchema` strips them, so other readers ignore them). The host therefore serves
+   the three documents of one group together, and no served revision is later than the moment it
+   is served. Bodies are the recorded documents, unedited; gzip level 9, deterministic.
+
+Genuine corrections in the raw recording (same-period score decreases in the raw pbp sequence,
+printed by the command above): **none**. In raw request order there are 12 cross-feed decreases of
+a few seconds (a pbp, summary or boxscore requested after another feed that already counted a
+basket); none of those lagging documents is in a kept group (each is in a dropped, disagreeing
+group or is a pbp between two groups, which the file does not carry). The served timeline
+of this file (REST feeds and the push clock merged, `test/unit/demo/demo-fixtures.test.ts`) has
+0 moments of disagreement and 0 same-period score decreases.
+
+| File | Source | Documents | sha256 |
+|---|---|---|---|
+| `sim-93ee7c68-replay.demo.jsonl.gz` | `pnpm sim align` of the raw recording as above | 300 documents (100 groups: 100 pbp, 100 summary, 100 boxscore), 3,909,570 bytes | sha256: a02cf5adc80a9de904732f346e665c53c11fe648b460331f758c01f6d264f72d |
+
+Demo rotation only: `seed:dev`, the goldens and every replay test keep the compact file (a unit
+test in `test/unit/ingest/seed-manifest.test.ts` records why it is not seeded: same game).
