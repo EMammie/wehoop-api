@@ -455,7 +455,10 @@ differs from the rotation's (409, left out of the listing), with one exception a
 switch (`PgProvenanceStore.ensure`, plan rev 4.15 (2)): a slot whose row differs **only** in
 fixture path and sha256 is **re-pointed** to the new file while it is unplayed, i.e. strictly before
 its tip-off + its recording's first-document offset (WNBA +16.2 min, NCAAWB +3.1 min) and with its
-game row, if any, still `scheduled` / `created` with no play events. Until that bound the host has
+game row, if any, still `scheduled` / `created` with no play events, and only after the host has
+checked that the stored file (the compact file, still committed) exists with the stored sha256 and
+serves the same first documents and push lines before that moment (`servesSamePrefix`; otherwise it
+logs `replay slot not re-pointed: …` and the slot stays 409). Until that bound the host has
 served only each feed's first document, the same raw line in both files (a pregame watch, which
 starts 10 min before tip-off, may already have written its changes; they are identical either way).
 Each re-point logs `replay slot re-pointed to a new fixture before play` at warn and counts in
@@ -477,7 +480,8 @@ Sequence:
    rotation the gaps are about 27 min (a WNBA slot's +156 min to the next NCAAWB slot's +3 min)
    and about 66 min (an NCAAWB slot's +130 min to the next WNBA slot's +16 min). Check it right before deploying: `curl -s 127.0.0.1:8790/_demo/status` on the
    worker machine (`fly ssh console -a wehoop-demo`, NOT RUN) lists every slot's `status`; none may
-   be `inprogress`, `halftime` or `complete` (`closed` and `created` are fine). From a machine with
+   be `inprogress`, `halftime` or `complete`; `closed` is fine, and `created` only before its tip-off
+   +16 min (NCAAWB +3 min), after which the slot is no longer re-pointable. From a machine with
    the demo project's URL:
    `select provider_game_id, status from public.games where replay is not null and status in ('inprogress', 'halftime', 'complete')`
    must return no row.

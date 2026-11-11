@@ -20,6 +20,7 @@ import {
   loadRecording,
   RECORDED_ROTATION,
   type RotationEntry,
+  servesSamePrefix,
 } from '../../../src/providers/sportradar/demo-host.js';
 import { buildPushTimelines } from '../../../src/providers/sportradar/fake-push.js';
 import { PushClockMessageSchema } from '../../../src/providers/sportradar/schemas/push.js';
@@ -214,6 +215,24 @@ describe.each(RECORDED_ROTATION.map((e) => [e.league, e] as [LeagueCode, Rotatio
         expect(rec.docs[feed][1]?.offsetMs ?? 0, feed).toBeGreaterThan(rec.startOffsetMs);
       }
       expect(rec.startOffsetMs).toBeGreaterThan(0); // every slot's bound is after its tip-off
+      // The push lines due before the bound (WNBA) are the same lines from both files.
+      if (adapterFor(league).capabilities.pushClock) {
+        const early = (r: LoadedRecording) => {
+          const t = buildPushTimelines(r.docs.pbp);
+          return {
+            events: t.events.filter((l) => l.offsetMs < rec.startOffsetMs),
+            clocks: t.clocks.filter((l) => l.offsetMs < rec.startOffsetMs),
+          };
+        };
+        expect(early(rec)).toEqual(early(compact));
+      }
+      // ... which is what the host checks before it re-points a slot (null = premise holds).
+      expect(
+        await servesSamePrefix(rec, {
+          fixturePath: compact.entry.fixture,
+          fixtureSha256: compact.sha256,
+        }),
+      ).toBeNull();
     });
 
     it('the independently sampled compact fixture it replaces DOES flicker (the check is not vacuous)', async () => {

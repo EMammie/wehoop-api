@@ -18,6 +18,7 @@ import {
   rotationFor,
   SLOT_ORIGIN_MS,
   SYNTHETIC_ROTATION,
+  servesSamePrefix,
   shiftDocument,
   shiftIso,
   slotAt,
@@ -363,26 +364,41 @@ describe('the host', () => {
 
   describe('re-pointing a never-played slot to a new fixture', () => {
     const OLD_SHA = 'a'.repeat(64);
+    const COMPACT = 'fixtures/wnba/sim-93ee7c68-replay.compact.jsonl.gz';
     const rowFor = (over: Partial<ReplaySlotRow> = {}): ReplaySlotRow => ({
       ...provenanceRow(wnba, slot),
       ...over,
     });
     // wnba is loaded in beforeAll, so the bound is computed when a test runs.
     const bound = () => new Date(tip + wnba.startOffsetMs);
-    const preBound = () => ({ now: new Date(bound().getTime() - 1), repointUntil: bound() });
-    const atBound = () => ({ now: bound(), repointUntil: bound() });
+    type Prefix = (stored: { fixturePath: string; fixtureSha256: string }) => Promise<boolean>;
+    const yes: Prefix = async () => true;
+    const preBound = (samePrefix: Prefix = yes) => ({
+      now: new Date(bound().getTime() - 1),
+      repointUntil: bound(),
+      samePrefix,
+    });
+    const atBound = () => ({ now: bound(), repointUntil: bound(), samePrefix: yes });
 
-    it('a row differing only in fixture path + sha is re-pointed before the first document is due', async () => {
+    it('a row differing only in fixture path + sha is re-pointed before the first document is due (premise holding)', async () => {
       const store = new MemoryProvenanceStore();
       await store.ensure(
         rowFor({ fixturePath: 'fixtures/wnba/old.jsonl.gz', fixtureSha256: OLD_SHA }),
       );
-      expect(await store.ensure(rowFor(), preBound())).toBe('repointed');
+      const asked: Array<{ fixturePath: string; fixtureSha256: string }> = [];
+      const recordingPrefix = async (stored: { fixturePath: string; fixtureSha256: string }) => {
+        asked.push(stored);
+        return true;
+      };
+      expect(await store.ensure(rowFor(), preBound(recordingPrefix))).toBe('repointed');
+      expect(asked).toEqual([
+        { fixturePath: 'fixtures/wnba/old.jsonl.gz', fixtureSha256: OLD_SHA },
+      ]);
       expect(store.rows.get(slot.providerGameId)?.fixtureSha256).toBe(wnba.sha256);
       expect(await store.ensure(rowFor(), preBound())).toBe('written'); // now identical
     });
 
-    it('is refused from the bound on, for a started game, without options, and when anything else differs', async () => {
+    it('is refused from the bound on, for a started game, without options, when the premise fails, and when anything else differs', async () => {
       const old = rowFor({ fixtureSha256: OLD_SHA });
       const fresh = () => {
         const st = new MemoryProvenanceStore();
@@ -391,6 +407,12 @@ describe('the host', () => {
       };
       await expect(fresh().ensure(rowFor(), atBound())).rejects.toThrow(ProvenanceConflictError);
       await expect(fresh().ensure(rowFor())).rejects.toThrow(ProvenanceConflictError);
+      await expect(
+        fresh().ensure(
+          rowFor(),
+          preBound(async () => false),
+        ),
+      ).rejects.toThrow(ProvenanceConflictError);
       const started = fresh();
       started.played.add(slot.providerGameId);
       await expect(started.ensure(rowFor(), preBound())).rejects.toThrow(ProvenanceConflictError);
@@ -409,9 +431,38 @@ describe('the host', () => {
       }
     });
 
-    it('the host re-points on the first request before play (warn log, counter) and serves the slot', async () => {
+    it('servesSamePrefix: the committed compact file passes; a wrong sha, a missing file, a non-fixture path or another recording fail', async () => {
+      const compact = await loadRecording({ ...wnba.entry, fixture: COMPACT });
+      expect(
+        await servesSamePrefix(wnba, { fixturePath: COMPACT, fixtureSha256: compact.sha256 }),
+      ).toBeNull();
+      expect(
+        await servesSamePrefix(wnba, { fixturePath: COMPACT, fixtureSha256: OLD_SHA }),
+      ).toMatch(/sha256 changed/);
+      expect(
+        await servesSamePrefix(wnba, {
+          fixturePath: 'fixtures/wnba/gone.jsonl.gz',
+          fixtureSha256: OLD_SHA,
+        }),
+      ).toMatch(/cannot be read/);
+      expect(
+        await servesSamePrefix(wnba, { fixturePath: '../.env', fixtureSha256: OLD_SHA }),
+      ).toMatch(/not a fixture file/);
+      expect(
+        await servesSamePrefix(wnba, {
+          fixturePath: ncaawb.entry.fixture,
+          fixtureSha256: ncaawb.sha256,
+        }),
+      ).toMatch(/another recorded game/);
+    });
+
+    it('the host re-points from the compact file on the first request before play (warn log, counter); a stale sha or the bound refuse', async () => {
+      const compact = await loadRecording({ ...wnba.entry, fixture: COMPACT });
       const store = new MemoryProvenanceStore();
-      store.rows.set(slot.providerGameId, rowFor({ fixtureSha256: OLD_SHA }));
+      store.rows.set(
+        slot.providerGameId,
+        rowFor({ fixturePath: COMPACT, fixtureSha256: compact.sha256 }),
+      );
       const warnings: string[] = [];
       const c = manualClock(tip - 5 * MIN);
       const host = await startDemoHost({
@@ -430,10 +481,18 @@ describe('the host', () => {
       expect((await get(host, `${base}/games/${slot.providerGameId}/pbp.json`)).status).toBe(200);
       expect(host.stats.repointed).toBe(1);
       expect(warnings).toContain('replay slot re-pointed to a new fixture before play');
-      // After the bound a sha-only difference is a conflict again (409).
-      store.rows.set(slot.providerGameId, rowFor({ fixtureSha256: OLD_SHA }));
+      // The stored file's sha no longer matches it on disk: not re-pointed (409).
+      store.rows.set(slot.providerGameId, rowFor({ fixturePath: COMPACT, fixtureSha256: OLD_SHA }));
+      expect((await get(host, `${base}/games/${slot.providerGameId}/pbp.json`)).status).toBe(409);
+      expect(warnings.some((w) => w.startsWith('replay slot not re-pointed'))).toBe(true);
+      // After the bound even the compact file is a conflict again (409).
+      store.rows.set(
+        slot.providerGameId,
+        rowFor({ fixturePath: COMPACT, fixtureSha256: compact.sha256 }),
+      );
       c.set(tip + wnba.startOffsetMs);
       expect((await get(host, `${base}/games/${slot.providerGameId}/pbp.json`)).status).toBe(409);
+      expect(host.stats.repointed).toBe(1);
     });
   });
 
