@@ -1,0 +1,16 @@
+# Build context for fly deploy (uploaded to Fly's remote builder). The Dockerfile copies only
+# package files, tsconfig, src and (demo target) fixtures; nothing else needs to leave this machine.
+# Never upload environment files: they hold database URLs and keys.
+.env
+.env.*
+!.env.example
+!.env.rehearsal.example
+node_modules
+dist
+.git
+.local-runs
+supabase/.temp
+supabase-trial
+coverage
+*.log
+fixtures/**/*.raw.jsonl
