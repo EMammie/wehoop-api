@@ -246,8 +246,8 @@ describe('scheduler resumes a complete game after a worker restart (review shoul
     const after = await counts(db, gameId);
     expect(after.changes).toBe(after.lastSeq);
     const tail = await db<{ seq: string; type: string; providerEventId: string | null }[]>`
-      select seq::text, change_type::text as type, provider_event_id as "providerEventId"
-      from public.game_changes where game_id = ${gameId} and seq > ${afterFirst.lastSeq} order by seq`;
+      select c.seq::text, c.change_type::text as type, c.provider_event_id as "providerEventId"
+      from public.game_changes c where c.game_id = ${gameId} and c.seq > ${afterFirst.lastSeq} order by c.seq`;
     expect(tail.map((c) => Number(c.seq))).toEqual(
       Array.from(
         { length: after.lastSeq - afterFirst.lastSeq },
@@ -369,8 +369,8 @@ describe('scheduler resumes a complete game after a worker restart (review shoul
   }
   const statusRows = async (gameId: string) =>
     db<{ seq: string; status: string; at: Date }[]>`
-      select seq::text, body->>'status' as status, created_at as at from public.game_changes
-      where game_id = ${gameId} and change_type = 'status' order by seq`;
+      select c.seq::text, c.body->>'status' as status, c.created_at as at from public.game_changes c
+      where c.game_id = ${gameId} and c.change_type = 'status' order by c.seq`;
   const loadedOne = async (gameId: string) => {
     const now = Date.now();
     const rows = await loadSchedulerGames(db, 'wnba', {
