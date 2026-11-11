@@ -9,9 +9,12 @@ import {
   type LoadedRecording,
   loadRecording,
   MemoryProvenanceStore,
+  ProvenanceConflictError,
   parseSlotId,
   pickIndex,
+  provenanceRow,
   RECORDED_ROTATION,
+  type ReplaySlotRow,
   rotationFor,
   SLOT_ORIGIN_MS,
   SYNTHETIC_ROTATION,
@@ -313,7 +316,8 @@ describe('the host', () => {
         return store.ensure(row);
       },
     };
-    // A row already there for this slot with another fixture hash (a fixture changed under the id).
+    // A row already there for this slot naming another recorded game (not a fixture-only
+    // difference, which a never-played slot re-points: the next test).
     await store.ensure({
       league: 'wnba',
       providerGameId: slot.providerGameId,
@@ -321,7 +325,7 @@ describe('the host', () => {
       fixturePath: wnba.entry.fixture,
       fixtureSha256: '0'.repeat(64),
       provenance: 'recorded',
-      recordedGameId: wnba.recordedGameId,
+      recordedGameId: 'another-recorded-game',
       recordedTipOff: new Date(wnba.recordedTipOffMs),
       slotTipOff: new Date(tip),
       shiftMs: tip - wnba.recordedTipOffMs,
@@ -355,6 +359,82 @@ describe('the host', () => {
     );
     expect(ensures).toBe(before + 1);
     expect(store.rows.get(other.providerGameId)?.provenance).toBe('recorded');
+  });
+
+  describe('re-pointing a never-played slot to a new fixture', () => {
+    const OLD_SHA = 'a'.repeat(64);
+    const rowFor = (over: Partial<ReplaySlotRow> = {}): ReplaySlotRow => ({
+      ...provenanceRow(wnba, slot),
+      ...over,
+    });
+    // wnba is loaded in beforeAll, so the bound is computed when a test runs.
+    const bound = () => new Date(tip + wnba.startOffsetMs);
+    const preBound = () => ({ now: new Date(bound().getTime() - 1), repointUntil: bound() });
+    const atBound = () => ({ now: bound(), repointUntil: bound() });
+
+    it('a row differing only in fixture path + sha is re-pointed before the first document is due', async () => {
+      const store = new MemoryProvenanceStore();
+      await store.ensure(
+        rowFor({ fixturePath: 'fixtures/wnba/old.jsonl.gz', fixtureSha256: OLD_SHA }),
+      );
+      expect(await store.ensure(rowFor(), preBound())).toBe('repointed');
+      expect(store.rows.get(slot.providerGameId)?.fixtureSha256).toBe(wnba.sha256);
+      expect(await store.ensure(rowFor(), preBound())).toBe('written'); // now identical
+    });
+
+    it('is refused from the bound on, for a started game, without options, and when anything else differs', async () => {
+      const old = rowFor({ fixtureSha256: OLD_SHA });
+      const fresh = () => {
+        const st = new MemoryProvenanceStore();
+        st.rows.set(slot.providerGameId, old);
+        return st;
+      };
+      await expect(fresh().ensure(rowFor(), atBound())).rejects.toThrow(ProvenanceConflictError);
+      await expect(fresh().ensure(rowFor())).rejects.toThrow(ProvenanceConflictError);
+      const started = fresh();
+      started.played.add(slot.providerGameId);
+      await expect(started.ensure(rowFor(), preBound())).rejects.toThrow(ProvenanceConflictError);
+      for (const other of [
+        { recordingId: 'another-recording' },
+        { recordedGameId: 'another-game' },
+        { provenance: 'synthetic' as const },
+        { shiftMs: rowFor().shiftMs + 60_000 },
+        { recordedTipOff: new Date(wnba.recordedTipOffMs + 60_000) },
+      ]) {
+        const st = new MemoryProvenanceStore();
+        st.rows.set(slot.providerGameId, { ...old, ...other });
+        await expect(st.ensure(rowFor(), preBound()), JSON.stringify(other)).rejects.toThrow(
+          ProvenanceConflictError,
+        );
+      }
+    });
+
+    it('the host re-points on the first request before play (warn log, counter) and serves the slot', async () => {
+      const store = new MemoryProvenanceStore();
+      store.rows.set(slot.providerGameId, rowFor({ fixtureSha256: OLD_SHA }));
+      const warnings: string[] = [];
+      const c = manualClock(tip - 5 * MIN);
+      const host = await startDemoHost({
+        rotation: wnbaRotation,
+        clock: c.clock,
+        provenance: store,
+        minSpacingMs: 0,
+        log: {
+          ...log,
+          warn: (_o: unknown, msg?: string) => {
+            if (msg) warnings.push(msg);
+          },
+        } as unknown as typeof log,
+      });
+      hosts.push(host);
+      expect((await get(host, `${base}/games/${slot.providerGameId}/pbp.json`)).status).toBe(200);
+      expect(host.stats.repointed).toBe(1);
+      expect(warnings).toContain('replay slot re-pointed to a new fixture before play');
+      // After the bound a sha-only difference is a conflict again (409).
+      store.rows.set(slot.providerGameId, rowFor({ fixtureSha256: OLD_SHA }));
+      c.set(tip + wnba.startOffsetMs);
+      expect((await get(host, `${base}/games/${slot.providerGameId}/pbp.json`)).status).toBe(409);
+    });
   });
 
   it("streams a slot's push lines after the moment of connection, shifted and renamed", async () => {

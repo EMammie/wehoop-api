@@ -446,10 +446,47 @@ correction in five games), so the fix is in the demo data, not in the freshness 
 now serves aligned re-samples (`*.demo.jsonl.gz`, `pnpm sim align`), in which every served moment
 shows one game view across pbp, summary, boxscore and push clock. Dev-stack acceptance: one full
 compressed slot per league, 0 same-period score drops among the `status` changes (query below),
-final scores as recorded. **Redeploy note**: `ingest.replay_slots` already holds today's and
-tomorrow's slots with the compact file's sha256, and the host refuses a slot whose stored
-provenance differs (409, left out of the listing), so after the deploy those already-listed slots
-stop being served; slots first listed after the deploy are served from the new files.
+final scores as recorded.
+
+**Redeploy (switching a running demo from the compact to the demo files).** `ingest.replay_slots`
+already holds every slot listed so far (today and tomorrow) with the compact file's sha256, and the
+schedule ingest has created their game rows. The host refuses a slot whose stored provenance
+differs from the rotation's (409, left out of the listing), with one exception added for this
+switch (`PgProvenanceStore.ensure`, plan rev 4.15 (2)): a slot whose row differs **only** in
+fixture path and sha256 is **re-pointed** to the new file while it is unplayed, i.e. strictly before
+its tip-off + its recording's first-document offset (WNBA +16.2 min, NCAAWB +3.1 min) and with its
+game row, if any, still `scheduled` / `created` with no play events. Until that bound the host has
+served only each feed's first document, the same raw line in both files (a pregame watch, which
+starts 10 min before tip-off, may already have written its changes; they are identical either way).
+Each re-point logs `replay slot re-pointed to a new fixture before play` at warn and counts in
+`/_demo/status` `stats.repointed`. A played or in-progress slot is still refused, so its
+provenance stays the file it was played from.
+
+What a refused slot does (and what every listed slot would do without the re-point): its game row
+exists, so the scheduler keeps starting watches on it and gets 409 until the 6 h late-start limit;
+a slot that was in progress freezes at its last `inprogress` state and never closes; `pnpm demo
+purge` cannot remove it for 30 h after its tip-off (the scheduler's resume horizon), and `purge
+--all` does NOT bypass that horizon or the listing horizon. Run purge with the worker UP: runs of a
+killed worker stay `running` until the next lock holder aborts them, and purge skips a game with a
+`running` run.
+
+Sequence:
+
+1. Pick a gap in which no slot is between its first document and `closed`: for each slot,
+   WNBA tip-off +16 min .. +156 min, NCAAWB tip-off +3 min .. +130 min. With the default 3 h
+   rotation the gaps are about 27 min (a WNBA slot's +156 min to the next NCAAWB slot's +3 min)
+   and about 66 min (an NCAAWB slot's +130 min to the next WNBA slot's +16 min). Check it right before deploying: `curl -s 127.0.0.1:8790/_demo/status` on the
+   worker machine (`fly ssh console -a wehoop-demo`, NOT RUN) lists every slot's `status`; none may
+   be `inprogress`, `halftime` or `complete` (`closed` and `created` are fine). From a machine with
+   the demo project's URL:
+   `select provider_game_id, status from public.games where replay is not null and status in ('inprogress', 'halftime', 'complete')`
+   must return no row.
+2. Deploy (`fly deploy -c fly.demo.toml --ha=false`, NOT RUN).
+3. Verify: the worker log has no `different provenance` line, and every `re-pointed` line names a
+   slot that had not started; `select provider_game_id, fixture_path, fixture_sha256 from
+   ingest.replay_slots where slot_tip_off > now()` shows only the new sha256s (WNBA `a02cf5ad…`,
+   NCAAWB `edc6548a…`); after the next slot of each league closes, the drop query below returns
+   `drops = 0` for it.
 
 ```
 q() { docker exec supabase_db_wehoop-api psql -U postgres -Atc "$1"; }   # dev stack; on the demo project use its own psql

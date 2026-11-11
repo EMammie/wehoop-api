@@ -48,7 +48,9 @@ import { SummaryDocumentSchema } from './schemas/summary.js';
  * fixture path and sha256, recorded game id and tip-off, shift); migration
  * 0014's trigger labels the game row `games.replay` from it when the schedule
  * ingest creates the game. A row that already exists with different contents
- * (a changed fixture under the same id) is refused: that slot answers 409.
+ * (a changed fixture under the same id) is refused: that slot answers 409,
+ * except a never-played slot whose row differs only in the fixture file, which
+ * is re-pointed (EnsureOptions below).
  *
  * Time. `clock` is the host's (and the demo scheduler's) notion of now. At
  * real speed it is the wall clock; `demoClock(speed, epoch)` compresses time
@@ -486,18 +488,75 @@ export function provenanceRow(rec: LoadedRecording, slot: Slot): ReplaySlotRow {
   };
 }
 
+/**
+ * Re-pointing a never-played slot (review of the aligned demo fixtures, 2026-11-11). A slot whose
+ * stored row differs from the rotation's ONLY in `fixture_path` / `fixture_sha256` (same
+ * recording, recorded game, tip-offs, shift and label) may be moved to the new file while nothing
+ * but the recording's FIRST documents can have been served for it: before `repointUntil` = slot
+ * tip-off + the new recording's `startOffsetMs` (its first document's offset). Until then the
+ * host serves each feed's first document; the compact and the aligned demo file of a recording
+ * start with the same raw lines (the first pbp, summary and boxscore of the raw recording, bodies
+ * deep-equal: test/unit/demo/demo-fixtures.test.ts), and both files' second documents are due
+ * later than this bound, so a game created or watched pregame from either file is identical. The
+ * database store also requires that the slot's game row, if any, is still pregame (`scheduled` /
+ * `created`) with no play events. It does NOT require `last_seq = 0` or no provider calls: the
+ * scheduler starts a watch 10 min before tip-off, so a slot about to start has polled (identical)
+ * pregame documents and may hold their status change; refusing it would freeze that game. A slot
+ * past the bound, or with anything else different, stays refused (409): a played slot keeps the
+ * provenance of the file it was played from.
+ */
+export interface EnsureOptions {
+  /** The host's now. */
+  now: Date;
+  /** A sha-only difference is re-pointed only strictly before this instant. */
+  repointUntil: Date;
+}
+
+/** `written`: inserted or already identical; `repointed`: fixture path + sha moved before play. */
+export type EnsureOutcome = 'written' | 'repointed';
+
 export interface ProvenanceStore {
-  /** Idempotent: an identical existing row is fine; a different one throws. */
-  ensure(row: ReplaySlotRow): Promise<void>;
+  /**
+   * Idempotent: an identical existing row is fine; a row differing only in the fixture is
+   * re-pointed under the rule above (when `opts` is given); any other difference throws.
+   */
+  ensure(row: ReplaySlotRow, opts?: EnsureOptions): Promise<EnsureOutcome>;
 }
 
 export class ProvenanceConflictError extends Error {}
+
+/** Same slot, same recording, same timeline and label: only the fixture file differs. */
+function onlyFixtureDiffers(
+  stored: {
+    recordingId: string;
+    sha: string;
+    provenance: string;
+    shiftMs: number;
+    tip: number;
+    recordedGameId: string;
+    recordedTip: number;
+  },
+  r: ReplaySlotRow,
+): boolean {
+  return (
+    stored.sha !== r.fixtureSha256 &&
+    stored.recordingId === r.recordingId &&
+    stored.provenance === r.provenance &&
+    stored.shiftMs === r.shiftMs &&
+    stored.tip === r.slotTipOff.getTime() &&
+    stored.recordedGameId === r.recordedGameId &&
+    stored.recordedTip === r.recordedTipOff.getTime()
+  );
+}
+
+const beforeRepointBound = (opts: EnsureOptions | undefined): opts is EnsureOptions =>
+  opts !== undefined && opts.now.getTime() < opts.repointUntil.getTime();
 
 /** `ingest.replay_slots` (0014). */
 export class PgProvenanceStore implements ProvenanceStore {
   constructor(private readonly db: Db) {}
 
-  async ensure(r: ReplaySlotRow): Promise<void> {
+  async ensure(r: ReplaySlotRow, opts?: EnsureOptions): Promise<EnsureOutcome> {
     await this.db`
       insert into ingest.replay_slots
         (league, provider_game_id, recording_id, fixture_path, fixture_sha256, provenance,
@@ -506,35 +565,108 @@ export class PgProvenanceStore implements ProvenanceStore {
               ${r.fixtureSha256}, ${r.provenance}, ${r.recordedGameId}, ${r.recordedTipOff},
               ${r.slotTipOff}, ${r.shiftMs})
       on conflict (league, provider_game_id) do nothing`;
+    const row = await this.stored(r);
+    if (row && sameRow(row, r)) return 'written';
+    if (row && onlyFixtureDiffers(row, r) && beforeRepointBound(opts)) {
+      // Under a lock on the slot row, and only while its game (if any) is still pregame.
+      const moved = await this.db.begin(async (tx) => {
+        const [locked] = await tx<{ sha: string }[]>`
+          select fixture_sha256 as sha from ingest.replay_slots
+          where league = ${r.league} and provider_game_id = ${r.providerGameId} for update`;
+        if (!locked) return false;
+        if (locked.sha === r.fixtureSha256) return true; // a concurrent request moved it
+        if (locked.sha !== row.sha) return false;
+        const [played] = await tx<{ played: boolean }[]>`
+          select (g.status::text not in ('scheduled', 'created')
+                  or exists (select 1 from public.play_events p where p.game_id = g.id)) as played
+          from public.games g
+          where g.league = ${r.league} and g.provider_game_id = ${r.providerGameId}`;
+        if (played?.played) return false;
+        await tx`
+          update ingest.replay_slots
+          set fixture_path = ${r.fixturePath}, fixture_sha256 = ${r.fixtureSha256}
+          where league = ${r.league} and provider_game_id = ${r.providerGameId}
+            and fixture_sha256 = ${row.sha}`;
+        return true;
+      });
+      if (moved) return 'repointed';
+    }
+    throw new ProvenanceConflictError(
+      `ingest.replay_slots already holds ${r.providerGameId} with different provenance (fixture changed?); refusing to serve it`,
+    );
+  }
+
+  private async stored(r: ReplaySlotRow) {
     const [row] = await this.db<
-      { recordingId: string; sha: string; provenance: string; shiftMs: string; tip: Date }[]
+      {
+        recordingId: string;
+        sha: string;
+        provenance: string;
+        shiftMs: string;
+        tip: Date;
+        recordedGameId: string;
+        recordedTip: Date;
+      }[]
     >`
       select recording_id as "recordingId", fixture_sha256 as sha, provenance,
-             shift_ms::text as "shiftMs", slot_tip_off as tip
+             shift_ms::text as "shiftMs", slot_tip_off as tip,
+             recorded_game_id as "recordedGameId", recorded_tip_off as "recordedTip"
       from ingest.replay_slots where league = ${r.league} and provider_game_id = ${r.providerGameId}`;
-    if (
-      !row ||
-      row.recordingId !== r.recordingId ||
-      row.sha !== r.fixtureSha256 ||
-      row.provenance !== r.provenance ||
-      Number(row.shiftMs) !== r.shiftMs ||
-      row.tip.getTime() !== r.slotTipOff.getTime()
-    ) {
-      throw new ProvenanceConflictError(
-        `ingest.replay_slots already holds ${r.providerGameId} with different provenance (fixture changed?); refusing to serve it`,
-      );
-    }
+    return row
+      ? {
+          ...row,
+          shiftMs: Number(row.shiftMs),
+          tip: row.tip.getTime(),
+          recordedTip: row.recordedTip.getTime(),
+        }
+      : null;
   }
+}
+
+/** The fields the refusal has always compared (fixture path is not one: the sha names the file). */
+function sameRow(
+  stored: { recordingId: string; sha: string; provenance: string; shiftMs: number; tip: number },
+  r: ReplaySlotRow,
+): boolean {
+  return (
+    stored.recordingId === r.recordingId &&
+    stored.sha === r.fixtureSha256 &&
+    stored.provenance === r.provenance &&
+    stored.shiftMs === r.shiftMs &&
+    stored.tip === r.slotTipOff.getTime()
+  );
 }
 
 /** For DB-free tests: remembers what was written. */
 export class MemoryProvenanceStore implements ProvenanceStore {
   readonly rows = new Map<string, ReplaySlotRow>();
-  async ensure(row: ReplaySlotRow): Promise<void> {
+  /** Slot ids whose game a test marks as started (the database store reads the game row). */
+  readonly played = new Set<string>();
+  async ensure(row: ReplaySlotRow, opts?: EnsureOptions): Promise<EnsureOutcome> {
     const prev = this.rows.get(row.providerGameId);
-    if (prev && JSON.stringify(prev) !== JSON.stringify(row))
-      throw new ProvenanceConflictError(`${row.providerGameId}: different provenance`);
-    this.rows.set(row.providerGameId, row);
+    if (!prev || JSON.stringify(prev) === JSON.stringify(row)) {
+      this.rows.set(row.providerGameId, row);
+      return 'written';
+    }
+    const asStored = {
+      recordingId: prev.recordingId,
+      sha: prev.fixtureSha256,
+      provenance: prev.provenance,
+      shiftMs: prev.shiftMs,
+      tip: prev.slotTipOff.getTime(),
+      recordedGameId: prev.recordedGameId,
+      recordedTip: prev.recordedTipOff.getTime(),
+    };
+    if (
+      prev.league === row.league &&
+      onlyFixtureDiffers(asStored, row) &&
+      beforeRepointBound(opts) &&
+      !this.played.has(row.providerGameId)
+    ) {
+      this.rows.set(row.providerGameId, row);
+      return 'repointed';
+    }
+    throw new ProvenanceConflictError(`${row.providerGameId}: different provenance`);
   }
 }
 
@@ -564,6 +696,8 @@ export interface DemoHostStats {
   pushConnections: number;
   pushLinesSent: number;
   provenanceRows: number;
+  /** Slots whose provenance row was re-pointed to the rotation's fixture before play. */
+  repointed: number;
 }
 
 export interface DemoHost {
@@ -618,6 +752,7 @@ export async function startDemoHost(opts: DemoHostOptions): Promise<DemoHost> {
     pushConnections: 0,
     pushLinesSent: 0,
     provenanceRows: 0,
+    repointed: 0,
   };
   const minSpacingMs = opts.minSpacingMs ?? 1000;
   const heartbeatMs = opts.heartbeatMs ?? 5000;
@@ -629,10 +764,26 @@ export async function startDemoHost(opts: DemoHostOptions): Promise<DemoHost> {
   const ensureProvenance = (slot: Slot): Promise<void> => {
     let p = inFlight.get(slot.providerGameId);
     if (!p) {
+      const rec = recOf(slot);
+      const row = provenanceRow(rec, slot);
       p = opts.provenance
-        .ensure(provenanceRow(recOf(slot), slot))
-        .then(() => {
+        .ensure(row, {
+          now: new Date(clock.now()),
+          repointUntil: new Date(slot.tipOffMs + rec.startOffsetMs),
+        })
+        .then((outcome) => {
           stats.provenanceRows++;
+          if (outcome === 'repointed') {
+            stats.repointed++;
+            opts.log?.warn(
+              {
+                providerGameId: slot.providerGameId,
+                fixture: row.fixturePath,
+                fixtureSha256: row.fixtureSha256,
+              },
+              'replay slot re-pointed to a new fixture before play',
+            );
+          }
         })
         .finally(() => inFlight.delete(slot.providerGameId));
       inFlight.set(slot.providerGameId, p);
