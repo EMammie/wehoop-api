@@ -141,6 +141,9 @@ pnpm sim align --league wnba --in fixtures/wnba/sim-93ee7c68-replay.raw.jsonl \
   --out fixtures/wnba/sim-93ee7c68-replay.demo.jsonl.gz --every-group 3 --target-mb 4
 ```
 
+`pnpm sim align`, `compact` and `relabel` are offline file commands: they read no environment (no
+`.env`, no database).
+
 The rule (`src/ingest/demo-align.ts`, unit-tested in `test/unit/ingest/demo-align.test.ts`):
 
 1. **Groups.** Walking the raw lines in request order, a group closes at the first line at which

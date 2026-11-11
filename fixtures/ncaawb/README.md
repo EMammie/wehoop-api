@@ -129,6 +129,9 @@ pnpm sim align --league ncaawb --in fixtures/ncaawb/sim-d9b71fe0-replay.raw.json
   --out fixtures/ncaawb/sim-d9b71fe0-replay.demo.jsonl.gz --every-group 3 --target-mb 4
 ```
 
+`pnpm sim align`, `compact` and `relabel` are offline file commands: they read no environment (no
+`.env`, no database).
+
 249 of 255 groups agree across the three feeds; 94 are kept (pregame, every period, halftime,
 `complete`, `closed` 104-68).
 
@@ -137,11 +140,12 @@ printed by the command above): **one**. Q4 3:15, Michigan State 99-66 -> 98-66 a
 requested 2026-10-15T01:16:55.907Z (raw line 2,278): Jalyn Brown's "makes regular free throw 2 of
 2" is revised to "misses regular free throw 1 of 1". The 99 stood for two pbp polls (6 s), between
 two groups, so no group samples it: the demo serves 97-66 (recorded 01:16:04) then 98-66
-(01:17:34), no decrease. In raw request order there are 3 further cross-feed decreases of a few seconds, among them a summary at 73-43
-requested right after a pbp at 75-43 (raw line 1,778); none of those lagging documents is in a kept
-group. The served timeline of this file (`test/unit/demo/demo-fixtures.test.ts`, which lists the
-correction above as the only allowed decrease) has 0 moments of disagreement and 0 same-period score
-decreases.
+(01:17:34), no decrease. In raw request order there are 3 further cross-feed decreases of a few
+seconds, among them a summary at 73-43 requested right after a pbp at 75-43 (raw line 1,778); none
+of those lagging documents is in a kept group. The served timeline of this file
+(`test/unit/demo/demo-fixtures.test.ts`, which enumerates the correction above and asserts that its
+pre-correction score is never served) has 0 moments of disagreement, 0 phase regressions and 0
+same-period score decreases.
 
 | File | Source | Documents | sha256 |
 |---|---|---|---|

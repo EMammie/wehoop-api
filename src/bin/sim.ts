@@ -133,48 +133,7 @@ async function main() {
     }
     return parsed.data;
   };
-  const config = loadConfig();
-  const sim = new SimulationClient({ playbackUrl: config.sportradar.playbackUrl });
-
-  if (cmd === 'record') {
-    if (!args.recording) throw new Error('--recording is required');
-    if (!args.out) throw new Error('--out <file.jsonl> is required');
-    if (existsSync(args.out)) throw new Error(`${args.out} exists; refusing to append to it`);
-    const league = LeagueCodeSchema.parse(args.league);
-    // Usage errors before any network call.
-    const pollIntervalMs = intArg('poll-interval', args['poll-interval'], 3000) ?? 3000;
-    const summaryEvery = intArg('summary-every', args['summary-every'], 10) ?? 10;
-    const maxPolls = intArg('max-polls', args['max-polls'], null);
-    const log = createLogger({ level: config.logLevel });
-    const rec = await sim.getRecording(args.recording);
-    if (!rec) throw new Error(`recording ${args.recording} not found`);
-    const sessionId = await sim.createSession(args.recording);
-    log.info(
-      { recording: rec.id, title: rec.title, sessionId, out: args.out },
-      'simulation session created; recording at natural pace',
-    );
-    const http = new SportradarHttp({
-      db: null,
-      log,
-      league,
-      runId: null,
-      resolver: new SimulationUrlResolver({
-        playbackUrl: config.sportradar.playbackUrl,
-        league,
-        recordingId: args.recording,
-        sessionId,
-      }),
-    });
-    const docs = await recordSession(http, log, {
-      league,
-      out: args.out,
-      pollIntervalMs,
-      summaryEvery,
-      maxPolls,
-    });
-    console.log(`RECORDED ${docs} documents -> ${args.out}`);
-    return;
-  }
+  // The offline file commands (relabel, align, compact) read no environment: no loadConfig().
   if (cmd === 'relabel') {
     if (!args.in) throw new Error('--in <file.jsonl[.gz]> is required');
     if (!args.out) throw new Error('--out <file.jsonl.gz> is required');
@@ -195,40 +154,6 @@ async function main() {
     console.log(
       `RELABELLED ${out.relabelled}/${out.docs} documents coverage=${args.coverage}${gameId ? ` game ${gameId.from} -> ${gameId.to}` : ''} -> ${args.out} (${statSync(args.out).size} bytes, sha256 ${hash})`,
     );
-    return;
-  }
-  if (cmd === 'serve') {
-    if (!args['replay-file']) throw new Error('--replay-file <file> is required');
-    const log = createLogger({ level: config.logLevel });
-    const dropAfter = intArg('push-drop-after', args['push-drop-after'], null);
-    const dropFor = intArg('push-drop-for', args['push-drop-for'], 30) ?? 30;
-    const dropEvery = intArg('push-drop-every', args['push-drop-every'], null);
-    const server = await startFakeProvider({
-      replayFile: args['replay-file'],
-      speed: intArg('speed', args.speed, 30) ?? 30,
-      port: intArg('port', args.port, 8787) ?? 8787,
-      heartbeatMs: (intArg('heartbeat', args.heartbeat, 5) ?? 5) * 1000,
-      ...(dropAfter !== null
-        ? {
-            pushDrop: {
-              afterMs: dropAfter * 1000,
-              forMs: dropFor * 1000,
-              ...(dropEvery !== null ? { everyMs: dropEvery * 1000 } : {}),
-            },
-          }
-        : {}),
-      log,
-    });
-    console.log(
-      `FAKE_PROVIDER_URL=${server.url} game=${server.providerGameId} documents=${server.documents} pushLines=${server.pushLines.events}+${server.pushLines.clocks} speed=${args.speed}x${dropAfter !== null ? ` pushDrop=after ${dropAfter}s for ${dropFor}s${dropEvery !== null ? ` every ${dropEvery}s` : ''}` : ''}`,
-    );
-    const stop = async () => {
-      console.log(`FAKE_PROVIDER_STATS=${JSON.stringify(server.stats)}`);
-      await server.close();
-      process.exit(0);
-    };
-    for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => void stop());
-    await new Promise(() => undefined);
     return;
   }
   if (cmd === 'align') {
@@ -291,6 +216,83 @@ async function main() {
       console.error(`output exceeds --target-mb ${targetMb}; raise the strides`);
       process.exit(3);
     }
+    return;
+  }
+
+  const config = loadConfig();
+  const sim = new SimulationClient({ playbackUrl: config.sportradar.playbackUrl });
+
+  if (cmd === 'record') {
+    if (!args.recording) throw new Error('--recording is required');
+    if (!args.out) throw new Error('--out <file.jsonl> is required');
+    if (existsSync(args.out)) throw new Error(`${args.out} exists; refusing to append to it`);
+    const league = LeagueCodeSchema.parse(args.league);
+    // Usage errors before any network call.
+    const pollIntervalMs = intArg('poll-interval', args['poll-interval'], 3000) ?? 3000;
+    const summaryEvery = intArg('summary-every', args['summary-every'], 10) ?? 10;
+    const maxPolls = intArg('max-polls', args['max-polls'], null);
+    const log = createLogger({ level: config.logLevel });
+    const rec = await sim.getRecording(args.recording);
+    if (!rec) throw new Error(`recording ${args.recording} not found`);
+    const sessionId = await sim.createSession(args.recording);
+    log.info(
+      { recording: rec.id, title: rec.title, sessionId, out: args.out },
+      'simulation session created; recording at natural pace',
+    );
+    const http = new SportradarHttp({
+      db: null,
+      log,
+      league,
+      runId: null,
+      resolver: new SimulationUrlResolver({
+        playbackUrl: config.sportradar.playbackUrl,
+        league,
+        recordingId: args.recording,
+        sessionId,
+      }),
+    });
+    const docs = await recordSession(http, log, {
+      league,
+      out: args.out,
+      pollIntervalMs,
+      summaryEvery,
+      maxPolls,
+    });
+    console.log(`RECORDED ${docs} documents -> ${args.out}`);
+    return;
+  }
+  if (cmd === 'serve') {
+    if (!args['replay-file']) throw new Error('--replay-file <file> is required');
+    const log = createLogger({ level: config.logLevel });
+    const dropAfter = intArg('push-drop-after', args['push-drop-after'], null);
+    const dropFor = intArg('push-drop-for', args['push-drop-for'], 30) ?? 30;
+    const dropEvery = intArg('push-drop-every', args['push-drop-every'], null);
+    const server = await startFakeProvider({
+      replayFile: args['replay-file'],
+      speed: intArg('speed', args.speed, 30) ?? 30,
+      port: intArg('port', args.port, 8787) ?? 8787,
+      heartbeatMs: (intArg('heartbeat', args.heartbeat, 5) ?? 5) * 1000,
+      ...(dropAfter !== null
+        ? {
+            pushDrop: {
+              afterMs: dropAfter * 1000,
+              forMs: dropFor * 1000,
+              ...(dropEvery !== null ? { everyMs: dropEvery * 1000 } : {}),
+            },
+          }
+        : {}),
+      log,
+    });
+    console.log(
+      `FAKE_PROVIDER_URL=${server.url} game=${server.providerGameId} documents=${server.documents} pushLines=${server.pushLines.events}+${server.pushLines.clocks} speed=${args.speed}x${dropAfter !== null ? ` pushDrop=after ${dropAfter}s for ${dropFor}s${dropEvery !== null ? ` every ${dropEvery}s` : ''}` : ''}`,
+    );
+    const stop = async () => {
+      console.log(`FAKE_PROVIDER_STATS=${JSON.stringify(server.stats)}`);
+      await server.close();
+      process.exit(0);
+    };
+    for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => void stop());
+    await new Promise(() => undefined);
     return;
   }
 
