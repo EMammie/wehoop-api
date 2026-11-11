@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { applyChanges } from '../ingest/apply-changes.js';
+import { alignRecording } from '../ingest/demo-align.js';
 import { environmentRefusal } from '../ingest/environment.js';
 import {
   appendRecordedDocument,
@@ -55,6 +56,14 @@ import { type Feed, SimulationUrlResolver } from '../providers/sportradar/urls.j
  *   whose status or period changed, plus the final one, is kept. Kept lines are
  *   written byte-identical, gzip level 9. Exits 3 if the output exceeds
  *   `--target-mb`. The rule lives in `selectCompact` (src/ingest/recording.ts).
+ * pnpm sim align --league <code> --in <full.jsonl> --out <file.demo.jsonl.gz>
+ *     [--every-group 3] [--target-mb 4]
+ *   Aligned compaction for the demo rotation (plan rev 4.15 (6)): groups of one
+ *   pbp + summary + boxscore that agree on the game view, every document of a
+ *   group re-stamped with the group's latest request/receipt time (originals kept
+ *   as recordedRequestedAt/recordedReceivedAt), so the demo host never serves a
+ *   summary older than its pbp. Rule in `src/ingest/demo-align.ts`; documented in
+ *   fixtures/{wnba,ncaawb}/README.md. Exits 3 if the output exceeds --target-mb.
  * pnpm sim relabel --in <file.jsonl[.gz]> --out <file.jsonl.gz> --coverage extended_boxscore
  *     [--game-id <from>:<to>]
  *   Rewrite `coverage` on every document (and optionally the provider game id)
@@ -94,6 +103,7 @@ async function main() {
       'max-polls': { type: 'string' },
       'every-pbp': { type: 'string', default: '50' },
       'every-summary': { type: 'string', default: '10' },
+      'every-group': { type: 'string', default: '3' },
       'target-mb': { type: 'string', default: '4' },
       coverage: { type: 'string' },
       'game-id': { type: 'string' },
@@ -219,6 +229,43 @@ async function main() {
     };
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => void stop());
     await new Promise(() => undefined);
+    return;
+  }
+  if (cmd === 'align') {
+    if (!args.in) throw new Error('--in <full.jsonl> is required');
+    if (!args.out) throw new Error('--out <file.demo.jsonl.gz> is required');
+    const league = LeagueCodeSchema.parse(args.league);
+    const targetMb = intArg('target-mb', args['target-mb'], 4) ?? 4;
+    const result = await alignRecording(args.in, args.out, adapterFor(league), {
+      everyGroup: intArg('every-group', args['every-group'], 3) ?? 3,
+      warn: (m) => console.error(`warning: ${m}`),
+    });
+    for (const [feed, n] of Object.entries(result.perFeed)) {
+      console.log(`${feed.padEnd(9)} raw ${String(n).padStart(5)}`);
+    }
+    console.log(
+      `groups    candidates ${result.candidates}, agreeing ${result.eligible}, kept ${result.kept} (${result.kept * 3} documents of ${result.total})`,
+    );
+    const drop = (d: (typeof result.rawPbpDrops)[number]) =>
+      `period ${d.periodSeq}: ${d.from.home}-${d.from.away} -> ${d.to.home}-${d.to.away}`;
+    console.log(`raw pbp same-period score decreases: ${result.rawPbpDrops.length}`);
+    for (const d of result.rawPbpDrops) {
+      console.log(`  at ${new Date(d.at).toISOString()} ${drop(d)}`);
+    }
+    console.log(
+      `raw request-order decreases (any feed after any feed): ${result.rawRequestOrderDrops.length}`,
+    );
+    for (const d of result.rawRequestOrderDrops)
+      console.log(`  raw document #${d.at + 1} ${drop(d)}`);
+    const size = statSync(args.out).size;
+    const sha = await sha256File(args.out);
+    console.log(
+      `${args.out}: ${size} bytes (${(size / 1024 / 1024).toFixed(2)} MB), sha256 ${sha}`,
+    );
+    if (size > targetMb * 1024 * 1024) {
+      console.error(`output exceeds --target-mb ${targetMb}; raise --every-group`);
+      process.exit(3);
+    }
     return;
   }
   if (cmd === 'compact') {
@@ -390,7 +437,9 @@ async function main() {
     );
     return;
   }
-  console.error('usage: pnpm sim <list|show|session|inject|record|compact> [options]');
+  console.error(
+    'usage: pnpm sim <list|show|session|inject|record|compact|align|relabel|serve> [options]',
+  );
   process.exit(64);
 }
 
