@@ -338,9 +338,10 @@ describe('demo restart continuity', () => {
     expect(await second.exited).toBe(0);
 
     // A new generation of the same game: the killed watch was aborted by the next lock holder.
+    // (Ordered by the bigint: `order by id` would sort the text output column, '11' < '7'.)
     const watches = await db<{ id: string; status: string }[]>`
-      select id::text, status from ingest.ingestion_runs
-      where kind = 'watch_game' and game_id = ${closed.id} order by id`;
+      select r.id::text, r.status from ingest.ingestion_runs r
+      where r.kind = 'watch_game' and r.game_id = ${closed.id} order by r.id`;
     expect(watches.length).toBeGreaterThanOrEqual(2);
     expect(watches[0]).toEqual({ id: firstWatch, status: 'aborted' });
     expect(watches.at(-1)?.status).toBe('ok');
