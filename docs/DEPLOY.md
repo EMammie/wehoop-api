@@ -437,7 +437,7 @@ Steps 1-3 ran on 2026-11-11 on the owner's go (evidence: Wehoop `devlog/evidence
 demo"). Differences from the commands below: `demo init` ran from a Mac through the session pooler
 for both URLs (the direct host is IPv6-only); the secrets came from `~/wehoop-demo.env` via
 `fly secrets import` (no SPORTRADAR_* line); `fly deploy -c fly.demo.toml --ha=false`. Step 4 (weekly
-purge) has not run. **Known issue (fixed in the data, 2026-11-11; NOT yet deployed)**: the compact
+purge) has not run. **Known issue (fixed in the data, 2026-11-11; deployed 2026-11-12 01:37Z at `e3ec22b`)**: the compact
 fixtures sampled summaries sparser than pbp, so the demo host served a summary minutes older than
 the pbp it had just served, and a basket scored in between flickered down and back (`status`
 changes 57-28 -> 55-28 -> 57-28 on the first hosted slot; 8 same-period drops on the dev-stack slot
@@ -485,12 +485,23 @@ Sequence:
    the demo project's URL:
    `select provider_game_id, status from public.games where replay is not null and status in ('inprogress', 'halftime', 'complete')`
    must return no row.
-2. Deploy (`fly deploy -c fly.demo.toml --ha=false`, NOT RUN).
+2. Deploy (`fly deploy -c fly.demo.toml --ha=false`; ran 2026-11-12 01:36Z, after the 23:00Z WNBA slot closed).
 3. Verify: the worker log has no `different provenance` line, and every `re-pointed` line names a
    slot that had not started; `select provider_game_id, fixture_path, fixture_sha256 from
    ingest.replay_slots where slot_tip_off > now()` shows only the new sha256s (WNBA `a02cf5ad…`,
    NCAAWB `edc6548a…`); after the next slot of each league closes, the drop query below returns
    `drops = 0` for it.
+4. If the new worker logs `another worker holds the ingester lock; retrying` for its whole 60 s
+   lock wait and exits 2 (Fly restarts it into the same wait), the old worker's session is still
+   open on the database although its machine is gone. On 2026-11-12 the holder was an `idle`
+   backend whose `backend_start` (21:02Z) was the old worker's start; Postgres had not noticed the
+   dead peer 60 s after the stop. Why the old worker's own `session.end()` did not close it is not
+   known (its stop lines had left Fly's log buffer). Check and end it, from a machine with the demo
+   project's URL, only when `backend_start` predates the deploy:
+   `select l.pid, a.state, a.backend_start from pg_locks l join pg_stat_activity a using (pid) where l.locktype = 'advisory'`,
+   then `select pg_terminate_backend(<pid>)`. The waiting worker takes the lock on its next try
+   (2026-11-12: lock at 01:38:09Z, all 9 unplayed slots re-pointed, 0 refusals). Do this before the
+   next slot's first document, or that slot can no longer be re-pointed.
 
 ```
 q() { docker exec supabase_db_wehoop-api psql -U postgres -Atc "$1"; }   # dev stack; on the demo project use its own psql
