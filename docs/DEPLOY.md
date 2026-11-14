@@ -495,8 +495,12 @@ Sequence:
    lock wait and exits 2 (Fly restarts it into the same wait), the old worker's session is still
    open on the database although its machine is gone. On 2026-11-12 the holder was an `idle`
    backend whose `backend_start` (21:02Z) was the old worker's start; Postgres had not noticed the
-   dead peer 60 s after the stop. Why the old worker's own `session.end()` did not close it is not
-   known (its stop lines had left Fly's log buffer). Check and end it, from a machine with the demo
+   dead peer 60 s after the stop. Cause (found 2026-11-14): on Node 22 a stopped push stream kept
+   reading, so every WNBA push watch hung after `closed`; the scheduler waits for its running
+   watches on SIGINT/SIGTERM, so the worker never exited and Fly killed the VM ("Virtual machine
+   exited abruptly", 10 s after SIGINT) without closing its session. Fixed in `bcc19ec`; the
+   redeploy that shipped it still met the lock (the old build had 9 hung watches) and needed this
+   step once more (2026-11-14 07:37Z). Check and end it, from a machine with the demo
    project's URL, only when `backend_start` predates the deploy:
    `select l.pid, a.state, a.backend_start from pg_locks l join pg_stat_activity a using (pid) where l.locktype = 'advisory'`,
    then `select pg_terminate_backend(<pid>)`. The waiting worker takes the lock on its next try
