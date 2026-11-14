@@ -167,6 +167,12 @@ export class PushStream {
   readonly state: PushStreamState;
   private stopped = false;
   private controller: AbortController | null = null;
+  /**
+   * The open connection's body reader. `stop()` cancels it directly: on Node 22 (the Fly image and
+   * CI) aborting the request did not end a body read already in progress, so a stopped stream kept
+   * reading heartbeats and its watch never ended (2026-11-14; Node 25 ended it).
+   */
+  private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private watchdog: NodeJS.Timeout | null = null;
   private wakeBackoff: (() => void) | null = null;
   private consecutiveFailures = 0;
@@ -240,7 +246,10 @@ export class PushStream {
   async stop(): Promise<void> {
     this.stopped = true;
     this.clearWatchdog();
-    this.controller?.abort(new Error('push stream stopped'));
+    const reason = new Error('push stream stopped');
+    this.controller?.abort(reason);
+    // Cancelling the reader settles a pending read at once, whatever the fetch abort does.
+    this.reader?.cancel(reason).catch(() => undefined);
     this.wakeBackoff?.();
     await this.running;
     await Promise.allSettled(this.hooks);
@@ -258,7 +267,11 @@ export class PushStream {
     this.watchdog = setTimeout(() => {
       this.state.watchdogTrips++;
       this.deps.log.warn({ feed: this.deps.feed, watchdogMs: ms }, 'push watchdog: no bytes');
-      controller.abort(new Error(`push watchdog: no bytes for ${ms} ms`));
+      const reason = new Error(`push watchdog: no bytes for ${ms} ms`);
+      controller.abort(reason);
+      // The abort alone may not end a body read on Node 22 (see `reader`).
+      if (this.reader && this.controller === controller)
+        this.reader.cancel(reason).catch(() => undefined);
     }, ms);
   }
 
@@ -290,6 +303,7 @@ export class PushStream {
       this.setStatus('connecting');
       const controller = new AbortController();
       this.controller = controller;
+      this.reader = null;
       let callId: number | null = null;
       let status = 0;
       let bytesThisConnection = 0;
@@ -375,7 +389,15 @@ export class PushStream {
         this.resetWatchdog(controller);
         const decoder = new TextDecoder();
         let buffer = '';
-        for await (const chunk of res.body) {
+        const reader = res.body.getReader();
+        this.reader = reader;
+        // stop() may have run while the response was arriving: it could not cancel this reader yet.
+        if (this.stopped)
+          await reader.cancel(new Error('push stream stopped')).catch(() => undefined);
+        for (;;) {
+          const { done, value: chunk } = await reader.read();
+          // A cancelled reader reports done; a stopped stream reads nothing more either way.
+          if (done || this.stopped) break;
           const receivedAt = new Date(this.now());
           bytesThisConnection += chunk.byteLength;
           this.state.bytes += chunk.byteLength;
@@ -402,6 +424,9 @@ export class PushStream {
             nl = buffer.indexOf('\n');
           }
         }
+        // A read ended by the watchdog's cancel reports the watchdog, not an orderly end.
+        if (controller.signal.aborted) throw controller.signal.reason;
+        if (this.stopped) break;
         const tail = buffer + decoder.decode();
         if (tail.trim()) await this.handleLine(tail, new Date(this.now()));
         throw new Error(`sportradar ${feed}: stream ended`);
