@@ -56,7 +56,7 @@ interface Run {
   exited: Promise<number | null>;
 }
 
-function startDemo(): Run {
+function startDemo(logLevel = 'warn'): Run {
   const child = spawn(
     process.execPath,
     [
@@ -77,7 +77,7 @@ function startDemo(): Run {
     ],
     {
       cwd: ROOT,
-      env: { ...process.env, SPORTRADAR_BASE_URL: `http://127.0.0.1:${PORT}`, LOG_LEVEL: 'warn' },
+      env: { ...process.env, SPORTRADAR_BASE_URL: `http://127.0.0.1:${PORT}`, LOG_LEVEL: logLevel },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
@@ -89,13 +89,23 @@ function startDemo(): Run {
   return { child, out, exited };
 }
 
-async function until<T>(what: string, probe: () => Promise<T | null>, ms: number, run?: Run) {
+async function until<T>(
+  what: string,
+  probe: () => Promise<T | null>,
+  ms: number,
+  run?: Run,
+  dump?: () => Promise<string>,
+) {
   const deadline = Date.now() + ms;
   for (;;) {
     const v = await probe();
     if (v !== null) return v;
-    if (Date.now() > deadline)
-      throw new Error(`timed out waiting for ${what}\n${run?.out.join('').slice(-4000) ?? ''}`);
+    if (Date.now() > deadline) {
+      const state = dump ? await dump().catch((e: unknown) => `dump failed: ${String(e)}`) : '';
+      throw new Error(
+        `timed out waiting for ${what}\n${state}\n${run?.out.join('').slice(-12000) ?? ''}`,
+      );
+    }
     await new Promise((r) => setTimeout(r, 500));
   }
 }
@@ -242,6 +252,23 @@ afterAll(async () => {
   await db.end();
 });
 
+/** What the game's runs and calls looked like when a step timed out (CI has no other trace). */
+async function dumpGame(providerGameId: string): Promise<string> {
+  const [g] = await db<{ id: string; status: string; watch: string | null; src: string | null }[]>`
+    select id, status, watch_run_id::text as watch, observed_source::text as src
+    from public.games where provider_game_id = ${providerGameId}`;
+  if (!g) return 'no game row';
+  const runs = await db<Record<string, unknown>[]>`
+    select id::text, parent_run_id::text as parent, kind::text, status::text, started_at, ended_at, meta
+    from ingest.ingestion_runs where game_id = ${g.id} order by id`;
+  const calls = await db<Record<string, unknown>[]>`
+    select c.run_id::text as run, c.feed, c.status, c.called_at
+    from ingest.provider_calls c join ingest.ingestion_runs r on r.id = c.run_id
+    where r.game_id = ${g.id} order by c.id desc limit 15`;
+  const now = await db<{ now: Date }[]>`select now()`;
+  return JSON.stringify({ now: now[0]?.now, game: g, runs, lastCalls: calls }, null, 1);
+}
+
 describe('demo restart continuity', () => {
   it('SIGKILL mid-game: the same provider game id resumes as a new generation, closes, and equals the slot replayed polling-only', async () => {
     const [started] = await db<{ at: Date }[]>`select now() as at`;
@@ -270,7 +297,7 @@ describe('demo restart continuity', () => {
     const firstWatch = mid.watchRunId;
     expect(firstWatch).not.toBeNull();
 
-    const second = startDemo();
+    const second = startDemo('info');
     await until(
       'the restarted worker to take the lock',
       async () => (second.out.join('').includes('WORKER_PID=') ? true : null),
@@ -309,6 +336,7 @@ describe('demo restart continuity', () => {
       },
       300_000,
       second,
+      () => dumpGame(slot.providerGameId),
     );
     // The watch ends by itself after its closing fetches (status ok), not by the stop below.
     await until(
@@ -321,6 +349,7 @@ describe('demo restart continuity', () => {
       },
       120_000,
       second,
+      () => dumpGame(slot.providerGameId),
     );
     // Everything committed reaches subscribers before the process is stopped.
     await until(
