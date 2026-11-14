@@ -412,3 +412,19 @@ from information_schema.role_table_grants
 where table_schema = 'ingest'
   and table_name in ('product_quotas', 'provider_calls', 'budget_reservations', 'v_quota')
   and grantee in ('anon', 'authenticated');
+
+-- check: game_changes_never_below_retention_floor | expect: 0
+-- The retention job (src/ingest/retention.ts) moves games.retained_from_seq and deletes below
+-- it in one transaction; a row below the floor means a delete was skipped or the floor moved alone.
+select count(*)
+from public.game_changes c
+join public.games g on g.id = c.game_id
+where c.seq < g.retained_from_seq;
+
+-- check: fully_retained_games_keep_last_seq | expect: 0
+-- A game whose whole history expired has retained_from_seq = last_seq + 1 and no change rows left.
+select count(*)
+from public.games g
+where g.retained_from_seq = g.last_seq + 1
+  and g.last_seq > 0
+  and exists (select 1 from public.game_changes c where c.game_id = g.id);

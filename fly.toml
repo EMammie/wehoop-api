@@ -5,6 +5,11 @@ primary_region = "ewr"
 [build]
   dockerfile = "Dockerfile"
 
+# SIGTERM -> the worker finishes the in-flight document, drains the outbox (bounded, 60 s) and
+# sends the closing pulse before exiting; give it that long before SIGKILL.
+kill_signal = "SIGTERM"
+kill_timeout = 75
+
 [env]
   NODE_ENV = "production"
   LOG_LEVEL = "info"

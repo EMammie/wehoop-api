@@ -1,9 +1,12 @@
 import type { GameChange } from '../model/game-change.js';
 import type { Pulse } from '../model/pulse.js';
+import type { Scoreboard } from '../model/scoreboard.js';
 
 export type LiveMessage =
   | { event: 'change'; payload: GameChange }
-  | { event: 'pulse'; payload: Pulse };
+  | { event: 'pulse'; payload: Pulse }
+  /** `league:{code}:scores` only (plan §5); never on a game channel, never through the outbox. */
+  | { event: 'scores'; payload: Scoreboard };
 
 /**
  * LiveTransport (plan §1): the only thing the worker needs from a delivery
