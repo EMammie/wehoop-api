@@ -1,0 +1,56 @@
+# Fly.io config for the DEMO environment (plan rev 4.15, M5 B4). NOT DEPLOYED: no `fly` command
+# has been run for it; docs/DEPLOY.md "Demo environment" lists the steps (each NOT RUN) and the
+# prerequisites (its own Supabase project, the owner's go). Same code as fly.toml, demo
+# configuration, its own app: a game flag alone would not isolate standings, season totals,
+# player identity, leaderboards or broadcasts from production.
+#
+#   fly deploy -c fly.demo.toml           # builds the `demo` Dockerfile target (fixtures included)
+app = "wehoop-demo"
+primary_region = "ewr"
+
+[build]
+  dockerfile = "Dockerfile"
+  build-target = "demo"
+
+kill_signal = "SIGTERM"
+kill_timeout = 75
+
+[env]
+  NODE_ENV = "production"
+  LOG_LEVEL = "info"
+  PORT = "3000"
+  # Demo mode: no Sportradar key (refused if one is set), every provider request locked to the
+  # in-process demo host the worker process starts on loopback.
+  MODE = "demo"
+  SPORTRADAR_BASE_URL = "http://127.0.0.1:8790"
+
+[processes]
+  api = "node src/bin/api.js"
+  # The demo host + the production scheduler against it, one process (src/bin/demo.ts).
+  worker = "node src/bin/demo.js run"
+
+[http_service]
+  processes = ["api"]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+# Exactly one worker (it holds the single-ingester advisory lock).
+[[vm]]
+  processes = ["worker"]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[[vm]]
+  processes = ["api"]
+  size = "shared-cpu-1x"
+  memory = "256mb"

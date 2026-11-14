@@ -41,6 +41,8 @@ import { assertSpeedAllowed, type GameRow, runSourceOf, runTrialWatch } from './
  */
 export const SCHEDULER_TZ = 'America/New_York';
 export const SCHEDULE_POLL_HOUR = 6;
+/** Default `maxLateStartMs`: never start a watch on a game whose tip-off is older than this. */
+export const DEFAULT_MAX_LATE_START_MS = 6 * 3_600_000;
 
 export interface SchedulerOptions {
   /** How often the loop wakes to decide (default 60 s). */
@@ -241,11 +243,17 @@ export interface GameRange {
  * Known, left to the owner: a generation-less schedule poll may write the status too, so a game
  * no watch ever saw, first reported `complete` by a poll, gets its marker at that poll and is
  * watched (for its final) like a resumed one.
+ *
+ * `replayOnly` (demo mode, rev 4.15): only games labelled `games.replay`; the demo host has no
+ * documents for any other game, so watching one would only fail and retry. `pnpm demo verify-slot`
+ * check games (`check-replay-...`, labelled too) are never watched: the host has no documents for
+ * them and their only writer is the verify run.
  */
 export async function loadSchedulerGames(
   db: Db,
   league: LeagueCode,
   range: GameRange,
+  opts: { replayOnly?: boolean } = {},
 ): Promise<GameRow[]> {
   return db<GameRow[]>`
     select g.id, g.provider_game_id as "providerGameId", g.status::text as status,
@@ -260,6 +268,7 @@ export async function loadSchedulerGames(
            ) end as "completedAt"
     from public.games g
     where g.league = ${league}
+      and ${opts.replayOnly ? db`g.replay is not null and g.provider_game_id not like 'check-%'` : db`true`}
       and (g.scheduled_at between ${range.from} and ${range.to}
            or (g.status = 'complete' and g.scheduled_at between ${range.completeFrom} and ${range.to}))
     order by g.scheduled_at, g.id`;
@@ -288,7 +297,7 @@ export class Scheduler {
       watchLeadMs: deps.watchLeadMs ?? 10 * 60_000,
       windowBeforeMs: deps.windowBeforeMs ?? 30 * 60_000,
       windowAfterMs: deps.windowAfterMs ?? 4 * 3_600_000,
-      maxLateStartMs: deps.maxLateStartMs ?? 6 * 3_600_000,
+      maxLateStartMs: deps.maxLateStartMs ?? DEFAULT_MAX_LATE_START_MS,
       watchRetryMs: deps.watchRetryMs ?? 10 * 60_000,
       pollRetryMs: deps.pollRetryMs ?? 5 * 60_000,
       completeRewatchMs: deps.completeRewatchMs ?? COMPLETE_REWATCH_MS,

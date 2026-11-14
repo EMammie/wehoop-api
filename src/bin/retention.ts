@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
+import { environmentRefusal } from '../ingest/environment.js';
 import { parseClosedBefore, runRetention } from '../ingest/retention.js';
 import { createLogger } from '../logger.js';
 
@@ -48,6 +49,13 @@ async function main() {
   const config = loadConfig();
   const log = createLogger({ level: config.logLevel });
   const db = createDb(config.db.url, { max: 2 });
+  // Rev 4.15 review: a database marked demo is written only by MODE=demo.
+  const refused = await environmentRefusal(db, config);
+  if (refused) {
+    console.error(refused);
+    await db.end({ timeout: 2 });
+    process.exit(65);
+  }
   try {
     const r = await runRetention(db, log, {
       closedBefore,

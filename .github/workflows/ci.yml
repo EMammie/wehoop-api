@@ -22,6 +22,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - name: Generated Swift contracts are in sync
+        run: pnpm gen:swift --check
 
   integration:
     name: migrations + integration

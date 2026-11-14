@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { LeagueCodeSchema } from '../leagues/codes.js';
 import { GameStatusSchema, PeriodRefSchema, ScoreSchema } from './live-event.js';
+import { ReplayKindSchema } from './replay.js';
 
 /**
  * `league:{code}:scores` (plan §5): 5 s-coalesced scoreboard deltas for the
@@ -17,6 +18,8 @@ export const ScoreboardDeltaSchema = z.object({
   /** `games.last_seq`: a game screen compares it with its own seq to decide whether to catch up. */
   latestSeq: z.int().nonnegative(),
   observedAt: z.iso.datetime({ offset: true }).nullable(),
+  /** `games.replay`: a demo replay (rev 4.15), null for a real game. */
+  replay: ReplayKindSchema.nullable(),
 });
 export type ScoreboardDelta = z.infer<typeof ScoreboardDeltaSchema>;
 

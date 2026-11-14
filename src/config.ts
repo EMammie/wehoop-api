@@ -1,7 +1,11 @@
 import { z } from 'zod';
 import { type FaultSpec, parseFault } from './ingest/fault.js';
 
-const Mode = z.enum(['sim', 'trial', 'production']);
+/**
+ * `demo` (plan rev 4.15, M5 B4): the production scheduler against the in-process demo host
+ * (`pnpm demo run`), never a Sportradar key, never another destination.
+ */
+const Mode = z.enum(['sim', 'trial', 'production', 'demo']);
 export type Mode = z.infer<typeof Mode>;
 
 const emptyToUndefined = (v: unknown) => (v === '' ? undefined : v);
@@ -25,6 +29,28 @@ export function isLoopbackHost(host: string): boolean {
 export function isLoopbackUrl(url: string): boolean {
   try {
     return isLoopbackHost(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The in-process demo host shape: `http://<127.0.0.1 | localhost | ::1>:<port>` with nothing after
+ * the origin. Not 0.0.0.0: the demo host binds the configured hostname, and 0.0.0.0 would expose it
+ * on every interface.
+ */
+export function isDemoHostUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      u.protocol === 'http:' &&
+      ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) &&
+      u.port !== '' &&
+      (u.pathname === '/' || u.pathname === '') &&
+      u.search === '' &&
+      u.username === '' &&
+      u.password === ''
+    );
   } catch {
     return false;
   }
@@ -88,7 +114,14 @@ const EnvSchema = z.object({
   SPORTRADAR_UNRIVALED_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
   SPORTRADAR_ACCESS_LEVEL: z.enum(['trial', 'production']).default('trial'),
   SPORTRADAR_PLAYBACK_URL: z.url().default('https://playback.sportradar.com'),
-  SPORTRADAR_BASE_URL: z.preprocess(emptyToUndefined, z.url().default(SPORTRADAR_DEFAULT_BASE_URL)),
+  // Trailing slashes stripped: resolvers append `/{league}/...` (a `/` would make `//wnba` 404).
+  SPORTRADAR_BASE_URL: z.preprocess(
+    emptyToUndefined,
+    z
+      .url()
+      .default(SPORTRADAR_DEFAULT_BASE_URL)
+      .transform((u) => u.replace(/\/+$/, '')),
+  ),
   QUOTA_WNBA: QuotaOverride,
   QUOTA_NCAAWB: QuotaOverride,
   QUOTA_UNRIVALED: QuotaOverride,
@@ -130,6 +163,11 @@ export interface Config {
   quotaOverrides: Record<string, { limit30d: number; reserve: number }>;
   /** True when DATABASE_URL (or the session URL) is the dev/integration stack (127.0.0.1:54322). */
   devStackDb: boolean;
+  /**
+   * True only when BOTH DATABASE_URL and the session URL are the dev stack: the bar for the
+   * demo-mode exemption (rev 4.15 (4)), so one dev-stack URL cannot carry a cloud database along.
+   */
+  devStackOnly: boolean;
   /** True when calls go to a loopback stand-in host (`pnpm sim serve`), never to api.sportradar.com. */
   rehearsal: boolean;
   api: { port: number; adminBearerToken?: string; baseUrl: string };
@@ -161,8 +199,34 @@ export function loadConfig(source: Record<string, string | undefined> = process.
         `DATABASE_SESSION_URL is required when MODE=${e.MODE} (advisory lock + LISTEN need a session-mode connection)`,
       );
     }
-    if (!e.SPORTRADAR_WNBA_KEY && !e.SPORTRADAR_NCAAWB_KEY && !e.SPORTRADAR_UNRIVALED_KEY) {
+    if (
+      e.MODE !== 'demo' &&
+      !e.SPORTRADAR_WNBA_KEY &&
+      !e.SPORTRADAR_NCAAWB_KEY &&
+      !e.SPORTRADAR_UNRIVALED_KEY
+    ) {
       problems.push(`at least one SPORTRADAR_*_KEY is required when MODE=${e.MODE}`);
+    }
+  }
+  // Demo mode (rev 4.15 (4)): no credential, one destination. A key in the environment means the
+  // process was pointed at the wrong configuration; refusing is the only safe answer.
+  if (e.MODE === 'demo') {
+    const set = (
+      ['SPORTRADAR_WNBA_KEY', 'SPORTRADAR_NCAAWB_KEY', 'SPORTRADAR_UNRIVALED_KEY'] as const
+    ).filter((k) => e[k] !== undefined);
+    if (set.length > 0) {
+      problems.push(
+        `MODE=demo refuses to start with a Sportradar key set (${set.join(', ')}): the demo replays committed recordings and needs no credential`,
+      );
+    }
+    if (e.SPORTRADAR_BASE_URL === SPORTRADAR_DEFAULT_BASE_URL) {
+      problems.push(
+        'MODE=demo needs SPORTRADAR_BASE_URL = the in-process demo host (http://127.0.0.1:<port>, `pnpm demo run` sets it); never api.sportradar.com',
+      );
+    } else if (!isDemoHostUrl(e.SPORTRADAR_BASE_URL)) {
+      problems.push(
+        'MODE=demo needs SPORTRADAR_BASE_URL on a loopback host over http with an explicit port and no path (the in-process demo host)',
+      );
     }
   }
   if (e.MODE === 'production' && e.WEHOOP_FAULT) {
@@ -171,7 +235,7 @@ export function loadConfig(source: Record<string, string | undefined> = process.
   if (e.MODE === 'production' && e.SPORTRADAR_ACCESS_LEVEL !== 'production') {
     problems.push('SPORTRADAR_ACCESS_LEVEL must be "production" when MODE=production');
   }
-  if (e.SPORTRADAR_BASE_URL !== SPORTRADAR_DEFAULT_BASE_URL) {
+  if (e.SPORTRADAR_BASE_URL !== SPORTRADAR_DEFAULT_BASE_URL && e.MODE !== 'demo') {
     if (e.MODE === 'production') {
       problems.push(
         `SPORTRADAR_BASE_URL must be ${SPORTRADAR_DEFAULT_BASE_URL} when MODE=production (the override exists for local rehearsal servers only)`,
@@ -196,7 +260,14 @@ export function loadConfig(source: Record<string, string | undefined> = process.
   // rehearsal (loopback SPORTRADAR_BASE_URL) spends nothing and is exempt.
   const rehearsal = e.SPORTRADAR_BASE_URL !== SPORTRADAR_DEFAULT_BASE_URL;
   const devStackDb = isDevStackUrl(e.DATABASE_URL) || isDevStackUrl(sessionUrl);
-  if (e.MODE !== 'sim' && !rehearsal && devStackDb && e.TRIAL_ALLOW_DEV_DB !== '1') {
+  // MODE=demo spends nothing whatever its base URL; its own rules above say what is wrong.
+  if (
+    e.MODE !== 'sim' &&
+    e.MODE !== 'demo' &&
+    !rehearsal &&
+    devStackDb &&
+    e.TRIAL_ALLOW_DEV_DB !== '1'
+  ) {
     problems.push(
       `DATABASE_URL points at the dev/integration stack (${describeDbUrl(e.DATABASE_URL)}) while MODE=${e.MODE} would spend real quota: \`supabase db reset\` and \`pnpm test:int\` erase that database, and with it the quota ledger (provider_calls, reservations, verified limits, rate slots) while Sportradar still counts every call. Point DATABASE_URL / DATABASE_SESSION_URL / SUPABASE_* at the persistent trial stack (\`pnpm trial:db start\`, port 55322, see .env.example) or set TRIAL_ALLOW_DEV_DB=1 to accept the loss`,
     );
@@ -229,6 +300,7 @@ export function loadConfig(source: Record<string, string | undefined> = process.
       ...(e.QUOTA_UNRIVALED ? { unrivaled: e.QUOTA_UNRIVALED } : {}),
     },
     devStackDb,
+    devStackOnly: isDevStackUrl(e.DATABASE_URL) && isDevStackUrl(sessionUrl),
     rehearsal,
     api: {
       port: e.PORT,

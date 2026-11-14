@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { GameStatusSchema } from './live-event.js';
+import { ReplayKindSchema } from './replay.js';
 
 /**
  * Pulse: the clock heartbeat (plan §3). Sent every 10 s per live game and once
@@ -19,5 +20,7 @@ export const PulseSchema = z.object({
   clockRunning: z.boolean().nullable(),
   clockAsOf: z.iso.datetime({ offset: true }).nullable(),
   observedAt: z.iso.datetime({ offset: true }),
+  /** `games.replay`: a demo replay (rev 4.15), null for a real game. */
+  replay: ReplayKindSchema.nullable(),
 });
 export type Pulse = z.infer<typeof PulseSchema>;

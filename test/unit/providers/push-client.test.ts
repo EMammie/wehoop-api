@@ -215,6 +215,88 @@ describe('PushStream', () => {
     expect(stream.state.heartbeats).toBeGreaterThan(3);
   });
 
+  /**
+   * A fetch whose body ignores the abort signal, as a body read did on Node 22 (2026-11-14: a
+   * stopped stream kept reading heartbeats and its watch never ended). `heartbeatMs` null = silent.
+   */
+  function abortDeafFetch(heartbeatMs: number | null) {
+    let opened = 0;
+    let cancelled = 0;
+    const fetchImpl = (async () => {
+      opened++;
+      let timer: ReturnType<typeof setInterval> | null = null;
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(`${JSON.stringify(events[0])}\n`));
+          if (heartbeatMs !== null)
+            timer = setInterval(
+              () => c.enqueue(new TextEncoder().encode('{"heartbeat":{"interval":5000}}\n')),
+              heartbeatMs,
+            );
+        },
+        cancel() {
+          cancelled++;
+          if (timer) clearInterval(timer);
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, opened: () => opened, cancelled: () => cancelled };
+  }
+
+  it('stop() ends the stream even when the body ignores the abort (Node 22): no line after stop', async () => {
+    const f = abortDeafFetch(10);
+    let afterStop = 0;
+    let stopping = false;
+    const stream = new PushStream({
+      db: null,
+      log,
+      resolver: resolverFor('http://127.0.0.1:9'),
+      league: 'wnba',
+      runId: null,
+      feed: 'push_events',
+      watchdogMs: 5_000,
+      fetchImpl: f.fetchImpl,
+      onLine: () => {
+        if (stopping) afterStop++;
+      },
+    });
+    void stream.start();
+    await until(() => stream.state.heartbeats >= 3);
+    stopping = true;
+    const t = Date.now();
+    await stream.stop();
+    expect(Date.now() - t).toBeLessThan(500);
+    expect(stream.state.status).toBe('stopped');
+    expect(f.cancelled()).toBe(1);
+    await sleep(50);
+    expect(afterStop).toBe(0);
+    expect(f.opened()).toBe(1);
+  });
+
+  it('the watchdog ends a silent connection whose body ignores the abort, and reconnects', async () => {
+    const f = abortDeafFetch(null);
+    const stream = new PushStream({
+      db: null,
+      log,
+      resolver: resolverFor('http://127.0.0.1:9'),
+      league: 'wnba',
+      runId: null,
+      feed: 'push_clock',
+      watchdogMs: 60,
+      backoffMinMs: 10,
+      backoffMaxMs: 20,
+      fetchImpl: f.fetchImpl,
+      onLine: () => undefined,
+    });
+    void stream.start();
+    await until(() => f.opened() >= 2);
+    await stream.stop();
+    expect(stream.state.watchdogTrips).toBeGreaterThanOrEqual(1);
+    expect(f.opened()).toBeGreaterThanOrEqual(2); // reconnected after the trip
+    expect(f.cancelled()).toBe(f.opened());
+  });
+
   it('a non-2xx answer is a failed attempt: logged, backed off, retried', async () => {
     let n = 0;
     const srv = createServer((_req, res) => {

@@ -2,6 +2,7 @@ import type { Db } from '../db/client.js';
 import type { Logger } from '../logger.js';
 import type { GameStatus } from '../model/live-event.js';
 import { type Pulse, PulseSchema } from '../model/pulse.js';
+import type { ReplayKind } from '../model/replay.js';
 import { gameChannel, type LiveTransport } from './transport.js';
 
 /** Build a pulse from the games observation columns + last_seq. Null if the game is unknown. */
@@ -19,9 +20,11 @@ export async function buildPulse(
       clockRunning: boolean | null;
       clockAsOf: Date | null;
       observedAt: Date | null;
+      replay: ReplayKind | null;
     }[]
   >`select last_seq::text as "lastSeq", status, clock, clock_decimal as "clockDecimal",
-           clock_running as "clockRunning", clock_as_of as "clockAsOf", observed_at as "observedAt"
+           clock_running as "clockRunning", clock_as_of as "clockAsOf", observed_at as "observedAt",
+           replay
     from public.games where id = ${gameId}`;
   if (!g) return null;
   return PulseSchema.parse({
@@ -35,6 +38,7 @@ export async function buildPulse(
     clockRunning: g.clockRunning,
     clockAsOf: g.clockAsOf ? g.clockAsOf.toISOString() : null,
     observedAt: (g.observedAt ?? now).toISOString(),
+    replay: g.replay,
   });
 }
 

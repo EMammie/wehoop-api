@@ -2,9 +2,12 @@ import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
-import { createSessionDb, tryAcquireWorkerLock } from '../db/session-client.js';
 import { TRIAL_PROFILES, type TrialProfile } from '../ingest/cadence.js';
-import { createFaultInjector } from '../ingest/fault.js';
+import {
+  assertEnvironment,
+  EnvironmentRefusedError,
+  markProductionOnStart,
+} from '../ingest/environment.js';
 import {
   GameWatcher,
   HttpDocumentSource,
@@ -14,20 +17,15 @@ import {
 import { QuotaGuard, QuotaRefusedError } from '../ingest/quota-guard.js';
 import { ReferenceIngester } from '../ingest/reference.js';
 import { endRun, startRun } from '../ingest/runs.js';
-import { Scheduler } from '../ingest/scheduler.js';
 import {
   assertSpeedAllowed,
   resolveGame,
   runTrialWatch,
   type TrialWatchOutcome,
 } from '../ingest/trial-mode.js';
+import { openWorkerRuntime, runScheduler } from '../ingest/worker-runtime.js';
 import { LeagueCodeSchema } from '../leagues/codes.js';
 import { adapterFor } from '../leagues/registry.js';
-import { OutboxPublisher } from '../live/outbox-publisher.js';
-import { PulseSender } from '../live/pulse.js';
-import { DbScoreboardSource, ScoreboardSender } from '../live/scoreboard.js';
-import { SupabaseBroadcastTransport } from '../live/supabase-broadcast.js';
-import { type LiveTransport, MemoryTransport } from '../live/transport.js';
 import { createLogger } from '../logger.js';
 import { SportradarHttp } from '../providers/sportradar/http.js';
 import { SimulationClient } from '../providers/sportradar/simulation.js';
@@ -100,6 +98,13 @@ async function main() {
   const env = args.mode ? { ...process.env, MODE: args.mode } : process.env;
   const config = loadConfig(env);
   const log = createLogger({ level: config.logLevel });
+  if (config.mode === 'demo') {
+    // The demo worker runs inside `pnpm demo run`, next to the host it is locked to.
+    log.error(
+      'MODE=demo runs through `pnpm demo run` (the demo host + this scheduler, one process)',
+    );
+    process.exit(64);
+  }
   /** Integer flags; `min` 0 for --pace, 1 otherwise. Usage error (64) on anything else. */
   const intArg = (name: string, value: string | undefined, min: number): number | null => {
     if (value === undefined) return null;
@@ -168,6 +173,17 @@ async function main() {
   }
 
   const db = createDb(config.db.url);
+  // Rev 4.15 (4): only MODE=demo writes to a database marked demo; a production worker marks an
+  // unmarked non-dev database `production` before the lock work, so `pnpm demo init` refuses it.
+  try {
+    await assertEnvironment(db, config);
+    await markProductionOnStart(db, config, log);
+  } catch (err) {
+    if (!(err instanceof EnvironmentRefusedError)) throw err;
+    log.error(err.message);
+    await db.end({ timeout: 2 });
+    process.exit(65);
+  }
   let shuttingDown = false;
   let stopRequested = false;
   /**
@@ -181,89 +197,28 @@ async function main() {
     log.info({ reason }, 'worker stopping');
     process.exit(code);
   };
-  const session = createSessionDb(config.db.sessionUrl, () => {
-    if (!shuttingDown) {
-      log.error('session connection lost; stopping ingestion');
-      void shutdown('session_connection_lost', watchExitCode ?? 1);
-    }
+  // Lock, transport, publisher (drained on start), pulse and scoreboard senders, orphan cleanup:
+  // the same lifecycle `pnpm demo run` uses (src/ingest/worker-runtime.ts). The scoreboard runs
+  // only with the scheduler (production) or `--scores`: a single-game trial watch keeps its
+  // behaviour and does not query public.games every 5 s.
+  const rt = await openWorkerRuntime({
+    db,
+    config,
+    log,
+    lockWaitMs,
+    scores: scheduler || args.scores,
+    onSessionLost: () => {
+      if (!shuttingDown) {
+        log.error('session connection lost; stopping ingestion');
+        void shutdown('session_connection_lost', watchExitCode ?? 1);
+      }
+    },
   });
-  // After a kill -9 the previous worker's session lock lingers until Postgres notices the dead
-  // socket; wait for it (bounded) instead of failing the restart.
-  const lockStarted = Date.now();
-  let locked = await tryAcquireWorkerLock(session);
-  while (!locked && Date.now() - lockStarted < lockWaitMs) {
-    log.warn(
-      { waitedMs: Date.now() - lockStarted },
-      'another worker holds the ingester lock; retrying',
-    );
-    await new Promise((r) => setTimeout(r, 1000));
-    locked = await tryAcquireWorkerLock(session);
-  }
-  if (!locked) {
+  if (!rt) {
     shuttingDown = true;
-    log.error('another worker holds the ingester lock; exiting');
-    await session.end({ timeout: 2 });
     process.exit(2);
   }
-  log.info({ mode: config.mode, pid: process.pid, fault: config.fault }, 'worker lock acquired');
-  // `pnpm dev:worker` runs pnpm -> tsx -> node; signals sent to the wrappers do not reach this
-  // process. Crash tests must target this pid.
-  console.log(`WORKER_PID=${process.pid}`);
-
-  let transport: LiveTransport;
-  if (config.supabase.serviceRoleKey) {
-    transport = new SupabaseBroadcastTransport({
-      url: config.supabase.url,
-      serviceRoleKey: config.supabase.serviceRoleKey,
-      log,
-    });
-  } else {
-    log.warn(
-      'SUPABASE_SERVICE_ROLE_KEY not set: broadcasts go to an in-memory transport (nobody receives them)',
-    );
-    transport = new MemoryTransport();
-  }
-  const fault = createFaultInjector(config.fault, undefined, (m) => log.warn(m));
-  const publisher = new OutboxPublisher({ db, log, transport, fault });
-  await publisher.start(session);
-  log.info('outbox drained on startup');
-  const pulse = new PulseSender({ db, transport, log });
-  // league:{code}:scores (plan §5): 5 s-coalesced scoreboard deltas, straight to the transport.
-  // Only with the scheduler (production) or `--scores`: a single-game trial watch keeps its
-  // behaviour and does not query public.games every 5 s.
-  const scoreboard = new ScoreboardSender({ transport, log, source: new DbScoreboardSource(db) });
-  if (scheduler || args.scores) scoreboard.start();
-
-  // This process holds the single-ingester lock, so any root run still marked running belongs
-  // to a worker that died (kill -9 never reaches endRun). Close them before opening ours.
-  const orphaned = await db<{ id: string }[]>`
-    update ingest.ingestion_runs set status = 'aborted', ended_at = now(),
-      error = coalesce(error, 'worker died; marked aborted by the next lock holder')
-    where status = 'running' and kind in ('replay', 'watch_game') returning id::text`;
-  const orphanedIds = orphaned.map((r) => Number(r.id));
-  // Their push_stream / backfill sub-runs died with them (and any sub-run whose parent is no longer running).
-  const orphanedSubRuns = await db<{ id: string }[]>`
-    update ingest.ingestion_runs s set status = 'aborted', ended_at = now(),
-      error = coalesce(s.error, 'parent watch run is not running; marked aborted by the next lock holder')
-    where s.status = 'running' and s.parent_run_id is not null
-      and not exists (select 1 from ingest.ingestion_runs p where p.id = s.parent_run_id and p.status = 'running')
-    returning s.id::text`;
-  if (orphanedSubRuns.length > 0)
-    log.warn({ runs: orphanedSubRuns.map((r) => Number(r.id)) }, 'aborted orphaned sub-runs');
-  if (orphanedIds.length > 0) {
-    log.warn({ runs: orphanedIds }, 'aborted orphaned runs');
-    // Their budget reservations never reached runTrialWatch's release (kill -9, host restart).
-    const released = await db<{ id: string }[]>`
-      update ingest.budget_reservations set released_at = now(),
-        note = coalesce(note, '') || ' [released by the next lock holder: watch run died]'
-      where run_id = any(${orphanedIds}) and released_at is null returning id::text`;
-    if (released.length > 0)
-      log.warn(
-        { reservations: released.map((r) => Number(r.id)) },
-        'released orphaned reservations',
-      );
-  }
-
+  const { session, publisher, pulse, scoreboard, fault, orphanedIds } = rt;
   // Run + source.
   const untilClosed = args.until === 'closed';
   let runMeta: Record<string, unknown> = {};
@@ -282,10 +237,10 @@ async function main() {
     sessionId = args.session ?? null;
     if (!sessionId && !args['new-session']) {
       const [prev] = await db<{ id: string; sessionId: string | null }[]>`
-        select id::text, meta->>'sessionId' as "sessionId" from ingest.ingestion_runs
-        where kind = 'replay' and source = 'simulation' and id = any(${orphanedIds})
-          and meta->>'recordingId' = ${args.recording}
-        order by id desc limit 1`;
+        select r.id::text, r.meta->>'sessionId' as "sessionId" from ingest.ingestion_runs r
+        where r.kind = 'replay' and r.source = 'simulation' and r.id = any(${orphanedIds})
+          and r.meta->>'recordingId' = ${args.recording}
+        order by r.id desc limit 1`;
       if (prev?.sessionId) {
         sessionId = prev.sessionId;
         log.warn(
@@ -342,41 +297,26 @@ async function main() {
     const leagues = (['wnba', 'ncaawb', 'unrivaled'] as const).filter(
       (l) => config.sportradar.keys[l] !== undefined,
     );
-    const guard = new QuotaGuard({ db, log, overrides: config.quotaOverrides });
-    const sched = new Scheduler({
-      db,
-      log,
-      config,
-      guard,
-      pulse,
-      fault,
-      leagues,
-      isStopped: () => stopRequested,
-      // A signal interrupts the between-tick sleep so shutdown does not wait for the next tick.
-      sleep: (ms) =>
-        new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, ms);
-          wakeIdle = () => {
-            clearTimeout(t);
-            resolve();
-          };
-        }),
-      // A rehearsal ticks faster so the fake provider's compressed game is noticed in time.
-      ...(config.rehearsal ? { tickMs: Math.max(1000, Math.round(60_000 / speed)) } : {}),
-    });
-    log.info({ leagues, mode: config.mode, rehearsal: config.rehearsal }, 'scheduler mode');
+    let outcome: Awaited<ReturnType<typeof runScheduler>>;
     try {
-      await sched.run();
+      outcome = await runScheduler(rt, {
+        config,
+        log,
+        leagues: [...leagues],
+        speed,
+        isStopped: () => stopRequested,
+        onSleep: (wake) => {
+          wakeIdle = wake;
+        },
+        drainTimeoutMs,
+        drainDeadline: () => drainDeadline,
+      });
     } catch (err) {
       log.error({ err }, 'scheduler failed');
       process.exit(1);
     }
-    pulse.stop();
-    const left = await finalDrain();
-    publisher.stop();
-    scoreboard.stop();
-    log.info({ stats: sched.stats, unpublished: left, stoppedBy }, 'scheduler finished');
-    await exitAfterTail(left);
+    log.info({ stats: outcome.stats, unpublished: outcome.left, stoppedBy }, 'scheduler finished');
+    await exitAfterTail(outcome.left);
     return;
   }
 

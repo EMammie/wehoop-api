@@ -1,6 +1,7 @@
 import { parseArgs } from 'node:util';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
+import { environmentRefusal } from '../ingest/environment.js';
 import {
   gameIdOfChannel,
   outboxLag,
@@ -40,6 +41,13 @@ async function main() {
   };
   const config = loadConfig();
   const db = createDb(config.db.url, { max: 2 });
+  // Rev 4.15 review: a database marked demo is written only by MODE=demo.
+  const refused = await environmentRefusal(db, config);
+  if (refused) {
+    console.error(refused);
+    await db.end({ timeout: 2 });
+    process.exit(65);
+  }
   try {
     switch (cmd) {
       case 'status': {

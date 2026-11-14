@@ -1,3 +1,6 @@
 -- Local development seed. Reference rows live in the migration itself so that
 -- production gets them too; this file is for dev-only convenience data.
 -- Intentionally empty for M0.
+-- Dev data comes from `pnpm seed:dev` (M5 B2): the committed fixtures through
+-- ReferenceIngester and applyChanges. SQL inserts here would bypass identity,
+-- the freshness policy and the outbox, so this file stays empty.

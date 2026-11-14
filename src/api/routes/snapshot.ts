@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { GameStatus, PeriodType } from '../../model/live-event.js';
+import type { ReplayKind } from '../../model/replay.js';
 import { type Snapshot, SnapshotSchema } from '../../model/snapshot.js';
 import type { AppEnv } from '../server.js';
 
@@ -53,6 +54,7 @@ export async function loadSnapshot(
         clockAsOf: Date | null;
         observedAt: Date | null;
         elamTargetScore: number | null;
+        replay: ReplayKind | null;
         lastSeq: string;
         retainedFromSeq: string;
         serverTime: Date;
@@ -62,7 +64,7 @@ export async function loadSnapshot(
              home_points as "homePoints", away_points as "awayPoints", current_period as "currentPeriod",
              period_type as "periodType", current_period_sequence as "currentPeriodSequence",
              clock, clock_decimal as "clockDecimal", clock_running as "clockRunning", clock_as_of as "clockAsOf",
-             observed_at as "observedAt", elam_target_score as "elamTargetScore",
+             observed_at as "observedAt", elam_target_score as "elamTargetScore", replay,
              last_seq::text as "lastSeq", retained_from_seq::text as "retainedFromSeq",
              now() as "serverTime"
       from public.games where id = ${gameId}`;
@@ -117,8 +119,16 @@ export async function loadSnapshot(
       join public.teams t on t.id = ps.team_id
       where ps.game_id = ${gameId}
       order by (ps.team_id = g.home_team_id) desc, ps.starter desc nulls last, ps.full_name, ps.provider_player_id`;
-    const events = await tx<{ providerEventId: string; body: unknown }[]>`
-      select provider_event_id as "providerEventId", payload as body
+    const events = await tx<
+      {
+        providerEventId: string;
+        providerSequence: string | null;
+        providerNumber: number | null;
+        body: unknown;
+      }[]
+    >`
+      select provider_event_id as "providerEventId", provider_sequence::text as "providerSequence",
+             provider_number as "providerNumber", payload as body
       from public.play_events where game_id = ${gameId} and deleted_at is null
       order by period_sequence nulls first, provider_sequence nulls first, provider_number nulls first, wall_clock nulls first, provider_event_id`;
     return SnapshotSchema.parse({
@@ -146,6 +156,7 @@ export async function loadSnapshot(
         clockAsOf: g.clockAsOf ? g.clockAsOf.toISOString() : null,
         observedAt: g.observedAt ? g.observedAt.toISOString() : null,
         elamTargetScore: g.elamTargetScore,
+        replay: g.replay,
       },
       periods: periods.map((p) => ({
         number: p.number,
@@ -159,7 +170,12 @@ export async function loadSnapshot(
         stats: { ...t.stats, extra: t.extra ?? {} },
       })),
       playerStats,
-      events,
+      events: events.map((e) => ({
+        providerEventId: e.providerEventId,
+        providerSequence: e.providerSequence === null ? null : Number(e.providerSequence),
+        providerNumber: e.providerNumber,
+        body: e.body,
+      })),
       seq: Number(g.lastSeq),
       retainedFrom: Number(g.retainedFromSeq),
       coverage: g.coverage,

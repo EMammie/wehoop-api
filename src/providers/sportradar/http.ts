@@ -8,6 +8,7 @@ import {
 } from '../../ingest/quota-guard.js';
 import type { LeagueCode } from '../../leagues/codes.js';
 import type { Logger } from '../../logger.js';
+import { assertDestination, redirectPolicy } from './destination-guard.js';
 import type { RateLimiter } from './rate-limiter.js';
 import { type Feed, type FeedParams, redactUrl, type UrlResolver } from './urls.js';
 
@@ -53,6 +54,11 @@ export interface SportradarHttpDeps {
   reservationId?: number | null;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /**
+   * Demo mode (rev 4.15): the only origin a request may go to. Defaults to the process-wide lock
+   * (`lockDestination`, set by `createResolver` for MODE=demo); unset outside demo mode.
+   */
+  allowedOrigin?: string;
 }
 
 /**
@@ -106,6 +112,9 @@ export class SportradarHttp {
     params: FeedParams = {},
   ): Promise<FetchedDocument<T>> {
     const { url, headers } = this.deps.resolver.resolve(feed, params);
+    // Before anything else (guard, slot, fetch): in demo mode a URL off the demo host is refused
+    // with no network I/O and no provider_calls row.
+    assertDestination(url, this.deps.log, this.deps.allowedOrigin);
     const source = this.deps.resolver.source;
     // `rehearsal` (local stand-in host) is limited and guarded like trial but never counted.
     const counted = countsTowardQuota(source);
@@ -130,6 +139,7 @@ export class SportradarHttp {
       const res = await fetchImpl(url, {
         headers: { accept: 'application/json', ...headers },
         signal: AbortSignal.timeout(this.deps.timeoutMs ?? 20_000),
+        ...redirectPolicy(this.deps.allowedOrigin),
       });
       status = res.status;
       text = await res.text();
