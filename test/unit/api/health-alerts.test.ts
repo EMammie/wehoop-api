@@ -18,6 +18,7 @@ const healthy: HealthFacts = {
   runningWatches: 1,
   pushRuns: [],
   regressingGames: [],
+  oldestReplayAt: null,
 };
 
 describe('healthAlerts (docs/DEPLOY.md alert conditions)', () => {
@@ -43,6 +44,14 @@ describe('healthAlerts (docs/DEPLOY.md alert conditions)', () => {
     const a = healthAlerts({ ...healthy, regressingGames: ['g1', 'g2'] });
     expect(a).toHaveLength(2);
     expect(a[0]).toMatch(/^consecutive_regressions: game g1/);
+  });
+
+  it('demo: a replay older than 15 days means the weekly purge is a day overdue', () => {
+    const at = (days: number) => new Date(now.getTime() - days * 86_400_000);
+    expect(healthAlerts({ ...healthy, oldestReplayAt: at(15) })).toEqual([]);
+    expect(healthAlerts({ ...healthy, oldestReplayAt: at(15.5) })).toEqual([
+      expect.stringMatching(/^replay_purge_overdue: oldest replay game is 15 days old/),
+    ]);
   });
 
   it('a push stream disconnected for > 60 s, from the push_stream run meta; stopped streams never alert', () => {

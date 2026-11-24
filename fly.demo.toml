@@ -27,7 +27,8 @@ kill_timeout = 75
 [processes]
   api = "node src/bin/api.js"
   # The demo host + the production scheduler against it, one process (src/bin/demo.ts).
-  worker = "node src/bin/demo.js run"
+  # --auto-purge: deletes replays quiet for 7 days, about weekly (docs/DEPLOY.md "Cleanup").
+  worker = "node src/bin/demo.js run --auto-purge"
 
 [http_service]
   processes = ["api"]

@@ -431,13 +431,25 @@ them once they are older than the cutoff. Demo databases and the dev stack only.
 deletes `game_changes`. Switching to production selects the production app and project; it never
 depends on a purge.
 
+**Weekly, automatic** (`demo run --auto-purge`, set in `fly.demo.toml`; `src/ingest/demo-auto-purge.ts`):
+the demo worker checks 5 min after start and every 6 h, and once the oldest replay game's tip-off is 14
+days old it runs the same purge with a 7 day cutoff, so the oldest game left is 7 days old and the next
+run is a week away. There is no stored schedule: the data decides, so a redeploy neither resets nor
+repeats it. It runs in the lock holder only, ends after its current game on SIGTERM, and a failure is
+logged (`auto purge failed`) and retried at the next check without touching the scheduler. A game the
+purge has to skip (dead outbox rows, say) keeps it due, so the other games are then purged at every
+check. Every check logs `auto purge: not due` or `auto purge: done` with its counts; `/health` raises
+`replay_purge_overdue` when the oldest replay is over 15 days old. Real time only (`--speed` > 1 is
+refused). The deletes do not shrink the database's reported size; the freed space is reused.
+
 ### Hosted demo (deployed 2026-11-11: Supabase `wehoop-demo` + Fly app `wehoop-demo`, https://wehoop-demo.fly.dev)
 
 Steps 1-3 ran on 2026-11-11 on the owner's go (evidence: Wehoop `devlog/evidence/M5.md`, "B4 hosted
 demo"). Differences from the commands below: `demo init` ran from a Mac through the session pooler
 for both URLs (the direct host is IPv6-only); the secrets came from `~/wehoop-demo.env` via
-`fly secrets import` (no SPORTRADAR_* line); `fly deploy -c fly.demo.toml --ha=false`. Step 4 (weekly
-purge) has not run. **Known issue (fixed in the data, 2026-11-11; deployed 2026-11-12 01:37Z at `e3ec22b`)**: the compact
+`fly secrets import` (no SPORTRADAR_* line); `fly deploy -c fly.demo.toml --ha=false`. Step 4 (purge)
+ran by hand from a Mac on 2026-11-24 03:14Z (42 games purged, 65 left); `--auto-purge` replaces it from
+the next deploy (NOT DEPLOYED yet). **Known issue (fixed in the data, 2026-11-11; deployed 2026-11-12 01:37Z at `e3ec22b`)**: the compact
 fixtures sampled summaries sparser than pbp, so the demo host served a summary minutes older than
 the pbp it had just served, and a basket scored in between flickered down and back (`status`
 changes 57-28 -> 55-28 -> 57-28 on the first hosted slot; 8 same-period drops on the dev-stack slot
@@ -529,7 +541,7 @@ fly secrets set -a wehoop-demo DATABASE_URL=... DATABASE_SESSION_URL=... \
   SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... ADMIN_BEARER_TOKEN=...          # NOT RUN (no SPORTRADAR_* secret, ever)
 fly deploy -c fly.demo.toml                                                      # NOT RUN (builds the Dockerfile `demo` target, fixtures included)
 fly scale count worker=1 -a wehoop-demo                                          # NOT RUN
-# 4. Weekly cleanup (cron or by hand, against the demo project only):
+# 4. Cleanup by hand (the worker does it weekly with --auto-purge; demo project only):
 pnpm demo purge --older-than 7d                                                  # NOT RUN
 ```
 
@@ -556,6 +568,7 @@ case Fly should restart the API on. `pnpm health check [--url]` exits 1 on 503, 
 | `watch_without_provider_calls` | a running `watch_game`/`replay` run with a provider-backed source but no `provider_calls` row for | > 5 min | quota refused (`/v1/admin/quota`), key invalid (401 in logs), provider down |
 | `consecutive_regressions` | the newest 3 `stale_observations` rows of one game within the last 24 h are all `run_regresses_state` (plan §4 rule 2) | 3 | a replay/restart keeps presenting older state; escape is `pnpm game rebuild` (operator action) |
 | `push_stream_disconnected` | a `push_stream` sub-run's stream (meta mirrored by the worker) has `disconnectedSince` older than | > 60 s | provider stream outage; REST reconciliation keeps the game moving every 5 min; backfill runs on reconnect (skipped only when a REST pbp document of this generation was requested at or after the reconnect: the document covers everything up to its request, the stream everything after the reconnect). The watch's reservation covers one backfill pbp per possible events reconnect (`PUSH_BACKFILL_ALLOWANCE` = 20 - 1 = 19 whatever streams are open: a refunded clock attempt can leave all 20 attempts to the events stream; push total 94 REST + 20 connections + 19 backfills = 133, for WNBA and events-only leagues alike). A stream whose connection attempts exhaust the watch's allowance of 20 (`PUSH_CONNECTION_ALLOWANCE`, shared by both streams) stops for good with `lastError: connection allowance exhausted`; the watch continues on REST alone until it closes |
+| `replay_purge_overdue` | demo mode only: the oldest replay game's tip-off age (the weekly auto purge is a day overdue) | > 15 days | `auto purge` lines in the worker log (a skipped game names its reason); `pnpm demo purge --older-than 7d` by hand |
 
 Other operator commands: `pnpm outbox lag [--since 24h]` (p50/p95/max of `published_at -
 created_at`), `pnpm retention run --closed-before 30d [--dry-run]` (the only code that deletes

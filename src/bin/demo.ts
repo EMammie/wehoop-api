@@ -3,6 +3,11 @@ import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { isDevStackUrl, loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
+import {
+  type AutoPurgeJob,
+  oldestReplayTipOff,
+  startAutoPurge,
+} from '../ingest/demo-auto-purge.js';
 import { demoInit } from '../ingest/demo-init.js';
 import { purgeReplayGames } from '../ingest/demo-purge.js';
 import { VerifyRefusedError, verifySlot } from '../ingest/demo-verify.js';
@@ -35,13 +40,15 @@ import { lockDestination } from '../providers/sportradar/destination-guard.js';
  *
  *   pnpm demo run [--interval 180] [--include-synthetic] [--league wnba]... [--port 8790]
  *                 [--speed N [--epoch ISO]] [--lock-wait 60] [--drain-timeout 60]
+ *                 [--auto-purge]
  *     One process: the demo host (demo-host.ts) on 127.0.0.1:<port> serving the rotation (one
  *     replay every --interval minutes, today and tomorrow, US Eastern), and the production
  *     scheduler against it (single-ingester lock, outbox drain, pulses, league:*:scores, push
  *     with backfill for WNBA), the same lifecycle as `pnpm dev:worker` (worker-runtime.ts).
  *     Real time by default; --speed compresses the host's and the scheduler's clock around
  *     --epoch (default: now, printed as DEMO_EPOCH=...; a restart must pass the same value).
- *     Only on the dev stack or a database marked demo.
+ *     Only on the dev stack or a database marked demo. --auto-purge (real time only) runs `purge
+ *     --older-than 7d` about weekly inside the process (demo-auto-purge.ts).
  *   pnpm demo init
  *     Mark an empty (or already demo) database `demo`, write the synthetic product limits, load
  *     the reference fixtures (demo-init.ts). Exit 65 when refused.
@@ -86,6 +93,7 @@ async function main() {
       out: { type: 'string' },
       lead: { type: 'string' },
       keep: { type: 'boolean', default: false },
+      'auto-purge': { type: 'boolean', default: false },
     },
     allowPositionals: true,
     strict: true,
@@ -240,15 +248,11 @@ async function main() {
   if (cmd === 'purge') {
     if (!args.all && !args['older-than']) usage('purge needs --older-than <7d|ISO> or --all');
     const olderThan = args.all ? null : parseClosedBefore(args['older-than'] ?? '');
-    // Every recording a deploy may have rotated (not just this one's), so a slot of an older
-    // rotation is never purged while a host could still list or serve it.
-    const known = await Promise.all(
-      [...RECORDED_ROTATION, ...SYNTHETIC_ROTATION].map((e) => loadRecording(e)),
-    );
+    const horizonMs = await knownListingHorizonMs();
     const out = await purgeReplayGames(db, log, {
       olderThan,
       dryRun: args['dry-run'],
-      listingHorizonMs: listingHorizonMs(known),
+      listingHorizonMs: horizonMs,
     });
     const verb = out.dryRun ? 'would purge' : 'purged';
     for (const g of out.purged) {
@@ -272,7 +276,7 @@ async function main() {
         `left alone ${String(list.length).padStart(4)}  ${reason}: ${list.slice(0, 5).join(', ')}${list.length > 5 ? ', ...' : ''}`,
       );
     console.log(
-      `demo purge${out.dryRun ? ' --dry-run' : ''}: ${out.candidates} replay game(s) past the listing horizon (${Math.round(listingHorizonMs(known) / 60_000)} min) ${olderThan ? `closed and quiet, or never closed, since ${olderThan.toISOString()}` : '(--all)'}, ${out.purged.length} ${verb}, ${out.skipped.length + out.leftAlone.length} left alone, ${out.orphanSlots} provenance row(s) without a game ${out.dryRun ? 'would be ' : ''}removed${isDevStackUrl(config.db.url) ? ' [dev stack]' : ''}`,
+      `demo purge${out.dryRun ? ' --dry-run' : ''}: ${out.candidates} replay game(s) past the listing horizon (${Math.round(horizonMs / 60_000)} min) ${olderThan ? `closed and quiet, or never closed, since ${olderThan.toISOString()}` : '(--all)'}, ${out.purged.length} ${verb}, ${out.skipped.length + out.leftAlone.length} left alone, ${out.orphanSlots} provenance row(s) without a game ${out.dryRun ? 'would be ' : ''}removed${isDevStackUrl(config.db.url) ? ' [dev stack]' : ''}`,
     );
     await db.end({ timeout: 2 });
     return;
@@ -289,6 +293,8 @@ async function main() {
   } else if (args.epoch) {
     usage('--epoch only applies with --speed > 1');
   }
+  // Row ages are wall-clock: at a compressed speed they would not match the slots' tip-offs.
+  if (args['auto-purge'] && speed > 1) usage('--auto-purge only applies at real time (--speed 1)');
   const clock = demoClock(speed, epochMs);
   const lockWaitMs = (intArg('lock-wait', args['lock-wait'], 1) ?? 60) * 1000;
   const drainTimeoutMs = (intArg('drain-timeout', args['drain-timeout'], 1) ?? 60) * 1000;
@@ -297,6 +303,7 @@ async function main() {
   let stopRequested = false;
   let stoppedBy: string | null = null;
   let wakeIdle: (() => void) | null = null;
+  let autoPurge: AutoPurgeJob | null = null;
   let drainDeadline = Number.POSITIVE_INFINITY;
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
@@ -308,6 +315,8 @@ async function main() {
       stoppedBy = signal;
       log.warn({ signal }, 'stop requested; finishing the in-flight documents, then draining');
       wakeIdle?.();
+      // A running purge ends after its current game; awaited in the tail below.
+      void autoPurge?.stop();
     });
   }
   let shuttingDown = false;
@@ -357,6 +366,21 @@ async function main() {
   for (const c of upfront.conflicts) log.error({ providerGameId: c.providerGameId }, c.message);
   console.log(`DEMO_HOST=${host.url}`);
 
+  autoPurge =
+    args['auto-purge'] && !stopRequested
+      ? startAutoPurge({
+          log,
+          oldest: () => oldestReplayTipOff(db),
+          purge: async (olderThan, isStopped) =>
+            purgeReplayGames(db, log, {
+              olderThan,
+              dryRun: false,
+              listingHorizonMs: await knownListingHorizonMs(),
+              isStopped,
+            }),
+        })
+      : null;
+
   const scheduled = [...new Set(rotation.map((e) => e.league))];
   let outcome: Awaited<ReturnType<typeof runScheduler>>;
   try {
@@ -379,6 +403,7 @@ async function main() {
     log.error({ err }, 'scheduler failed');
     process.exit(1);
   }
+  await (autoPurge as AutoPurgeJob | null)?.stop();
   await host.close();
   log.info(
     { stats: outcome.stats, host: host.stats, unpublished: outcome.left, stoppedBy },
@@ -388,6 +413,16 @@ async function main() {
   await rt.session.end({ timeout: 2 });
   await db.end({ timeout: 2 });
   process.exit(outcome.left.pending > 0 ? 75 : 0);
+}
+
+/**
+ * The listing horizon over every recording a deploy may have rotated (not just this one's), so a
+ * slot of an older rotation is never purged while a host could still list or serve it.
+ */
+async function knownListingHorizonMs(): Promise<number> {
+  return listingHorizonMs(
+    await Promise.all([...RECORDED_ROTATION, ...SYNTHETIC_ROTATION].map((e) => loadRecording(e))),
+  );
 }
 
 main().catch((err) => {

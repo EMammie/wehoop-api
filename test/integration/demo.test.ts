@@ -2,14 +2,17 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { loadSnapshot } from '../../src/api/routes/snapshot.js';
+import { createApp } from '../../src/api/server.js';
 import { type Config, loadConfig } from '../../src/config.js';
 import { ensureGame } from '../../src/ingest/apply-changes.js';
+import { oldestReplayTipOff, startAutoPurge } from '../../src/ingest/demo-auto-purge.js';
 import { DEMO_QUOTA_LIMIT, demoInit } from '../../src/ingest/demo-init.js';
 import {
   CheckPurgeRefusedError,
   demoMaintenance,
+  type PurgeResult,
   purgeCheckGame,
   purgeReplayGames,
 } from '../../src/ingest/demo-purge.js';
@@ -372,6 +375,26 @@ describe('demo verify-slot', () => {
   }, 120_000);
 });
 
+describe('demo health', () => {
+  it('alerts when the oldest replay is past the weekly purge, in demo mode only', async () => {
+    const [g] = await db<{ at: Date }[]>`
+      select scheduled_at as at from public.games where id = ${gameId}`;
+    const alertsIn = async (c: Config) => {
+      const res = await createApp({ db, config: c, log }).request('/health');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { mode: string; alerts: string[] };
+      return body.alerts.filter((a) => a.startsWith('replay_purge_overdue'));
+    };
+    await db`update public.games set scheduled_at = now() - interval '16 days' where id = ${gameId}`;
+    try {
+      expect(await alertsIn(config)).toHaveLength(1);
+      expect(await alertsIn({ ...config, mode: 'sim' })).toEqual([]);
+    } finally {
+      await db`update public.games set scheduled_at = ${g?.at ?? fail()} where id = ${gameId}`;
+    }
+  });
+});
+
 describe('demo purge', () => {
   it('skips a game with unpublished outbox rows, then deletes the game and every dependent row in one transaction', async () => {
     expect(gameId).not.toBe('');
@@ -435,6 +458,10 @@ describe('demo purge', () => {
       expect.objectContaining({ gameId, reason: 'closed, not quiet since the cutoff' }),
     ]);
     // A dry run reports exactly what a real run deletes and deletes nothing.
+    // A worker shutting down: the purge ends before its next game.
+    const halted = await purge({ gameIds: [gameId], isStopped: () => true });
+    expect(halted.purged).toEqual([]);
+    expect(await dependents(gameId, runIds)).toEqual(before);
     const dry = await purge({ gameIds: [gameId], dryRun: true });
     expect(await dependents(gameId, runIds)).toEqual(before);
     const real = await purge({ gameIds: [gameId] });
@@ -475,11 +502,42 @@ describe('demo purge', () => {
     expect(resumable.leftAlone).toEqual([
       expect.objectContaining({ gameId: recreated.id, reason: 'inside the 30 h resume window' }),
     ]);
-    const neverClosed = await purge({
-      gameIds: [recreated.id],
-      olderThan: new Date(TIP + 86_400_000),
-    });
-    expect(neverClosed.purged.map((g) => g.gameId)).toEqual([recreated.id]);
+    // Through the worker's weekly job (demo run --auto-purge), real query and real purge.
+    const oldest = await oldestReplayTipOff(db);
+    expect(oldest?.getTime()).toBeLessThanOrEqual(TIP);
+    const runJob = async (nowMs: number) => {
+      const results: PurgeResult[] = [];
+      let checks = 0;
+      const job = startAutoPurge({
+        log,
+        oldest: async () => {
+          checks += 1;
+          const [r] = await db<{ at: Date }[]>`
+            select scheduled_at as at from public.games where id = ${recreated.id}`;
+          return r?.at ?? null;
+        },
+        purge: async (olderThan, isStopped) => {
+          const out = await purge({
+            gameIds: [recreated.id],
+            olderThan,
+            isStopped,
+            now: () => new Date(nowMs),
+          });
+          results.push(out);
+          return out;
+        },
+        firstCheckMs: 0,
+        checkEveryMs: 20,
+        now: () => new Date(nowMs),
+      });
+      await vi.waitFor(() => expect(checks).toBeGreaterThan(1), { timeout: 10_000 });
+      await job.stop();
+      return results;
+    };
+    expect(await runJob(TIP + 13 * 86_400_000)).toEqual([]);
+    const neverClosed = await runJob(TIP + 14 * 86_400_000);
+    expect(neverClosed).toHaveLength(1);
+    expect(neverClosed[0]?.purged.map((g) => g.gameId)).toEqual([recreated.id]);
     const [gone] = await db<{ n: number }[]>`
       select count(*)::int as n from public.games where id = ${recreated.id}`;
     expect(gone?.n).toBe(0);

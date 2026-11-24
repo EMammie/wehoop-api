@@ -54,6 +54,8 @@ export interface PurgeOptions {
   /** Restrict to these games (tests). */
   gameIds?: string[];
   now?: () => Date;
+  /** Asked before each game: true ends the purge there (the demo worker is shutting down). */
+  isStopped?: () => boolean;
 }
 
 export interface PurgedGame {
@@ -113,6 +115,7 @@ export async function purgeReplayGames(
     orphanSlots: 0,
   };
   for (const c of candidates) {
+    if (opts.isStopped?.()) return result;
     const out = await purgeOneGame(db, log, c, { dryRun: opts.dryRun, discardOutbox: false });
     if (out.purged) result.purged.push(out.purged);
     if (out.skipped) result.skipped.push(out.skipped);
