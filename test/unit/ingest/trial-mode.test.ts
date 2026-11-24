@@ -164,6 +164,29 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
               },
       },
     });
+  it('reads the kind-tagged recording (rev 4.15): change lines with kind, pulse and scores lines skipped', () => {
+    const plain = line(1, 'status', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.100Z', null);
+    const tagged = JSON.stringify({
+      kind: 'change',
+      ...JSON.parse(
+        line(2, 'status', '2026-01-01T00:00:01.000Z', '2026-01-01T00:00:01.300Z', null),
+      ),
+    });
+    const pulse = JSON.stringify({
+      kind: 'pulse',
+      receivedAt: '2026-01-01T00:00:02.000Z',
+      pulse: { v: 1, type: 'pulse', replay: 'recorded' },
+    });
+    const scores = JSON.stringify({
+      kind: 'scores',
+      receivedAt: '2026-01-01T00:00:03.000Z',
+      scores: {},
+    });
+    const stats = lagFromRecord([plain, tagged, pulse, scores]);
+    expect(stats.changes).toBe(2);
+    expect(stats.pipeline).toMatchObject({ n: 2, medianMs: 100, p95Ms: 300 });
+  });
+
   it('median and p95 of receivedAt - wallClock (event changes) and receivedAt - ts (every change)', () => {
     const lines = [
       line(

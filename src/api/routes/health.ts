@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { WORKER_LOCK_KEY } from '../../db/session-client.js';
+import { AUTO_PURGE_OVERDUE_MS, oldestReplayTipOff } from '../../ingest/demo-auto-purge.js';
 import { QuotaGuard } from '../../ingest/quota-guard.js';
 import type { AppEnv } from '../server.js';
 
@@ -10,6 +11,7 @@ export const HEALTH_THRESHOLDS = {
   watchWithoutCallMs: 5 * 60_000,
   pushDisconnectedMs: 60_000,
   consecutiveRegressions: 3,
+  replayPurgeOverdueMs: AUTO_PURGE_OVERDUE_MS,
 } as const;
 
 /** The push state a push_stream sub-run mirrors into its meta (src/ingest/trial-mode.ts). */
@@ -44,13 +46,16 @@ export interface HealthFacts {
   pushRuns: unknown;
   /** Games whose newest 3 stale_observations rows of the last 24 h are all run_regresses_state (plan §4 rule 2). */
   regressingGames: string[];
+  /** Demo mode: tip-off of the oldest replay game; null otherwise (and with no replay game). */
+  oldestReplayAt: Date | null;
 }
 
 /**
  * Alert conditions from the facts (pure, unit-tested): outbox lag > 30 s; dead
  * outbox rows; a running watch with no provider call for > 5 min; three
  * consecutive run_regresses_state rows for one game within 24 h (plan §4); a push stream
- * disconnected for > 60 s. Degraded keeps HTTP 200: Fly restarts only on 503,
+ * disconnected for > 60 s; on a demo, a replay older than 15 days (the weekly
+ * purge, demo-auto-purge.ts, is a day overdue). Degraded keeps HTTP 200: Fly restarts only on 503,
  * which is reserved for an unreachable database.
  */
 export function healthAlerts(f: HealthFacts): string[] {
@@ -72,6 +77,13 @@ export function healthAlerts(f: HealthFacts): string[] {
     alerts.push(
       `consecutive_regressions: game ${gameId} logged ${HEALTH_THRESHOLDS.consecutiveRegressions} run_regresses_state rows in a row; escape is pnpm game rebuild`,
     );
+  if (f.oldestReplayAt !== null) {
+    const ageMs = f.now.getTime() - f.oldestReplayAt.getTime();
+    if (ageMs > HEALTH_THRESHOLDS.replayPurgeOverdueMs)
+      alerts.push(
+        `replay_purge_overdue: oldest replay game is ${Math.floor(ageMs / 86_400_000)} days old (> 15); see "auto purge" in the worker log, or run pnpm demo purge --older-than 7d`,
+      );
+  }
   const runs = z.array(PushRunMetaSchema).safeParse(f.pushRuns);
   if (runs.success) {
     for (const run of runs.data) {
@@ -101,7 +113,7 @@ export function healthRoutes() {
   r.get('/health', async (c) => {
     const { db, config, log } = c.get('deps');
     try {
-      const [row] = await db<HealthFacts[]>`
+      const [row] = await db<Omit<HealthFacts, 'oldestReplayAt'>[]>`
         select now() as now,
           (select count(*)::int from ingest.broadcast_outbox where published_at is null and dead_at is null) as "outboxPending",
           (select (extract(epoch from (now() - min(created_at))) * 1000)::bigint::int
@@ -125,7 +137,8 @@ export function healthRoutes() {
              group by game_id
              having count(*) = ${HEALTH_THRESHOLDS.consecutiveRegressions} and bool_and(reason = 'run_regresses_state')) g) as "regressingGames"`;
       if (!row) throw new Error('health query returned no row');
-      const alerts = healthAlerts(row);
+      const oldestReplayAt = config.mode === 'demo' ? await oldestReplayTipOff(db) : null;
+      const alerts = healthAlerts({ ...row, oldestReplayAt });
       const pushRuns = z.array(PushRunMetaSchema).safeParse(row.pushRuns);
       return c.json({
         ok: true,

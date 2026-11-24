@@ -19,7 +19,10 @@ import { ChangesPageSchema, SnapshotSchema } from '../model/snapshot.js';
  * the reconnect contract (src/live/subscriber.ts) against the Hono API.
  * Logs `catch-up` whenever it pages /changes. `--record` appends every
  * applied GameChange as JSONL with how it arrived (broadcast | catch-up | buffer)
- * and `receivedAt` (our clock), which `pnpm trial lag --record` turns into the
+ * and `receivedAt` (our clock), as `{kind: 'change', via, receivedAt, change}`, every newer pulse as
+ * `{kind: 'pulse', receivedAt, pulse}` and, with --league, every scoreboard message as
+ * `{kind: 'scores', receivedAt, scores}` (readers that only know changes skip lines without
+ * `change`), which `pnpm trial lag --record` turns into the
  * median subscriber lag from `wall_clock` and from the change's own `ts`.
  */
 async function main() {
@@ -92,7 +95,10 @@ async function main() {
       deltas += parsed.data.deltas.length;
       const receivedAt = new Date().toISOString();
       if (args.record)
-        appendFileSync(args.record, `${JSON.stringify({ receivedAt, scores: parsed.data })}\n`);
+        appendFileSync(
+          args.record,
+          `${JSON.stringify({ kind: 'scores', receivedAt, scores: parsed.data })}\n`,
+        );
       for (const d of parsed.data.deltas) {
         log('scores', {
           gameId: d.gameId,
@@ -128,7 +134,16 @@ async function main() {
       if (args.record) {
         appendFileSync(
           args.record,
-          `${JSON.stringify({ via, receivedAt: new Date().toISOString(), change: c })}\n`,
+          `${JSON.stringify({ kind: 'change', via, receivedAt: new Date().toISOString(), change: c })}\n`,
+        );
+      }
+    },
+    onPulse: (p) => {
+      // Pulses carry the clock and the demo label (`replay`, rev 4.15); recorded as their own kind.
+      if (args.record) {
+        appendFileSync(
+          args.record,
+          `${JSON.stringify({ kind: 'pulse', receivedAt: new Date().toISOString(), pulse: p })}\n`,
         );
       }
     },

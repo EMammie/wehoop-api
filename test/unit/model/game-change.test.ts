@@ -87,8 +87,14 @@ describe('GameChange schema', () => {
       clockRunning: null,
       clockAsOf: null,
       observedAt: '2026-06-30T23:16:56+00:00',
+      replay: null,
     };
     expect(PulseSchema.safeParse(p).success).toBe(true);
+    // The demo label (rev 4.15) is required-nullable: absent is not the same as a real game.
+    expect(PulseSchema.safeParse({ ...p, replay: 'recorded' }).success).toBe(true);
+    expect(PulseSchema.safeParse({ ...p, replay: 'live' }).success).toBe(false);
+    const { replay: _r, ...withoutLabel } = p;
+    expect(PulseSchema.safeParse(withoutLabel).success).toBe(false);
     expect(PulseSchema.safeParse({ ...p, clockRunning: 'yes' }).success).toBe(false);
   });
 });

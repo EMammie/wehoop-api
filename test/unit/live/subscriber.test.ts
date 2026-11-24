@@ -48,6 +48,7 @@ class FakeServer implements ChangesApi {
       clockRunning: true,
       clockAsOf: new Date().toISOString(),
       observedAt: new Date().toISOString(),
+      replay: null,
       ...over,
     };
     await this.transport.publish(gameChannel(gameId), [{ event: 'pulse', payload: p }]);
@@ -78,6 +79,7 @@ class FakeServer implements ChangesApi {
         coverage: 'full',
         homeTeamId: null,
         awayTeamId: null,
+        replay: null,
         score: s.score,
         period: s.period,
         clock: null,
@@ -90,7 +92,12 @@ class FakeServer implements ChangesApi {
       periods: s.periods,
       teamStats: [],
       playerStats: [],
-      events: [...s.events.entries()].map(([providerEventId, body]) => ({ providerEventId, body })),
+      events: [...s.events.entries()].map(([providerEventId, body]) => ({
+        providerEventId,
+        providerSequence: null,
+        providerNumber: null,
+        body,
+      })),
       seq: this.stream.length,
       retainedFrom: this.retainedFrom,
       coverage: 'full',

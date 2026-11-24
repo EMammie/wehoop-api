@@ -176,6 +176,27 @@ describe('QuotaGuard', () => {
     expect(await guard.releaseStale(product)).toEqual([]);
   });
 
+  it('lists reservations in id order, numerically (a 10-digit id after a 9-digit one)', async () => {
+    const other = `${product}-order`;
+    await db`insert into ingest.product_quotas (product, limit_30d, qps, reserve, note)
+             values (${other}, 100, 1, 30, 'integration test: reservation order')`;
+    try {
+      // Explicit ids whose text order is the reverse of their numeric order ('1000000000' < '999999999').
+      await db`insert into ingest.budget_reservations (id, product, profile, reserved_calls, released_at, source)
+               overriding system value
+               values (999999999, ${other}, 'full', 1, now(), 'trial'),
+                      (1000000000, ${other}, 'full', 1, now(), 'trial')`;
+      const guard = new QuotaGuard({ db, log: silentLog });
+      expect((await guard.reservations({ product: other })).map((r) => String(r.id))).toEqual([
+        '999999999',
+        '1000000000',
+      ]);
+    } finally {
+      await db`delete from ingest.budget_reservations where product = ${other}`;
+      await db`delete from ingest.product_quotas where product = ${other}`;
+    }
+  });
+
   it('stamping verified_at (pnpm trial quota) lets the guard spend without an override', async () => {
     await db`update ingest.product_quotas set verified_at = now(), note = 'console 2026-11-01' where product = ${product}`;
     const guard = new QuotaGuard({ db, log: silentLog });

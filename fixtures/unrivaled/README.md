@@ -67,3 +67,14 @@ A replay file may mix game feeds (`pbp`, `summary`, `boxscore`: through `GameWat
 `standings`, `hierarchy`, `player_profile`, `seasonal_stats`, `league_leaders`: through
 `ReferenceIngester`). Reference documents never produce `game_changes`; schedule entries reach
 `applyChanges` as generation-less batches (plan §4).
+
+## Demo rotation (M5 B4, plan rev 4.15)
+
+`docs-838316ea-replay.jsonl` is in the demo rotation only with `pnpm demo run --include-synthetic`,
+labelled `synthetic` (hand-assembled: docs samples, the synthetic Elam target and synthetic request
+times; three pbp documents, not a watchable game). Only its game documents are served (its
+reference lines are loaded by `pnpm demo init`). Its request times already sit on the game's own
+timeline, so no request/game-clock mapping applies: the first game document is served 5 min after
+the slot's tip-off and `closed` at +80 min (span 75 min). The docs samples' event revisions
+(`updated`, 2025-11-13) are later than the synthetic request times, so after the shift they lie in the
+future of the moment they are served; this is one more reason the replay is labelled synthetic.

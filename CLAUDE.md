@@ -14,7 +14,8 @@ pnpm test                    # unit tests
 pnpm test:int                # integration tests; requires `supabase start`
 pnpm dev:worker --mode sim --league wnba --recording <id> --until closed   # replay one recording (3 s pbp polls)
 pnpm dev:worker --mode sim --league wnba --replay-file <jsonl> --pace 0    # replay a recorded session from disk
-pnpm dev:api                 # Hono API on :3000 (snapshot, changes, health)
+pnpm dev:api                 # Hono API on :3000 (snapshot, changes, health), watch mode
+pnpm api                     # the same API without watch (rehearsals, pnpm subscribe against it)
 pnpm sim list --league wnba  # list Sportradar simulation recordings (no API key)
 pnpm sim inject --game <uuid> --mutate-event <id> | --delete-event <id>   # inject a correction / deletion
 pnpm sim record --league wnba --recording <id> --out <file.jsonl>          # DB-free natural-pace recorder (replay fixture step 1)
@@ -37,6 +38,10 @@ pnpm subscribe --league wnba  # receive league:wnba:scores scoreboard deltas
 pnpm outbox status | requeue --channel game:<uuid> | --all | lag [--since 24h]   # dead-letter recovery, outbox lag p50/p95
 pnpm retention run --closed-before <ISO|30d> [--dry-run] [--game <uuid>]   # the only code that deletes game_changes (moves retained_from_seq)
 pnpm health check [--url http://127.0.0.1:3000]   # external monitor probe of /health: exit 0 healthy, 1 degraded/down
+pnpm gen:swift [--out <dir>] [--check]   # emit the iOS Contracts module from the Zod schemas (src/contracts/registry.ts) into generated/swift (committed); --check exits 1 on drift (CI)
+pnpm seed:dev [--league <code>]... [--force] [--dry-run]   # load every committed fixture of the three leagues into the DEV stack through the normal ingest paths (M5 B2; src/ingest/seed-manifest.ts); a reseed changes nothing; refuses any other database
+pnpm golden --out <dir>      # capture the golden JSON the app's TestSupport decodes (snapshots, /changes pages, pulses, view rows, players) from the seeded DEV stack; every body is Zod-parsed first (M5 S1; the app runs it via scripts/sync-goldens.sh)
+pnpm demo init | run [--interval 180] [--include-synthetic] [--league <code>]... [--speed N --epoch ISO] [--auto-purge] | purge --older-than 7d|--all [--dry-run] | verify-slot --slot <id> [--keep] | epoch --speed N [--lead 12] | export-slot --slot <id> --out <file>   # demo environment (M5 B4, rev 4.15): MODE=demo, no Sportradar key, the demo host (rotation of recorded replays, replay-<rec8>-<slot> ids) + the production scheduler in one process; dev stack or a database marked demo only (docs/DEPLOY.md "Demo environment")
 ```
 
 `tsx` loads no `.env`: the plain `pnpm trial` / `dev:worker` / `dev:api` / `sim` / `invariants` / `outbox` / `retention` scripts read only exported shell variables (`pnpm health` reads only `API_BASE_URL`/`PORT`). The `*:live` / `*:rehearsal` scripts are `node --env-file=.env --env-file=.env.<name> --import tsx src/bin/<x>.ts`.
@@ -45,7 +50,7 @@ pnpm health check [--url http://127.0.0.1:3000]   # external monitor probe of /h
 
 | File | Contents | Database | Loaded by |
 |---|---|---|---|
-| `.env` | `MODE=sim`, no Sportradar key, dev stack URLs | dev/integration stack (`pnpm supabase start`, db 54322; `db reset` and `pnpm test:int` destroy it) | every script, first |
+| `.env` | `MODE=sim`, no Sportradar key, dev stack URLs | dev/integration stack (`pnpm supabase start`, db 54322; `db reset` and `pnpm test:int` destroy it; `pnpm seed:dev` refills it from the fixtures) | every script, first |
 | `.env.trial` (git-ignored, chmod 600) | real trial keys, `MODE=trial`, `SPORTRADAR_BASE_URL` unset, `QUOTA_*` blank | **persistent trial stack** (`pnpm trial:db start`, db 55322, API 55321; its `ingest` schema is the quota ledger) | only `pnpm trial:live`, `worker:live`, `api:live`, `preflight:live`, second |
 | `.env.rehearsal` (git-ignored; copy `.env.rehearsal.example`) | fake keys, `MODE=trial`, `SPORTRADAR_BASE_URL=http://127.0.0.1:8787` (`pnpm sim serve`) | dev stack (from `.env`) | only the `*:rehearsal` scripts, second |
 
@@ -56,13 +61,13 @@ Rules: the later file overrides the earlier; **exported shell variables override
 ## Non-negotiables
 
 1. **Zod at every provider boundary.** Nothing from Sportradar, Supabase, or env is used until parsed. Provider schemas are `.loose()` at the top level and strict on fields we persist.
-2. **All writes to game state go through `src/ingest/apply-changes.ts`.** No other module writes `games`, `play_events`, `game_changes`, `game_periods`, or stats tables.
+2. **All writes to game state go through `src/ingest/apply-changes.ts`.** No other module writes `games`, `play_events`, `game_changes`, `game_periods`, or stats tables. The only sanctioned deleters are the retention job and `pnpm demo purge` (`src/ingest/demo-purge.ts`, also run weekly by `demo run --auto-purge`, plan rev 4.15 (5): whole closed or orphaned replay games, demo databases and the dev stack only).
 3. **Durable vs observation writes.** Score, period, status, play events, and stats are durable: they allocate `seq`, append `game_changes`, and insert `broadcast_outbox` in the same transaction. Clock and freshness metadata are observations: they update `games` observation columns and never touch `seq`.
 4. **Freshness before diff.** Freshness is decided by watch generation (`games.watch_run_id`, inherited by sub-runs via `ingestion_runs.parent_run_id`) and per-entity precedence (`docs/PLAN.md` §4), never by a monotonic progress score and never by hash inequality alone. A batch from an older generation, or a new generation whose game-level phase or period, or newest event position, is behind stored state, is stale: log to `ingest.stale_observations`, write nothing else. A new generation's summary-only document with a lower score is stale only when its clock places it earlier in the period (rule 2(d)); without a clock it is held as `ambiguous_regression` until corroborated. Within a generation, corrections that lower the clock, the score, or the event count are legitimate and are applied; a newer revision with an identical body advances `provider_updated_at` without a change; events are deleted only by an explicit provider marker (whose revision is persisted and may be older and ignored), never by absence; game-level fields follow the newest `observedAt`, except that a `gameView` whose phase or period is behind stored state, or whose status is less final (`complete` after `closed`, rev 4.9), in a batch with no event newer than the stored newest, is a lagging view and is superseded (`3-lagging-view`, rev 4.6); omitted fields never overwrite stored values; an unknown provider status keeps the stored status.
-5. **`game_changes` is append-only.** Code never updates or deletes rows. Retention is a separate job that moves `games.retained_from_seq`.
+5. **`game_changes` is append-only.** Code never updates or deletes rows. Retention is a separate job that moves `games.retained_from_seq`; `pnpm demo purge` (rev 4.15 (5), demo databases only) is the second sanctioned deleter and moves the floor the same way before deleting a replay game whole.
 6. **One `GameChange` schema** (`src/model/game-change.ts`) for Broadcast, `/changes`, and storage. Equality is tested on decoded objects, never JSON bytes.
 7. **No `any`.** `tsc --noEmit` and Biome must be green before any handoff.
-8. **Simulation and fixture calls never count toward quota.** `provider_calls.quota_counted` is true only for `trial` and `production`.
+8. **Simulation and fixture calls never count toward quota.** `provider_calls.quota_counted` is true only for `trial` and `production` (rehearsal and demo calls are source `rehearsal`).
 9. **Secrets only via env.** Never in code, fixtures, or devlog. `.env.example` lists every variable.
 10. **Clients can only read.** No RLS write policies for `anon`/`authenticated`, no Realtime insert policy, `ingest` schema never exposed.
 11. **Lowercase snake_case in SQL**, `timestamptz` for time, `text` not `varchar`, index every FK.
@@ -71,12 +76,14 @@ Rules: the later file overrides the earlier; **exported shell variables override
 
 ```
 src/model      LiveEvent union, GameChange schema, game-state reducer, content hash
-src/providers  Sportradar HTTP, URL resolvers (prod | simulation), Zod schemas, push client (push-client.ts), fake provider + push mock
+src/providers  Sportradar HTTP, URL resolvers (prod | simulation | demo), Zod schemas, push client (push-client.ts), fake provider + push mock, demo host (demo-host.ts: the replay rotation), destination guard (destination-guard.ts)
 src/leagues    LeagueAdapter interface + wnba / ncaawb / unrivaled adapters
-src/ingest     freshness, apply-changes, scheduler, trial-mode, game-watcher, push-ingest, backfill, retention, identity
+src/ingest     freshness, apply-changes, scheduler, trial-mode, game-watcher, push-ingest, backfill, retention, identity, reference, seed-manifest, worker-runtime (lock + publisher + senders + scheduler loop, shared by worker and demo), environment (ingest.environment marker checks), demo-init, demo-purge
 src/live       LiveTransport interface, Supabase Broadcast transport, outbox publisher + admin, pulse, scoreboard
 src/api        Hono routes: snapshot, changes, players, health (alerts)
-src/bin        worker, api, sim, subscribe, trial, outbox, retention, health CLIs
+src/contracts  the client contract: registry of the Zod schemas the app decodes + the Swift emitter (`pnpm gen:swift`)
+generated/     Swift output of gen:swift, committed; synced into the Wehoop repo (WehoopKit/Sources/Contracts/Generated)
+src/bin        worker, api, sim, subscribe, trial, outbox, retention, health, gen-swift, seed-dev, golden, demo CLIs
 supabase/      config + SQL migrations (the only schema source of truth)
 fixtures/      recorded provider payloads, committed
 test/          unit (vitest) and integration (needs supabase start) + invariants.sql

@@ -7,6 +7,7 @@ import {
 } from '../../ingest/quota-guard.js';
 import type { LeagueCode } from '../../leagues/codes.js';
 import type { Logger } from '../../logger.js';
+import { assertDestination, redirectPolicy } from './destination-guard.js';
 import { claimSlot, type RateLimiter, SlotClaimTimeoutError } from './rate-limiter.js';
 import {
   type PushClockMessage,
@@ -126,6 +127,11 @@ export interface PushStreamDeps {
   sleep?: (ms: number) => Promise<void>;
   /** The database clock (tests stub it); default `select now()` when the stream has a database. */
   dbNow?: () => Promise<Date>;
+  /**
+   * Demo mode (rev 4.15): the only origin the stream may connect to. Defaults to the process-wide
+   * lock (`lockDestination`); unset outside demo mode.
+   */
+  allowedOrigin?: string;
 }
 
 /**
@@ -161,6 +167,12 @@ export class PushStream {
   readonly state: PushStreamState;
   private stopped = false;
   private controller: AbortController | null = null;
+  /**
+   * The open connection's body reader. `stop()` cancels it directly: on Node 22 (the Fly image and
+   * CI) aborting the request did not end a body read already in progress, so a stopped stream kept
+   * reading heartbeats and its watch never ended (2026-11-14; Node 25 ended it).
+   */
+  private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private watchdog: NodeJS.Timeout | null = null;
   private wakeBackoff: (() => void) | null = null;
   private consecutiveFailures = 0;
@@ -181,6 +193,13 @@ export class PushStream {
         'rate-limited sources must claim slots from ingest.provider_rate_slots (rateLimiterFor(product, { db }))',
       );
     }
+    // Refused at construction, before any I/O (the watch fails instead of a stream retrying a
+    // destination it may never use); loop() checks again before its first claim.
+    assertDestination(
+      deps.resolver.resolvePush(deps.feed, deps.params ?? {}).url,
+      deps.log,
+      deps.allowedOrigin,
+    );
     this.product = deps.product ?? deps.league;
     this.state = {
       feed: deps.feed,
@@ -227,7 +246,10 @@ export class PushStream {
   async stop(): Promise<void> {
     this.stopped = true;
     this.clearWatchdog();
-    this.controller?.abort(new Error('push stream stopped'));
+    const reason = new Error('push stream stopped');
+    this.controller?.abort(reason);
+    // Cancelling the reader settles a pending read at once, whatever the fetch abort does.
+    this.reader?.cancel(reason).catch(() => undefined);
     this.wakeBackoff?.();
     await this.running;
     await Promise.allSettled(this.hooks);
@@ -245,13 +267,24 @@ export class PushStream {
     this.watchdog = setTimeout(() => {
       this.state.watchdogTrips++;
       this.deps.log.warn({ feed: this.deps.feed, watchdogMs: ms }, 'push watchdog: no bytes');
-      controller.abort(new Error(`push watchdog: no bytes for ${ms} ms`));
+      const reason = new Error(`push watchdog: no bytes for ${ms} ms`);
+      controller.abort(reason);
+      // The abort alone may not end a body read on Node 22 (see `reader`).
+      if (this.reader && this.controller === controller)
+        this.reader.cancel(reason).catch(() => undefined);
     }, ms);
   }
 
   private async loop(): Promise<void> {
     const { log, feed } = this.deps;
     const { url, headers } = this.deps.resolver.resolvePush(feed, this.deps.params ?? {});
+    try {
+      assertDestination(url, log, this.deps.allowedOrigin);
+    } catch (err) {
+      this.state.lastError = (err as Error).message.slice(0, 500);
+      this.setStatus('stopped');
+      return;
+    }
     const source = this.deps.resolver.source;
     const limited = needsRateLimit(source);
     const fetchImpl = this.deps.fetchImpl ?? fetch;
@@ -270,6 +303,7 @@ export class PushStream {
       this.setStatus('connecting');
       const controller = new AbortController();
       this.controller = controller;
+      this.reader = null;
       let callId: number | null = null;
       let status = 0;
       let bytesThisConnection = 0;
@@ -302,6 +336,7 @@ export class PushStream {
         const res = await fetchImpl(url, {
           headers: { accept: 'application/json', ...headers },
           signal: controller.signal,
+          ...redirectPolicy(this.deps.allowedOrigin),
         });
         status = res.status;
         // Only a reconnect needs the moment (one database round trip per reconnect).
@@ -354,7 +389,15 @@ export class PushStream {
         this.resetWatchdog(controller);
         const decoder = new TextDecoder();
         let buffer = '';
-        for await (const chunk of res.body) {
+        const reader = res.body.getReader();
+        this.reader = reader;
+        // stop() may have run while the response was arriving: it could not cancel this reader yet.
+        if (this.stopped)
+          await reader.cancel(new Error('push stream stopped')).catch(() => undefined);
+        for (;;) {
+          const { done, value: chunk } = await reader.read();
+          // A cancelled reader reports done; a stopped stream reads nothing more either way.
+          if (done || this.stopped) break;
           const receivedAt = new Date(this.now());
           bytesThisConnection += chunk.byteLength;
           this.state.bytes += chunk.byteLength;
@@ -381,6 +424,9 @@ export class PushStream {
             nl = buffer.indexOf('\n');
           }
         }
+        // A read ended by the watchdog's cancel reports the watchdog, not an orderly end.
+        if (controller.signal.aborted) throw controller.signal.reason;
+        if (this.stopped) break;
         const tail = buffer + decoder.decode();
         if (tail.trim()) await this.handleLine(tail, new Date(this.now()));
         throw new Error(`sportradar ${feed}: stream ended`);

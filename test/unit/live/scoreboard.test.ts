@@ -23,6 +23,7 @@ const game = (
   clock: '5:00',
   latestSeq: home,
   observedAt: changedAt.toISOString(),
+  replay: null,
   changedAt,
 });
 
@@ -69,6 +70,7 @@ describe('ScoreboardSender (league:{code}:scores)', () => {
       clock: '5:00',
       latestSeq: 10,
       observedAt: new Date(T0.getTime() + 1000).toISOString(),
+      replay: null,
     });
     expect(ScoreboardSchema.parse(ncaawb?.message.payload).deltas.map((d) => d.gameId)).toEqual([
       G3,

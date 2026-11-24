@@ -60,6 +60,8 @@ export function composePreflight(input: PreflightInput): PreflightReport {
   const pairing = stackPairing(config.supabase.url, config.db.url);
   if (pairing !== null) problems.push(pairing);
   if (config.mode === 'sim') problems.push('MODE=sim: a live run needs MODE=trial (or production)');
+  if (config.mode === 'demo')
+    problems.push('MODE=demo: the demo environment is not a live run (`pnpm demo run`)');
   const present: LeagueCode[] = [];
   for (const league of LEAGUE_CODES) {
     const has = config.sportradar.keys[league] !== undefined;

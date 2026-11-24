@@ -318,13 +318,15 @@ export class QuotaGuard {
   async reservations(opts: { product?: string; openOnly?: boolean } = {}): Promise<Reservation[]> {
     const db = this.deps.db;
     const rows = await db<ReservationRow[]>`
-      select id::text, product, game_id as "gameId", profile, reserved_calls as "reservedCalls",
-               used_calls as "usedCalls", source::text as source, run_id::text as "runId",
-               created_at as "createdAt", released_at as "releasedAt"
-      from ingest.budget_reservations
-      where ${opts.product ? db`product = ${opts.product}` : db`true`}
-        and ${opts.openOnly ? db`released_at is null` : db`true`}
-      order by id`;
+      select b.id::text, b.product, b.game_id as "gameId", b.profile,
+             b.reserved_calls as "reservedCalls", b.used_calls as "usedCalls",
+             b.source::text as source, b.run_id::text as "runId",
+             b.created_at as "createdAt", b.released_at as "releasedAt"
+      from ingest.budget_reservations b
+      where ${opts.product ? db`b.product = ${opts.product}` : db`true`}
+        and ${opts.openOnly ? db`b.released_at is null` : db`true`}
+      -- b.id, the bigint: a bare "order by id" would sort the text output column ('10' < '9').
+      order by b.id`;
     return rows.map(toReservation);
   }
 }

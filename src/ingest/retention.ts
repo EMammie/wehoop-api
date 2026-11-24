@@ -12,7 +12,8 @@ import type { Logger } from '../logger.js';
  * client re-snapshots; `last_seq` never moves, so a later correction on the
  * closed game continues the same sequence.
  *
- * THIS IS THE ONLY CODE ALLOWED TO DELETE game_changes ROWS. The database
+ * THIS AND `pnpm demo purge` (demo-purge.ts, plan rev 4.15 (5): closed replay games of a demo
+ * database, whole) ARE THE ONLY CODE ALLOWED TO DELETE game_changes ROWS. The database
  * enforces it: `game_changes_append_only` (0001) refuses any UPDATE and any
  * DELETE of a row at or above `games.retained_from_seq`, so the floor must be
  * moved first, inside the same transaction, under the game row lock.
