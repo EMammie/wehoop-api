@@ -36,7 +36,7 @@ import { createLogger } from '../logger.js';
  *   games with coverage and its client label, the profile each defaults to, and
  *   its computed budget. MODE=trial|production only.
  * pnpm trial watch --league ncaawb --game <uuid|providerId> [--profile full|extended|lean-full]
- *     [--note "..."] [--speed N] [--dry-run] [--mode sim --recording <id>]
+ *     [--note "..."] [--speed N] [--dry-run] [--mode sim --recording <id>] [--push]
  *   Computes the profile budget from the cadence constants, reserves it
  *   (refused when remaining - reserved < reserve), then watches the game at
  *   that cadence through the worker (lock, outbox publisher, pulses). The
@@ -88,6 +88,7 @@ async function main() {
       reserve: { type: 'string' },
       reservation: { type: 'string' },
       stale: { type: 'boolean', default: false },
+      push: { type: 'boolean', default: false },
     },
     allowPositionals: true,
     strict: true,
@@ -206,9 +207,13 @@ async function main() {
           process.exit(66);
         }
         const source = config.mode === 'sim' ? 'simulation' : config.mode;
-        const plan = planWatch(adapter, source, game.coverage, profile);
+        if (args.push && config.mode === 'sim')
+          usage(
+            '--push needs a production-shaped host; the simulation service has no push streams',
+          );
+        const plan = planWatch(adapter, source, game.coverage, profile, args.push);
         console.log(
-          `game ${game.id} (${game.providerGameId}) status=${game.status} coverage=${game.coverage}: profile ${plan.profile}, budget ${plan.budget.total} calls (pbp ${plan.budget.pbp}, summary ${plan.budget.summary}, boxscore ${plan.budget.boxscore}, after complete ${plan.budget.afterComplete}, closing ${plan.budget.closing}, retries ${plan.budget.retries})`,
+          `game ${game.id} (${game.providerGameId}) status=${game.status} coverage=${game.coverage}: profile ${plan.profile}${args.push ? ' + push streams (REST reconciliation every 5 min)' : ''}, budget ${plan.budget.total} calls (pbp ${plan.budget.pbp}, summary ${plan.budget.summary}, boxscore ${plan.budget.boxscore}, after complete ${plan.budget.afterComplete}, closing ${plan.budget.closing}, retries ${plan.budget.retries}${args.push ? `, stream connections ${plan.budget.connections ?? 0}, backfills ${plan.budget.backfills ?? 0}` : ''})`,
         );
         const [q] = (await guard.status()).filter((s) => s.product === adapter.product);
         if (q) {
@@ -231,6 +236,7 @@ async function main() {
           String(speed),
           ...(args.note ? ['--note', args.note] : []),
           ...(args.recording ? ['--recording', args.recording] : []),
+          ...(args.push ? ['--push'] : []),
         ]);
         process.exit(code);
         break;

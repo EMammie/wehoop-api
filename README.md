@@ -2,7 +2,7 @@
 
 Backend for **Wehoop**, a live stats app for women's basketball: WNBA, NCAA Women's Basketball, and Unrivaled, on Sportradar data. Built in public, one milestone at a time, with Claude Code agents doing implementation, review, and evidence-based validation. The devlog lives in [`devlog/`](devlog/).
 
-**Status:** M0 scaffold. See [`docs/MILESTONE.md`](docs/MILESTONE.md) and the full plan in [`docs/PLAN.md`](docs/PLAN.md).
+**Status:** M0–M3 done (tag `m3`). M4 (push, deploy, hosted review) is code-complete and validated on the dev stack; the Fly deploy and the hosted review wait on the owner. M5 (the iOS rebuild, in the Wehoop repo) is in progress. See [`docs/MILESTONE.md`](docs/MILESTONE.md) and the full plan in [`docs/PLAN.md`](docs/PLAN.md).
 
 ## What it does (when finished)
 

@@ -1,5 +1,5 @@
 import type { LeagueCapabilities } from '../leagues/adapter.js';
-import type { GameFeed } from '../providers/sportradar/urls.js';
+import type { GameFeed, PushFeed } from '../providers/sportradar/urls.js';
 import type { RunSource } from './runs.js';
 
 /**
@@ -84,6 +84,21 @@ const AFTER_COMPLETE = {
 const PRE_GAME_MS = 5 * MIN;
 
 /**
+ * The budgeted complete -> closed wait (rev 4.12 (3): 120 min), exported for the scheduler: a
+ * game stored as `complete` is (re)watched until at least this long after it BECAME complete
+ * (`completeRewatchUntil` in scheduler.ts).
+ */
+export const COMPLETE_CLOSE_WAIT_MS = AFTER_COMPLETE.closeWaitMs;
+
+/**
+ * The scheduled-time floor of the same bound: a game stored as `complete` is (re)watched at least
+ * until its scheduled tip-off plus the planning horizon plus the budgeted wait (150 + 120 = 270
+ * min), even when the moment it became complete is unknown. A late tip-off or overtime pushes
+ * the end of the wait past this, which is why the scheduler also anchors on that moment.
+ */
+export const COMPLETE_REWATCH_MS = GAME_HORIZON_MS + COMPLETE_CLOSE_WAIT_MS;
+
+/**
  * Plan §4: full = pbp/30 s + box-score statistics/5 min; extended = summary/60 s
  * + 1 boxscore at +120 min; lean-full = pbp/60 s + statistics/10 min.
  * In Sportradar v8 the team and player statistics live in the Game Summary
@@ -149,6 +164,82 @@ export const SIM_CADENCE: { full: Cadence; scoreOnly: Cadence } = {
   },
 };
 
+/**
+ * Push mode (plan §4 "prod push = events + statistics (+ clock WNBA) + REST
+ * pbp/5 min reconciliation"): the stream carries every event (and the WNBA
+ * clock); REST reconciles the full pbp every 5 minutes and fetches the
+ * statistics (summary) every 5 minutes, plus the closing pair. Push statistics
+ * are not consumed yet (no recorded sample pins their shape), so statistics
+ * stay on the summary feed. This cadence's budget (`budgetFor`) is REST only; a push watch's
+ * reservation adds two allowances on top (`pushAllowances`): every stream connection attempt is a
+ * counted call (PUSH_CONNECTION_ALLOWANCE), and every reconnect of the events stream may cost one
+ * backfill pbp (PUSH_BACKFILL_ALLOWANCE). The rev 4.12 pre-game and after-complete rules and the
+ * rev 4.13 retry allowance apply as for the polling profiles.
+ *
+ * Backfills: during the post-`complete` wait the pbp is paused, so no applied pbp of the
+ * generation is ever newer than a reconnect (`backfillNeeded`) and every events-stream reconnect
+ * (never a clock-stream one) triggers a backfill. Its calls go through the shared rate slot and
+ * the quota guard, are logged in `ingest.provider_calls` and counted in the reservation's
+ * `used_calls`, and the backfill allowance sizes the reservation for one pbp per possible
+ * reconnect. A backfill's 429 retry (at most one) has no term of its own: it draws on the same
+ * reservation as the 6-call retry allowance (which the retry report, `meta.retries`, counts for
+ * the cadence loop only).
+ */
+export const PUSH_RECONCILE_CADENCE: Cadence = {
+  pbpMs: 5 * MIN,
+  summaryMs: 5 * MIN,
+  boxscoreMs: null,
+  boxscoreAtMs: [],
+  horizonMs: GAME_HORIZON_MS,
+  // Rev 4.12 (2), as for every pbp profile: the summary alone polls after `complete` and the pbp
+  // pauses, so the closing set is pbp, summary, boxscore minus the feed that reported `closed`
+  // (the closing pbp carries plays corrected during the wait). Two closing calls either way.
+  closing: PBP_CLOSING,
+  // Rev 4.9: the reconciliation pbp and summary share a 5-min grid, so the summary sits half
+  // an interval off it; the after-complete pace (5 min) equals the reconciliation pace, so
+  // only the budgeted complete -> closed wait and the retry allowance change the total.
+  summaryOffsetMs: 150_000,
+  // Rev 4.12 (1): before play, the pbp alone every 5 min (the summary pauses on its grid).
+  preGameMs: PRE_GAME_MS,
+  preGameFeeds: ['pbp'],
+  ...AFTER_COMPLETE,
+};
+
+/** Stream connection attempts (events + clock, incl. reconnects) reserved on top of the REST budget. */
+export const PUSH_CONNECTION_ALLOWANCE = 20;
+
+/** The push streams a watch opens for a league: events, plus the clock where the league has one. */
+export function pushFeedsFor(capabilities: Pick<LeagueCapabilities, 'pushClock'>): PushFeed[] {
+  return ['push_events', ...(capabilities.pushClock ? (['push_clock'] as const) : [])];
+}
+
+/**
+ * Backfill pbp calls a push watch reserves (owner decision 2026-11-05): the minimum that always
+ * covers one per possible events-stream reconnect, PUSH_CONNECTION_ALLOWANCE - 1 = 19, whatever
+ * streams the watch opens. Only an events reconnect triggers a backfill, and a stream's first
+ * successful connection is not a reconnect, so at most the events stream's own attempts minus one
+ * can. Those attempts are not bounded by 20 - streams: an attempt whose slot claim times out
+ * before anything is sent is refunded (push-client.ts), so a clock stream whose every attempt was
+ * refunded nets zero and leaves all 20 attempts, and 19 reconnects, to the events stream.
+ */
+export const PUSH_BACKFILL_ALLOWANCE = PUSH_CONNECTION_ALLOWANCE - 1;
+
+/** What a push watch reserves on top of the REST budget: connection attempts and backfills. */
+export function pushAllowances(): { connections: number; backfills: number } {
+  return { connections: PUSH_CONNECTION_ALLOWANCE, backfills: PUSH_BACKFILL_ALLOWANCE };
+}
+
+/** The push cadence for a game, or why it cannot be pushed (no push capability, no play-by-play coverage). */
+export function pushCadenceFor(capabilities: LeagueCapabilities, coverage: string | null): Cadence {
+  if (!capabilities.pushEvents) throw new Error('this league has no push events feed');
+  if (!coverageIsFull(coverage)) {
+    throw new Error(
+      `push mode needs full coverage (play-by-play); coverage ${coverage ?? 'unknown'} carries none`,
+    );
+  }
+  return PUSH_RECONCILE_CADENCE;
+}
+
 export interface Budget {
   pbp: number;
   summary: number;
@@ -158,6 +249,10 @@ export interface Budget {
   closing: number;
   /** Budgeted retries: cadence 429s and closing-set failures (`retryAllowance`). */
   retries: number;
+  /** Push watch only: stream connection attempts (PUSH_CONNECTION_ALLOWANCE). */
+  connections?: number;
+  /** Push watch only: backfill pbp calls, one per possible events reconnect (PUSH_BACKFILL_ALLOWANCE). */
+  backfills?: number;
   total: number;
 }
 
@@ -234,7 +329,10 @@ export function cadenceFor(args: {
   capabilities: LeagueCapabilities;
   coverage: string | null;
   profile?: TrialProfile;
+  /** Opt-in push mode (M4): REST becomes the 5-minute reconciliation. Default off. */
+  push?: boolean;
 }): Cadence {
+  if (args.push) return pushCadenceFor(args.capabilities, args.coverage);
   const full = coverageIsFull(args.coverage);
   if (args.source === 'simulation' || args.source === 'fixture') {
     return full ? SIM_CADENCE.full : SIM_CADENCE.scoreOnly;

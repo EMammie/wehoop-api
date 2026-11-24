@@ -5,12 +5,15 @@ import type { QuotaGuard } from '../../../src/ingest/quota-guard.js';
 import { seasonFor } from '../../../src/ingest/season.js';
 import {
   assertSpeedAllowed,
+  backfillNeeded,
   lagFromRecord,
   logRetryReport,
+  planWatch,
   retryReport,
   runTrialWatch,
 } from '../../../src/ingest/trial-mode.js';
 import { ncaawbAdapter } from '../../../src/leagues/ncaawb/adapter.js';
+import { wnbaAdapter } from '../../../src/leagues/wnba/adapter.js';
 import { createLogger, type Logger } from '../../../src/logger.js';
 
 const base = {
@@ -41,7 +44,7 @@ describe('assertSpeedAllowed (--speed only against a rehearsal host)', () => {
 });
 
 describe('runTrialWatch refuses games that will not be played under their id', () => {
-  it('postponed, cancelled and unnecessary are refused before any reservation or call', async () => {
+  it('postponed, cancelled and unnecessary are refused before any reservation or call, with and without push', async () => {
     // Nothing may be touched: a database or guard access would throw on these empty stand-ins.
     const untouchable = new Proxy(
       {},
@@ -68,11 +71,13 @@ describe('runTrialWatch refuses games that will not be played under their id', (
         coverage: 'full',
         scheduledAt: new Date('2026-11-08T17:00:00Z'),
       };
-      await expect(runTrialWatch(deps, { game })).rejects.toThrow(
-        new RegExp(
-          `is ${status}; nothing to watch.*new id, which is planned and watched as a new game.*cannot be followed automatically.*pnpm game rebuild.*not built yet`,
-        ),
-      );
+      for (const push of [false, true]) {
+        await expect(runTrialWatch(deps, { game, push })).rejects.toThrow(
+          new RegExp(
+            `is ${status}; nothing to watch.*new id, which is planned and watched as a new game.*cannot be followed automatically.*pnpm game rebuild.*not built yet`,
+          ),
+        );
+      }
     }
   });
 });
@@ -262,5 +267,46 @@ describe('lagFromRecord (pnpm subscribe --record -> pnpm trial lag)', () => {
       excluded: 1,
       notBroadcast: 0,
     });
+  });
+});
+
+describe('backfillNeeded (push reconnect -> REST pbp backfill?)', () => {
+  const reconnectedAt = new Date('2026-10-18T20:00:00Z');
+  const at = (secBefore: number) => new Date(reconnectedAt.getTime() - secBefore * 1000);
+  it('no pbp of this generation yet: backfill', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: null, reconnectedAt })).toBe(true);
+  });
+  it('a pbp requested before the reconnect misses the tail of the outage: backfill, even one fetched during the outage', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: at(45), reconnectedAt })).toBe(true); // 45 s before a 30 s outage ended
+    expect(backfillNeeded({ lastPbpCalledAt: at(4.8), reconnectedAt })).toBe(true); // the validator's gap: 4.8 s before reconnect
+    expect(backfillNeeded({ lastPbpCalledAt: at(0.001), reconnectedAt })).toBe(true);
+  });
+  it('a pbp requested at or after the reconnect covers everything the stream will not replay: skip', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: reconnectedAt, reconnectedAt })).toBe(false);
+    expect(backfillNeeded({ lastPbpCalledAt: at(-2), reconnectedAt })).toBe(false);
+  });
+  it('a reconnect moment that could not be read on the database clock: always backfill', () => {
+    expect(backfillNeeded({ lastPbpCalledAt: at(-2), reconnectedAt: null })).toBe(true);
+    expect(backfillNeeded({ lastPbpCalledAt: null, reconnectedAt: null })).toBe(true);
+  });
+});
+
+describe('planWatch push budget: REST reconciliation + connection allowance + backfill allowance', () => {
+  it('94 + 20 + 19 = 133 for WNBA (events + clock) and an events-only league alike; polling is unchanged', () => {
+    const wnba = planWatch(wnbaAdapter, 'trial', 'full', 'full', true);
+    expect(wnba.budget).toMatchObject({ connections: 20, backfills: 19, total: 133 });
+    const eventsOnly = {
+      ...wnbaAdapter,
+      capabilities: { ...wnbaAdapter.capabilities, pushClock: false },
+    };
+    expect(planWatch(eventsOnly, 'trial', 'full', 'full', true).budget).toMatchObject({
+      connections: 20,
+      backfills: 19,
+      total: 133,
+    });
+    const polling = planWatch(wnbaAdapter, 'trial', 'full', 'full', false).budget;
+    expect(polling.total).toBe(364);
+    expect(polling.connections).toBeUndefined();
+    expect(polling.backfills).toBeUndefined();
   });
 });

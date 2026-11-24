@@ -16,6 +16,13 @@ export const REFERENCE_FEEDS = [
 ] as const;
 export const FEEDS = [...GAME_FEEDS, ...REFERENCE_FEEDS] as const;
 export type Feed = (typeof FEEDS)[number];
+/**
+ * Push (streaming) feeds, M4. Kept out of `FEEDS` on purpose: they are never
+ * recorded as documents and never go through `SportradarHttp.getJson`; the
+ * push client opens them with `resolvePush`.
+ */
+export const PUSH_FEEDS = ['push_events', 'push_clock', 'push_statistics'] as const;
+export type PushFeed = (typeof PUSH_FEEDS)[number];
 export type GameFeed = (typeof GAME_FEEDS)[number];
 export type ReferenceFeed = (typeof REFERENCE_FEEDS)[number];
 
@@ -32,6 +39,12 @@ export interface FeedParams {
   tournamentId?: string;
   playerId?: string;
   teamId?: string;
+}
+
+/** Parameters of a push subscription. */
+export interface PushParams {
+  /** Filter the stream to one game (`match=sd:match:<provider game id>`); omit for every live game. */
+  providerGameId?: string;
 }
 
 export interface ResolvedUrl {
@@ -55,6 +68,12 @@ export type ResolverSource = 'production' | 'trial' | 'rehearsal' | 'simulation'
 export interface UrlResolver {
   readonly source: ResolverSource;
   resolve(feed: Feed, params: FeedParams): ResolvedUrl;
+}
+
+/** A resolver that can also open the push streams (production / trial / rehearsal hosts only). */
+export interface PushUrlResolver {
+  readonly source: ResolverSource;
+  resolvePush(feed: PushFeed, params: PushParams): ResolvedUrl;
 }
 
 /**
@@ -98,7 +117,7 @@ export class SimulationUrlResolver implements UrlResolver {
  */
 export const SPORTRADAR_DEFAULT_BASE_URL = 'https://api.sportradar.com';
 
-export class ProdUrlResolver implements UrlResolver {
+export class ProdUrlResolver implements UrlResolver, PushUrlResolver {
   /** `trial`/`production` against the real host; `rehearsal` when `baseUrl` is a local stand-in. */
   readonly source: 'production' | 'trial' | 'rehearsal';
   readonly league: LeagueCode;
@@ -193,6 +212,22 @@ export class ProdUrlResolver implements UrlResolver {
         break;
     }
     return { url: `${root}${path}`, headers: { 'x-api-key': this.apiKey } };
+  }
+
+  /**
+   * Push streams (public v8 docs, verified 2026-10-18 on the WNBA push-events /
+   * push-clock / push-statistics reference pages):
+   * `https://api.sportradar.com/{league}/{access}/stream/en/{events|clock|statistics}/subscribe`
+   * with an optional `match=sd:match:{game id}` filter. No `v8` segment, same
+   * `x-api-key` header as every other call.
+   */
+  resolvePush(feed: PushFeed, params: PushParams = {}): ResolvedUrl {
+    const kind = feed === 'push_events' ? 'events' : feed === 'push_clock' ? 'clock' : 'statistics';
+    const u = new URL(
+      `${this.baseUrl}/${this.league}/${this.accessLevel}/stream/en/${kind}/subscribe`,
+    );
+    if (params.providerGameId) u.searchParams.set('match', `sd:match:${params.providerGameId}`);
+    return { url: u.toString(), headers: { 'x-api-key': this.apiKey } };
   }
 }
 

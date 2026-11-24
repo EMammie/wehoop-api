@@ -28,7 +28,10 @@
     "build": "tsc -p tsconfig.json --outDir dist",
     "release:tag": "tsx src/bin/release-tag.ts",
     "supabase": "supabase",
-    "dump-game": "tsx src/bin/dump-game.ts"
+    "dump-game": "tsx src/bin/dump-game.ts",
+    "outbox": "tsx src/bin/outbox.ts",
+    "retention": "tsx src/bin/retention.ts",
+    "health": "tsx src/bin/health.ts"
   },
   "author": "EMammie",
   "license": "MIT",

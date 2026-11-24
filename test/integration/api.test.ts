@@ -126,7 +126,10 @@ describe('GET /v1/games/:id/snapshot and /changes', () => {
     const { gameId } = await seedGame(db, nd);
     const run = await replayRun(db, gameId);
     await apply(deps, gameId, nd, observation(run, nd, T0));
+    // What the retention job does (src/ingest/retention.ts): floor first, then the rows below it
+    // (outbox rows cascade through the composite FK); invariant game_changes_never_below_retention_floor.
     await db`update public.games set retained_from_seq = 5 where id = ${gameId}`;
+    await db`delete from public.game_changes where game_id = ${gameId} and seq < 5`;
     const page = ChangesPageSchema.parse((await get(`/v1/games/${gameId}/changes?after=0`)).json);
     expect(page).toMatchObject({ changes: [], retainedFrom: 5, hasMore: false });
     const ok = ChangesPageSchema.parse(
